@@ -30,6 +30,7 @@ import {
   dedupeHits,
   peakAbs,
   computePeaks,
+  computePeaksInRange,
 } from "../js/dsp.js";
 import { encodeWav, parseWav, parseAiff } from "../js/audio-codec.js";
 
@@ -290,6 +291,18 @@ test("computePeaks: one bin per block, each holding that block's max-abs sample"
 test("computePeaks: handles an empty signal and a zero bin count without throwing", () => {
   assert.equal(computePeaks(new Float32Array(0), 10).length, 10);
   assert.equal(computePeaks(new Float32Array(100), 0).length, 0);
+});
+
+test("computePeaksInRange: matches computePeaks over the full array, and isolates a sub-range", () => {
+  const mono = new Float32Array([0.1, 0.2, -0.9, 0.3, 0.4, 0.5, -0.05, 0.05]);
+  const full = computePeaksInRange(mono, 0, mono.length, 4);
+  const viaComputePeaks = computePeaks(mono, 4);
+  assert.deepEqual(Array.from(full), Array.from(viaComputePeaks));
+
+  // A sub-range covering just [0.3, 0.4, 0.5, -0.05] (indices 3..6) should never see the 0.9 peak.
+  const sub = computePeaksInRange(mono, 3, 7, 2);
+  assert.ok(Math.abs(sub[0] - 0.4) < 1e-6);
+  assert.ok(Math.abs(sub[1] - 0.5) < 1e-6);
 });
 
 // --- zero-crossing / fades -------------------------------------------------

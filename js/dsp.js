@@ -1,7 +1,7 @@
 // dsp.js
 //
 // Pure signal-analysis functions used to find chop boundaries.
-// Nothing in this file touches the DOM, the Web Audio API, or fetch/File —
+// Nothing in this file touches the DOM, the Web Audio API, or fetch/File -
 // everything operates on plain Float32Array sample data and numbers, so it
 // can be unit-tested in Node as easily as it runs in the browser.
 //
@@ -61,7 +61,7 @@ export function linToDb(v) {
  * every recording in the library.
  */
 export function estimateNoiseFloorDb(vals, percentile = 0.10) {
-  // Deliberately does NOT exclude true digital silence (-180dB) — some
+  // Deliberately does NOT exclude true digital silence (-180dB) - some
   // sources have exact-zero gaps between phrases, and those samples are
   // exactly what should anchor the floor estimate low enough that real
   // playing (at any reasonable level) still reads as "loud".
@@ -269,7 +269,7 @@ export function snapToBeatGrid(t, bpm, gridStart, tolerance) {
 /**
  * Break-sized drum phrase detection. Walks the file in ~preferred-length
  * chunks, choosing each boundary from a nearby detected onset (falling back
- * to the lowest-energy point), then — when a confident tempo is supplied —
+ * to the lowest-energy point), then - when a confident tempo is supplied -
  * snapping that boundary onto the beat grid so the chop is loop-ready.
  */
 export function drumRegions(mono, sampleRate, p, bpm = null) {
@@ -365,7 +365,7 @@ export function applyFades(channels, fadeInSamples, fadeOutSamples) {
 }
 
 // ---------------------------------------------------------------------------
-// Resampling (analysis only — export always uses full-resolution audio)
+// Resampling (analysis only - export always uses full-resolution audio)
 // ---------------------------------------------------------------------------
 
 /** Downmix any number of channels to mono by averaging. */
@@ -403,13 +403,27 @@ export function resampleLinear(mono, fromRate, toRate) {
 
 /** Downsample mono audio to `binCount` peak (max-abs) values in [0,1], for drawing a waveform. */
 export function computePeaks(mono, binCount) {
+  return computePeaksInRange(mono, 0, mono.length, binCount);
+}
+
+/**
+ * Same as computePeaks, but over an arbitrary [startSample, endSample) slice
+ * of the array instead of the whole thing - used to redraw just the visible
+ * window at full detail when the manual chop editor is zoomed in, without
+ * having to hold a second high-resolution copy of the audio around.
+ */
+export function computePeaksInRange(mono, startSample, endSample, binCount) {
   const n = mono.length;
   const out = new Float32Array(binCount);
   if (n === 0 || binCount <= 0) return out;
-  const binSize = n / binCount;
+  const s0 = Math.max(0, Math.min(n, Math.floor(startSample)));
+  const s1 = Math.max(s0, Math.min(n, Math.ceil(endSample)));
+  const span = s1 - s0;
+  if (span <= 0) return out;
+  const binSize = span / binCount;
   for (let b = 0; b < binCount; b++) {
-    const start = Math.floor(b * binSize);
-    const end = b === binCount - 1 ? n : Math.max(start + 1, Math.floor((b + 1) * binSize));
+    const start = s0 + Math.floor(b * binSize);
+    const end = b === binCount - 1 ? s1 : Math.max(start + 1, s0 + Math.floor((b + 1) * binSize));
     let peak = 0;
     for (let i = start; i < end; i++) {
       const v = Math.abs(mono[i]);
@@ -426,7 +440,7 @@ export function computePeaks(mono, binCount) {
 
 /**
  * Strip characters that are unsafe in a file/folder name on any common OS,
- * collapse whitespace, and (if maxLen is given) truncate — some hardware
+ * collapse whitespace, and (if maxLen is given) truncate - some hardware
  * samplers have fairly tight filename length limits.
  */
 export function sanitizeForPath(str, maxLen) {
@@ -450,7 +464,7 @@ export function joinNameParts(parts, sep = " ") {
  * Build a short, plain-text key/tempo tag from a detected key/tempo result,
  * e.g. "C#m 120bpm" (sep=" ") or "C#m_120bpm" (sep="_"), "C 118bpm", "Cm", or
  * "" if nothing was detected. Deliberately has no brackets, commas, or space
- * between the number and "bpm" — some hardware samplers choke on punctuation
+ * between the number and "bpm" - some hardware samplers choke on punctuation
  * or have narrow name-length budgets, so the plainest form is the default.
  * Since key/tempo are detected once per source recording (not per chop),
  * this tag is meant to be combined once with the source name (see
@@ -543,7 +557,7 @@ export function bandEnergies(mono, sampleRate, startSample, endSample) {
 
 /**
  * Bucket a hit into a rough drum-voice label from its band-energy balance
- * and duration. Heuristic thresholds tuned by ear, not measurement — treat
+ * and duration. Heuristic thresholds tuned by ear, not measurement - treat
  * the labels as a starting sort, not ground truth.
  */
 export function classifyHit({ low, mid, high, durationSec }) {
@@ -562,7 +576,7 @@ export function classifyHit({ low, mid, high, durationSec }) {
 /**
  * From a set of onset times, find candidate one-shot windows: each hit runs
  * from its onset (minus a small pre-roll) until the envelope decays back to
- * the noise floor, the next onset arrives, or maxHitSec is reached —
+ * the noise floor, the next onset arrives, or maxHitSec is reached -
  * whichever comes first. Very short blips (below minHitSec) are dropped.
  */
 export function findOneShotWindows(mono, sampleRate, onsets, { minHitSec = 0.03, maxHitSec = 1.2, preRollSec = 0.003 } = {}) {

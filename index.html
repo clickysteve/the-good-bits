@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>The Good Bits — auto sample chopper</title>
+<title>The Good Bits - auto sample chopper</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -12,14 +12,14 @@
 <body>
 <!-- Runs immediately, as a classic (non-module) script, specifically so it
      still executes even when the page is opened the broken way (double-clicked
-     as a file:// URL) — Chrome refuses to load type="module" scripts, including
+     as a file:// URL) - Chrome refuses to load type="module" scripts, including
      the whole app, from file://, which otherwise fails completely silently. -->
 <script>
   if (location.protocol === "file:") {
     document.write(
       '<div style="background:#e2687a;color:#1a0d10;font:600 15px/1.5 -apple-system,sans-serif;' +
         'padding:1rem 1.5rem;text-align:center;">' +
-        "This page won't work opened directly as a file. Serve this folder over local HTTP instead — " +
+        "This page won't work opened directly as a file. Serve this folder over local HTTP instead - " +
         "run <code>python3 -m http.server 8000</code> (or <code>npx http-server .</code>) in this folder, " +
         "then open <code>http://localhost:8000</code>. See README.md for details." +
         "</div>"
@@ -29,7 +29,7 @@
 <header class="page-header">
   <p class="eyebrow">✦ automatic sample chopper</p>
   <h1>The Good Bits <span id="version-badge" class="version-badge"></span></h1>
-  <p class="subtitle">Finds candidate musical phrases and loop-ready drum breaks in long source recordings — a fast first-pass editor, not a final chopper. All processing happens locally in your browser; nothing is uploaded anywhere.</p>
+  <p class="subtitle">Finds candidate musical phrases and loop-ready drum breaks in long source recordings - a fast first-pass editor, not a final chopper. All processing happens locally in your browser; nothing is uploaded anywhere.</p>
 </header>
 
 <main>
@@ -44,7 +44,7 @@
       <div class="mode-card" data-mode="rhodes">
         <span class="mode-card-icon" aria-hidden="true">🎹</span>
         <h3>Rhodes</h3>
-        <p>Conservative — keeps whole chord progressions and passages together.</p>
+        <p>Conservative - keeps whole chord progressions and passages together.</p>
       </div>
       <div class="mode-card" data-mode="drums">
         <span class="mode-card-icon" aria-hidden="true">🥁</span>
@@ -62,7 +62,7 @@
       <label class="checkbox-label">
         <input id="one-shots-checkbox" type="checkbox" />
         Also pull out one-shot hits (kick / snare / hats / cymbals) into a separate <code>one shots/</code> folder
-        <span class="hint">Heuristic, not a trained classifier — treat labels as a sort, not ground truth.</span>
+        <span class="hint">Heuristic, not a trained classifier - treat labels as a sort, not ground truth.</span>
       </label>
     </div>
   </section>
@@ -87,31 +87,25 @@
   <section class="panel">
     <h2>3. Output naming</h2>
     <div class="naming-grid">
-      <div class="export-row">
-        <label for="naming-pattern-select">Chop file names</label>
-        <select id="naming-pattern-select">
-          <option value="number">Numbers only — 01.wav</option>
-          <option value="name-number">Source name + number</option>
-          <option value="name-tag-number">Source name + key/tempo + number</option>
-        </select>
+      <div class="export-row naming-pattern-row">
+        <label for="naming-pattern-input">Chop file name pattern</label>
+        <input id="naming-pattern-input" type="text" spellcheck="false" autocomplete="off" value="{number}" />
+        <span class="hint">Type your own using <code>{name}</code>, <code>{tag}</code> and <code>{number}</code> anywhere in the pattern. A number is always added even if you leave <code>{number}</code> out, so chops never overwrite each other.</span>
       </div>
       <div class="export-row">
-        <label for="naming-separator-select">Separator</label>
+        <label for="naming-separator-select">Key/tempo tag separator</label>
         <select id="naming-separator-select">
-          <option value=" ">Space — name C#m 120bpm</option>
-          <option value="_">Underscore — name_C#m_120bpm</option>
-          <option value="-">Hyphen — name-C#m-120bpm</option>
+          <option value=" ">Space - Cm 120bpm</option>
+          <option value="_">Underscore - Cm_120bpm</option>
+          <option value="-">Hyphen - Cm-120bpm</option>
         </select>
-      </div>
-      <div class="export-row">
-        <label for="naming-maxlen-input">Max name length <span id="naming-maxlen-value">48 chars</span></label>
-        <input id="naming-maxlen-input" type="range" min="16" max="96" step="1" value="48" />
       </div>
       <div class="export-row export-row--checkbox">
         <label><input id="naming-folder-tag-checkbox" type="checkbox" checked /> Tag the chops folder name with detected key/tempo</label>
       </div>
     </div>
-    <p class="naming-note">Key/tempo tags are always plain text — no brackets or commas — since some samplers limit both name length and punctuation.</p>
+    <p id="naming-preview" class="naming-preview" aria-live="polite"></p>
+    <p class="naming-note">Key/tempo tags are always plain text: no brackets or commas, since some samplers limit both name length and punctuation.</p>
   </section>
 
   <section class="panel">
@@ -179,12 +173,12 @@
         <label for="timestretch-character-select">Character</label>
         <select id="timestretch-character-select">
           <option value="clean">Clean</option>
-          <option value="vintage">Vintage — grainy, warbly, 90s sampler style</option>
-          <option value="glitch">Glitch — extreme, metallic, low-bit</option>
+          <option value="vintage">Vintage - grainy, warbly, 90s sampler style</option>
+          <option value="glitch">Glitch - extreme, metallic, low-bit</option>
         </select>
       </div>
     </div>
-    <p class="naming-note">Applies to the main chops only — one-shots and the wav/ copy of the original are untouched. In "Match a target tempo" mode, a file with no confident tempo detected exports unstretched.</p>
+    <p class="naming-note">Applies to the main chops only - one-shots and the wav/ copy of the original are untouched. In "Match a target tempo" mode, a file with no confident tempo detected exports unstretched.</p>
   </section>
 
   <section class="panel">
@@ -200,13 +194,13 @@
 </main>
 
 <footer class="page-footer">
-  <p>The Good Bits — runs entirely client-side. See README.md for setup, parameter notes, and format-support caveats.</p>
+  <p>The Good Bits - runs entirely client-side. See README.md for setup, parameter notes, and format-support caveats.</p>
 </footer>
 
-<!-- essentia.js (AGPL-3.0) — key & tempo detection. See README.md for licensing notes. -->
+<!-- essentia.js (AGPL-3.0) - key & tempo detection. See README.md for licensing notes. -->
 <script src="https://cdn.jsdelivr.net/npm/essentia.js@0.1.3/dist/essentia-wasm.web.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/essentia.js@0.1.3/dist/essentia.js-core.min.js"></script>
-<!-- JSZip (MIT) — used only when the File System Access API isn't available. -->
+<!-- JSZip (MIT) - used only when the File System Access API isn't available. -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
 <script type="module" src="js/app.js"></script>

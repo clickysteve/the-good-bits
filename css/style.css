@@ -501,10 +501,22 @@ input[type="text"]:hover {
 }
 
 /* .naming-grid sets its own display, which silently overrides the [hidden]
-   attribute otherwise — same trap as .drum-options above. #timestretch-options
+   attribute otherwise - same trap as .drum-options above. #timestretch-options
    reuses this class and is toggled via `hidden`, so it needs this override. */
 .naming-grid[hidden] {
   display: none;
+}
+
+.naming-preview {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--accent-2);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.8rem;
+  margin: 0 0 0.9rem;
+  overflow-wrap: break-word;
 }
 
 .naming-note {
@@ -529,8 +541,17 @@ input[type="text"]:hover {
 }
 
 .export-row input[type="range"],
+.export-row input[type="text"],
 .export-row select {
   width: 100%;
+}
+
+.naming-pattern-row {
+  grid-column: 1 / -1;
+}
+
+.naming-pattern-row input[type="text"] {
+  font-family: var(--font-mono);
 }
 
 .export-row--checkbox label {
@@ -626,7 +647,7 @@ input[type="text"]:hover {
 
 .waveform-canvas--editable {
   height: 84px;
-  cursor: pointer;
+  cursor: grab;
   touch-action: none;
   border: 1px solid var(--border-soft);
 }
@@ -638,9 +659,24 @@ input[type="text"]:hover {
 .result-file-header {
   display: flex;
   justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 0.7rem;
+}
+
+.result-file-title-group {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.result-file-header-actions {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 0.4rem;
-  margin-bottom: 0.7rem;
 }
 
 .result-file-name {
@@ -705,6 +741,27 @@ input[type="text"]:hover {
 
 .chop-editor-actions {
   margin-top: 0.1rem;
+}
+
+.editable-waveform {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.editable-waveform-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.editable-waveform-zoom-label {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
 }
 
 /* confirm dialog */

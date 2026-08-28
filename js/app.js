@@ -17,6 +17,7 @@ import {
   computeRmsEnvelope,
   pickOnsets,
   computePeaks,
+  computePeaksInRange,
 } from "./dsp.js";
 import { wsolaStretchChannels, ratioForTargetTempo } from "./timestretch.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
@@ -57,25 +58,37 @@ const params = {
   phrases: { silenceMarginDb: 18, minSilenceDuration: 0.32, mergeGap: 0.2, minLen: 0.8, maxLen: 18.0, preferred: 11.0, pad: 0.12 },
   rhodes: { silenceMarginDb: 10, minSilenceDuration: 0.5, mergeGap: 0.55, minLen: 1.8, maxLen: 20.0, preferred: 13.0, pad: 0.18 },
   // preferred/minLen/maxLen here are only the fallback used when a chop length in bars can't be
-  // computed (no confident tempo detected) — normally length comes from drumBars + detected BPM.
+  // computed (no confident tempo detected) - normally length comes from drumBars + detected BPM.
   drums: { preferred: 8.0, maxLen: 16.0, minLen: 3.0, onsetSensitivity: 0.65, snapToTempo: true },
 };
 const DEFAULT_PARAMS = JSON.parse(JSON.stringify(params));
 let autoParams = true; // when true, always use DEFAULT_PARAMS regardless of any manual edits below
 
 // Drum chop length in bars (assumes 4/4) and the one-shot-extraction toggle live outside the
-// Auto/manual params split — they're primary creative choices, not fine-tuning knobs.
+// Auto/manual params split - they're primary creative choices, not fine-tuning knobs.
 const BAR_OPTIONS = [1, 2, 3, 4, 6, 8, 16];
 let drumBars = 4;
 let extractOneShots = false;
 
 // Output naming: how the chops folder/filenames are built from the source name and the
 // detected key/tempo tag. Kept separate from params so it applies the same regardless of mode.
+// chopPattern is a typable template using {name}/{tag}/{number} tokens (see buildChopFileName) -
+// no fixed set of presets, so it can be typed exactly how a given sampler wants it named.
 const namingSettings = {
-  chopPattern: "number", // 'number' | 'name-number' | 'name-tag-number'
+  chopPattern: "{number}",
   includeFolderTag: true, // fold the key/tempo tag into the chops folder name (and wav/ copy)
-  separator: " ", // ' ' | '_' | '-'
-  maxLen: 48, // safety cap on generated name length, for samplers with tight limits
+  separator: " ", // ' ' | '_' | '-' - joins the key and tempo inside the auto-generated tag
+};
+
+// Internal safety cap on generated name length so a long source name + a long typed pattern can't
+// produce a pathological path. Not user-configurable - it's a backstop, not a setting to tune.
+const SAFE_NAME_LIMIT = 180;
+
+// Old chopPattern values from a settings blob saved before naming became a typable template.
+const LEGACY_PATTERN_MAP = {
+  number: "{number}",
+  "name-number": "{name} {number}",
+  "name-tag-number": "{name} {tag} {number}",
 };
 
 const exportSettings = { bitDepth: 24, fadeMs: 5, zcSearchMs: 15 };
@@ -151,10 +164,10 @@ const versionBadge = $("#version-badge");
 const drumOptions = $("#drum-options");
 const drumBarsSelect = $("#drum-bars-select");
 const oneShotsCheckbox = $("#one-shots-checkbox");
-const namingPatternSelect = $("#naming-pattern-select");
+const namingPatternInput = $("#naming-pattern-input");
 const namingSeparatorSelect = $("#naming-separator-select");
-const namingMaxLenInput = $("#naming-maxlen-input");
 const namingFolderTagCheckbox = $("#naming-folder-tag-checkbox");
+const namingPreviewEl = $("#naming-preview");
 const timestretchEnableCheckbox = $("#timestretch-enable-checkbox");
 const timestretchOptions = $("#timestretch-options");
 const timestretchModeSelect = $("#timestretch-mode-select");
@@ -253,7 +266,7 @@ async function resolveTempoWarning(fileName) {
   logWarn(`no confident tempo detected for "${fileName}"`);
   const { confirmed, remember } = await showConfirmDialog({
     title: "No tempo detected",
-    body: `"${fileName}" — no confident tempo was detected, so the drum chop length will fall back to a fixed length instead of your chosen bar count. Continue with the fallback, or skip this file?`,
+    body: `"${fileName}" - no confident tempo was detected, so the drum chop length will fall back to a fixed length instead of your chosen bar count. Continue with the fallback, or skip this file?`,
     confirmLabel: "Continue with fallback length",
     cancelLabel: "Skip this file",
     showRemember: true,
@@ -373,6 +386,7 @@ for (const bars of BAR_OPTIONS) {
   opt.textContent = `${bars} bar${bars === 1 ? "" : "s"}`;
   drumBarsSelect.appendChild(opt);
 }
+drumBarsSelect.value = String(drumBars); // options default to the first one otherwise, not the state's actual default (4)
 
 drumBarsSelect.addEventListener("change", () => {
   drumBars = parseInt(drumBarsSelect.value, 10);
@@ -388,39 +402,56 @@ oneShotsCheckbox.addEventListener("change", () => {
 // Output naming
 // ---------------------------------------------------------------------------
 
-namingPatternSelect.addEventListener("change", () => {
-  namingSettings.chopPattern = namingPatternSelect.value;
+namingPatternInput.addEventListener("input", () => {
+  namingSettings.chopPattern = namingPatternInput.value;
+  updateNamingPreview();
   saveSettings();
 });
 namingSeparatorSelect.addEventListener("change", () => {
   namingSettings.separator = namingSeparatorSelect.value;
-  saveSettings();
-});
-namingMaxLenInput.addEventListener("input", () => {
-  namingSettings.maxLen = parseInt(namingMaxLenInput.value, 10);
-  $("#naming-maxlen-value").textContent = `${namingMaxLenInput.value} chars`;
+  updateNamingPreview();
   saveSettings();
 });
 namingFolderTagCheckbox.addEventListener("change", () => {
   namingSettings.includeFolderTag = namingFolderTagCheckbox.checked;
+  updateNamingPreview();
   saveSettings();
 });
 
 /** Build the "<stem><sep><tag>" folder/base name (tag omitted if includeFolderTag is off or nothing was detected). */
 function buildTaggedStem(stem, tag) {
   const parts = namingSettings.includeFolderTag && tag ? [stem, tag] : [stem];
-  return sanitizeForPath(joinNameParts(parts, namingSettings.separator), namingSettings.maxLen);
+  return sanitizeForPath(joinNameParts(parts, namingSettings.separator), SAFE_NAME_LIMIT);
 }
 
-/** Build one chop's output filename per the chosen naming pattern. */
+/** Substitutes {name}/{tag}/{number} tokens (case-insensitively) in a typed naming pattern. */
+function resolveNamePattern(template, tokens) {
+  return template.replace(/\{(name|tag|number)\}/gi, (match, key) => {
+    const value = tokens[key.toLowerCase()];
+    return value === undefined || value === null ? "" : String(value);
+  });
+}
+
+/**
+ * Build one chop's output filename from the user-typed pattern. A {number} token is added
+ * automatically if the pattern doesn't include one, so chops from the same file can never
+ * collide/overwrite each other even if the pattern the user typed would otherwise repeat.
+ */
 function buildChopFileName(stem, tag, index) {
   const num = String(index).padStart(2, "0");
-  const sep = namingSettings.separator;
-  if (namingSettings.chopPattern === "number") return `${num}.wav`;
-  const base = namingSettings.chopPattern === "name-tag-number" ? joinNameParts([stem, tag], sep) : stem;
-  const reserve = sep.length + num.length;
-  const safeBase = sanitizeForPath(base, Math.max(8, namingSettings.maxLen - reserve));
-  return `${joinNameParts([safeBase], sep)}${sep}${num}.wav`;
+  let template = (namingSettings.chopPattern || "").trim() || "{number}";
+  if (!/\{number\}/i.test(template)) template = `${template} {number}`.trim();
+  const resolved = resolveNamePattern(template, { name: stem, tag, number: num }).replace(/\s+/g, " ").trim();
+  const base = sanitizeForPath(resolved, SAFE_NAME_LIMIT) || num;
+  return `${base}.wav`;
+}
+
+/** Refreshes the "here's what that'll look like" example under the naming pattern input. */
+function updateNamingPreview() {
+  const sampleTag = buildKeyTempoTag({ key: "C", scale: "minor", bpm: 120 }, namingSettings.separator);
+  const folderName = buildTaggedStem("drum_take", sampleTag);
+  const sampleNames = [1, 2, 3].map((i) => buildChopFileName("drum_take", sampleTag, i));
+  namingPreviewEl.textContent = `${folderName}/  ->  ${sampleNames.join(", ")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -465,7 +496,7 @@ function resolveStretchRatio(detectedBpm) {
 }
 
 // ---------------------------------------------------------------------------
-// Settings persistence (this browser only — a light convenience, not sync)
+// Settings persistence (this browser only - a light convenience, not sync)
 // ---------------------------------------------------------------------------
 
 function saveSettings() {
@@ -485,7 +516,7 @@ function saveSettings() {
       })
     );
   } catch (_) {
-    /* best-effort only — private browsing, storage disabled, quota, etc. */
+    /* best-effort only - private browsing, storage disabled, quota, etc. */
   }
 }
 
@@ -518,11 +549,14 @@ function applySettings(saved) {
     oneShotsCheckbox.checked = extractOneShots;
   }
   if (saved.naming) {
-    Object.assign(namingSettings, saved.naming);
-    namingPatternSelect.value = namingSettings.chopPattern;
+    const mergedNaming = { ...saved.naming };
+    delete mergedNaming.maxLen; // no longer a setting - drop it if present from an older save
+    if (mergedNaming.chopPattern && LEGACY_PATTERN_MAP[mergedNaming.chopPattern]) {
+      mergedNaming.chopPattern = LEGACY_PATTERN_MAP[mergedNaming.chopPattern];
+    }
+    Object.assign(namingSettings, mergedNaming);
+    namingPatternInput.value = namingSettings.chopPattern;
     namingSeparatorSelect.value = namingSettings.separator;
-    namingMaxLenInput.value = String(namingSettings.maxLen);
-    $("#naming-maxlen-value").textContent = `${namingSettings.maxLen} chars`;
     namingFolderTagCheckbox.checked = namingSettings.includeFolderTag;
   }
   if (saved.exportSettings) {
@@ -580,7 +614,7 @@ function renderFolderList() {
     const countEl = document.createElement("div");
     countEl.className = "folder-row-count";
     countEl.textContent = folder.isLoose
-      ? `${folder.files.length} file(s) — output goes to ${folder.destinationLabel || "a chosen folder"}`
+      ? `${folder.files.length} file(s) - output goes to ${folder.destinationLabel || "a chosen folder"}`
       : `${folder.files.length} audio file(s) found`;
     info.appendChild(nameEl);
     info.appendChild(countEl);
@@ -629,7 +663,7 @@ async function addFolderFSA() {
       updateProcessButton();
       return;
     }
-    // No qualifying subfolders — fall through and treat the picked folder itself as one source.
+    // No qualifying subfolders - fall through and treat the picked folder itself as one source.
   }
 
   if (folderAlreadyQueued(handle.name)) {
@@ -795,7 +829,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   // Key/tempo are detected once per source file, so every chop from this file
   // shares the same tag. That's why the tag goes on the containing folder
   // (and the wav/ copy's filename) by default rather than being repeated on
-  // every numbered chop — see the "Output naming" panel for the options.
+  // every numbered chop - see the "Output naming" panel for the options.
   const wantKey = detectSettings.key;
   const wantTempo = detectSettings.tempo;
   const kt = await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: wantKey, tempo: wantTempo });
@@ -808,7 +842,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   if (mode === "drums" && wantTempo && !kt.bpm) {
     const proceed = await resolveTempoWarning(fileInfo.name);
     if (!proceed) {
-      log(`    skipped — no tempo detected`);
+      log(`    skipped - no tempo detected`);
       renderSkippedFileResult(folderResultsEl, fileInfo.name, "no tempo detected");
       return 0;
     }
@@ -822,6 +856,18 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     log(`    converted to WAV (${method})`);
   }
 
+  // Time-stretch, when it's on, also produces a stretched copy of the FULL track (not just the
+  // chops) alongside the untouched original/converted wav/ copy above - handy for dropping the
+  // whole recording straight into a sampler at the target tempo. Written regardless of source
+  // format, since this is a new derived file rather than a duplicate of the original.
+  const fullStretchRatio = resolveStretchRatio(kt.bpm);
+  if (fullStretchRatio !== 1) {
+    const stretchedChannels = wsolaStretchChannels(channels, buffer.sampleRate, fullStretchRatio, timestretchSettings.character);
+    const stretchedBlob = encodeWav(stretchedChannels, buffer.sampleRate, 24);
+    await writeOutput(folder, "wav", fileInfo.relativeDir, `${taggedStem} stretched.wav`, stretchedBlob, zipBatch);
+    log(`    wrote a full-length time-stretched copy`);
+  }
+
   const modeParams = activeParams();
   let regions;
   if (mode === "drums") {
@@ -831,7 +877,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
       drumParams.preferred = barsSec;
       drumParams.minLen = Math.max(0.4, barsSec * 0.5);
       drumParams.maxLen = barsSec * 1.5;
-    } // else: no confident tempo — fall back to the fixed preferred/minLen/maxLen above
+    } // else: no confident tempo - fall back to the fixed preferred/minLen/maxLen above
     const snapBpm = drumParams.snapToTempo ? kt.bpm : null;
     regions = drumRegions(mono, buffer.sampleRate, drumParams, snapBpm).regions;
   } else {
@@ -866,9 +912,21 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     log(`    extracted ${oneShotRows.length} one-shot hit(s)`);
   }
 
-  const peaks = computePeaks(mono, 400);
-  const duration = mono.length / buffer.sampleRate;
-  const block = renderFileResult(fileInfo.name, keyText, bpmText, chopRows, oneShotRows, { peaks, duration, chopMarkers, oneShotMarkers }, editContext);
+  const state = {
+    fileName: fileInfo.name,
+    keyText,
+    bpmText,
+    chopRows,
+    chopMarkers,
+    oneShotRows,
+    oneShotMarkers,
+    peaks: computePeaks(mono, 400),
+    duration: mono.length / buffer.sampleRate,
+    mono,
+    sampleRate: buffer.sampleRate,
+    editContext,
+  };
+  const block = renderFileResult(state);
   folderResultsEl.appendChild(block);
   return chopRows.length;
 }
@@ -942,7 +1000,7 @@ async function reExportSingleFile(editContext, editedRegions) {
   });
 
   if (zipBatch) {
-    await zipBatch.downloadAs(`${sanitizeForPath(taggedStem, namingSettings.maxLen)}_re-exported.zip`);
+    await zipBatch.downloadAs(`${taggedStem}_re-exported.zip`);
   }
 
   return { chopRows, chopMarkers, peaks: computePeaks(mono, 400), duration: mono.length / buffer.sampleRate };
@@ -951,16 +1009,20 @@ async function reExportSingleFile(editContext, editedRegions) {
 function renderSkippedFileResult(folderSection, fileName, reason) {
   const block = document.createElement("div");
   block.className = "result-file result-file--skipped";
-  block.innerHTML = `<span class="result-file-name">${escapeHtml(fileName)}</span> <span class="result-file-meta">skipped — ${escapeHtml(
+  block.innerHTML = `<span class="result-file-name">${escapeHtml(fileName)}</span> <span class="result-file-meta">skipped - ${escapeHtml(
     reason
   )}</span>`;
   folderSection.appendChild(block);
 }
 
-/** Finds, classifies, dedupes and writes one-shot hits for a drum-mode source file. Returns {rows, markers}. */
-async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, sampleRate, zipBatch) {
+/**
+ * Finds candidate one-shot hits by onset + band-energy classification, purely to dedupe repeats
+ * of the same sound (see dedupeHits) - the label itself isn't reliable enough to trust in a
+ * filename, so it's discarded after dedupe. Returns [start, end] second pairs, sorted by start.
+ */
+function detectOneShotRegions(mono, sampleRate) {
   const { times, vals } = computeRmsEnvelope(mono, sampleRate, 20, 10);
-  if (!vals.length) return { rows: [], markers: [] };
+  if (!vals.length) return [];
   const diffs = onsetStrengthCurve(vals);
   const onsets = pickOnsets(times, diffs, 0.65, 0.08);
   const windows = findOneShotWindows(mono, sampleRate, onsets);
@@ -974,23 +1036,44 @@ async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, chann
     return { start: s, end: e, startSample, endSample, low, mid, high, peak, label };
   });
 
-  const kept = dedupeHits(candidates);
-  if (kept.length === 0) return { rows: [], markers: [] };
+  return dedupeHits(candidates)
+    .map((hit) => [hit.start, hit.end])
+    .sort((a, b) => a[0] - b[0]);
+}
+
+/**
+ * Writes one-shot files for a set of [start,end] second regions - plain sequential numbering
+ * (01.wav, 02.wav, ...) rather than the heuristic kick/snare/hat label, since that label is a
+ * rough sort, not something reliable enough to bake into a filename. Shared by the initial
+ * auto-detected pass and by the manual one-shot editor's "Save & re-export".
+ */
+async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch }) {
+  if (regions.length === 0) return { rows: [], markers: [] };
 
   if (folder.kind === "fsa") {
     await clearOldOneShotsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
   }
 
-  const fadeOutSamples = Math.round(0.008 * sampleRate); // short tail fade only — a full fade-in would blunt the transient
-  const counters = {};
+  const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * sampleRate);
+  const fadeOutSamples = Math.round(0.008 * sampleRate); // short tail fade only - a full fade-in would blunt the transient
+  const sortedRegions = [...regions].sort((a, b) => a[0] - b[0]);
   const rows = [];
   const markers = [];
-  for (const hit of kept) {
-    counters[hit.label] = (counters[hit.label] || 0) + 1;
-    const sliced = sliceChannels(channels, hit.startSample, hit.endSample);
+  let made = 0;
+  for (const [s, e] of sortedRegions) {
+    let startSample = Math.max(0, Math.round(s * sampleRate));
+    let endSample = Math.min(mono.length, Math.round(e * sampleRate));
+    if (zcWindow > 0) {
+      startSample = findNearestZeroCrossing(mono, startSample, zcWindow);
+      endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
+    }
+    if (endSample <= startSample) continue;
+    made++;
+
+    const sliced = sliceChannels(channels, startSample, endSample);
     applyFades(sliced, 0, fadeOutSamples);
     const blob = encodeWav(sliced, sampleRate, exportSettings.bitDepth);
-    const fileName = `${hit.label}_${String(counters[hit.label]).padStart(2, "0")}.wav`;
+    const fileName = `${String(made).padStart(2, "0")}.wav`;
     await writeOutput(
       folder,
       "one shots",
@@ -999,10 +1082,43 @@ async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, chann
       blob,
       zipBatch
     );
-    rows.push({ fileName, blob, seconds: (hit.endSample - hit.startSample) / sampleRate });
-    markers.push([hit.startSample / sampleRate, hit.endSample / sampleRate]);
+    rows.push({ fileName, blob, seconds: (endSample - startSample) / sampleRate });
+    markers.push([startSample / sampleRate, endSample / sampleRate]);
   }
   return { rows, markers };
+}
+
+/** Finds, dedupes and writes one-shot hits for a drum-mode source file's initial auto pass. Returns {rows, markers}. */
+async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, sampleRate, zipBatch) {
+  const regions = detectOneShotRegions(mono, sampleRate);
+  return writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch });
+}
+
+/** Re-decodes a source file and re-exports its one-shots from a manually-edited region list. */
+async function reExportOneShots(editContext, editedRegions) {
+  const { folder, fileInfo, taggedStem } = editContext;
+  const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
+  const { buffer } = await decodeFile(file, fileInfo.ext);
+  const channels = bufferChannels(buffer);
+  const mono = toMono(channels);
+  const zipBatch = folder.kind === "fsa" ? null : new ZipBatch();
+
+  const { rows, markers } = await writeOneShotRegions({
+    folder,
+    fileInfo,
+    taggedStem,
+    regions: editedRegions,
+    channels,
+    mono,
+    sampleRate: buffer.sampleRate,
+    zipBatch,
+  });
+
+  if (zipBatch) {
+    await zipBatch.downloadAs(`${taggedStem} one-shots_re-exported.zip`);
+  }
+
+  return { rows, markers, peaks: computePeaks(mono, 400), duration: mono.length / buffer.sampleRate };
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,13 +1204,81 @@ function drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers) {
 /**
  * Interactive version of the waveform preview: existing chop-boundary handles can be dragged
  * (pointer events, so mouse/touch/pen all work). Returns {canvas, getRegions, destroy}. Adding or
- * removing boundaries isn't supported yet — v1 is deliberately just "nudge what's already there".
+ * removing boundaries isn't supported yet - v1 is deliberately just "nudge what's already there".
  */
-function createEditableWaveform(peaks, duration, initialRegions) {
+function formatEditorTime(t) {
+  const m = Math.floor(t / 60);
+  const s = (t - m * 60).toFixed(2);
+  return m > 0 ? `${m}:${s.padStart(5, "0")}` : `${s}s`;
+}
+
+/**
+ * Draggable waveform region editor: start/end handles per region, mouse-wheel zoom (centered on
+ * the cursor) plus Zoom in/out/Fit buttons, click-drag panning once zoomed in, and a dragged
+ * handle snaps to the nearest zero-crossing when released so edited cuts stay click-free just
+ * like the auto-exported ones. `mono`/`sampleRate` are optional - without them (shouldn't happen
+ * in normal use) zoom just shows a flat waveform and snapping is skipped.
+ */
+function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) {
+  const wrap = document.createElement("div");
+  wrap.className = "editable-waveform";
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "editable-waveform-toolbar";
+  const zoomOutBtn = document.createElement("button");
+  zoomOutBtn.type = "button";
+  zoomOutBtn.className = "btn btn--ghost btn--small";
+  zoomOutBtn.textContent = "Zoom out";
+  const zoomInBtn = document.createElement("button");
+  zoomInBtn.type = "button";
+  zoomInBtn.className = "btn btn--ghost btn--small";
+  zoomInBtn.textContent = "Zoom in";
+  const fitBtn = document.createElement("button");
+  fitBtn.type = "button";
+  fitBtn.className = "btn btn--ghost btn--small";
+  fitBtn.textContent = "Fit";
+  const zoomLabel = document.createElement("span");
+  zoomLabel.className = "editable-waveform-zoom-label";
+  toolbar.append(zoomOutBtn, zoomInBtn, fitBtn, zoomLabel);
+  wrap.appendChild(toolbar);
+
   const canvas = document.createElement("canvas");
   canvas.className = "waveform-canvas waveform-canvas--editable";
+  wrap.appendChild(canvas);
+
   const regions = initialRegions.map(([s, e]) => ({ s, e }));
-  let dragging = null; // { idx, which: 's' | 'e' }
+  const MIN_GAP_SEC = 0.03;
+  const MIN_VIEW_SEC = Math.min(Math.max(duration, 0.001), 0.25);
+  const BIN_COUNT = 600;
+  let viewStart = 0;
+  let viewDuration = Math.max(duration, MIN_VIEW_SEC);
+  let dragging = null; // { kind: 'handle', idx, which: 's'|'e' } or { kind: 'pan', startClientX, startViewStart }
+
+  function xToTime(xRelative, rectWidth) {
+    return rectWidth > 0 ? viewStart + (xRelative / rectWidth) * viewDuration : viewStart;
+  }
+  function timeToX(t, w) {
+    return viewDuration > 0 ? ((t - viewStart) / viewDuration) * w : 0;
+  }
+
+  function setView(newStart, newDuration) {
+    viewDuration = Math.max(MIN_VIEW_SEC, Math.min(duration, newDuration));
+    viewStart = Math.max(0, Math.min(Math.max(0, duration - viewDuration), newStart));
+    redraw();
+  }
+
+  function zoomAt(anchorTime, factor) {
+    const newDuration = viewDuration / factor;
+    const ratio = viewDuration > 0 ? (anchorTime - viewStart) / viewDuration : 0.5;
+    setView(anchorTime - ratio * newDuration, newDuration);
+  }
+
+  function snapToZeroCrossing(t) {
+    if (!mono || !sampleRate) return t;
+    const windowSamples = Math.max(1, Math.round((exportSettings.zcSearchMs / 1000) * sampleRate));
+    const sampleIndex = Math.round(t * sampleRate);
+    return findNearestZeroCrossing(mono, sampleIndex, windowSamples) / sampleRate;
+  }
 
   function redraw() {
     const rectWidth = Math.max(200, Math.round(canvas.getBoundingClientRect().width || 600));
@@ -1106,23 +1290,32 @@ function createEditableWaveform(peaks, duration, initialRegions) {
     const mid = h / 2;
     ctx.clearRect(0, 0, w, h);
 
-    const barWidth = w / peaks.length;
-    ctx.fillStyle = "rgba(139, 124, 255, 0.55)";
-    for (let i = 0; i < peaks.length; i++) {
-      const amp = Math.max(1, peaks[i] * (h * 0.46));
-      ctx.fillRect(i * barWidth, mid - amp, Math.max(1, barWidth - 0.4), amp * 2);
+    if (duration <= 0) {
+      zoomLabel.textContent = "";
+      return;
     }
 
-    if (duration <= 0) return;
+    const peaks = mono ? computePeaksInRange(mono, viewStart * sampleRate, (viewStart + viewDuration) * sampleRate, BIN_COUNT) : null;
+    if (peaks) {
+      const barWidth = w / peaks.length;
+      ctx.fillStyle = "rgba(139, 124, 255, 0.55)";
+      for (let i = 0; i < peaks.length; i++) {
+        const amp = Math.max(1, peaks[i] * (h * 0.46));
+        ctx.fillRect(i * barWidth, mid - amp, Math.max(1, barWidth - 0.4), amp * 2);
+      }
+    }
+
     regions.forEach((r, idx) => {
-      const x0 = (r.s / duration) * w;
-      const x1 = (r.e / duration) * w;
+      const x0 = Math.max(0, timeToX(r.s, w));
+      const x1 = Math.min(w, timeToX(r.e, w));
+      if (x1 <= x0) return; // region isn't in the visible window
       ctx.fillStyle = idx % 2 === 0 ? "rgba(86, 208, 200, 0.1)" : "rgba(139, 124, 255, 0.1)";
       ctx.fillRect(x0, 0, x1 - x0, h);
     });
     regions.forEach((r) => {
       for (const t of [r.s, r.e]) {
-        const x = (t / duration) * w;
+        const x = timeToX(t, w);
+        if (x < -6 || x > w + 6) continue;
         ctx.strokeStyle = "#edeef3";
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -1135,19 +1328,19 @@ function createEditableWaveform(peaks, duration, initialRegions) {
         ctx.fill();
       }
     });
-  }
 
-  function timeAtClientX(clientX) {
-    const rect = canvas.getBoundingClientRect();
-    const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
-    return rect.width > 0 ? (x / rect.width) * duration : 0;
+    const zoomX = viewDuration > 0 ? (duration / viewDuration).toFixed(1) : "1.0";
+    zoomLabel.textContent = `${zoomX}x - ${formatEditorTime(viewStart)} to ${formatEditorTime(viewStart + viewDuration)}`;
+    zoomOutBtn.disabled = viewDuration >= duration - 1e-6;
+    zoomInBtn.disabled = viewDuration <= MIN_VIEW_SEC + 1e-6;
+    fitBtn.disabled = zoomOutBtn.disabled;
   }
 
   function hitTest(clientX) {
     const rect = canvas.getBoundingClientRect();
     if (rect.width === 0) return null;
-    const toleranceSec = (8 / rect.width) * duration;
-    const t = timeAtClientX(clientX);
+    const toleranceSec = (8 / rect.width) * viewDuration;
+    const t = xToTime(clientX - rect.left, rect.width);
     let best = null;
     let bestDist = toleranceSec;
     regions.forEach((r, idx) => {
@@ -1162,24 +1355,57 @@ function createEditableWaveform(peaks, duration, initialRegions) {
     return best;
   }
 
-  const MIN_GAP_SEC = 0.03;
+  zoomInBtn.addEventListener("click", () => zoomAt(viewStart + viewDuration / 2, 1.8));
+  zoomOutBtn.addEventListener("click", () => zoomAt(viewStart + viewDuration / 2, 1 / 1.8));
+  fitBtn.addEventListener("click", () => setView(0, duration));
+
+  canvas.addEventListener(
+    "wheel",
+    (ev) => {
+      if (!mono || duration <= 0) return;
+      ev.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const anchorTime = xToTime(ev.clientX - rect.left, rect.width);
+      zoomAt(anchorTime, ev.deltaY < 0 ? 1.25 : 1 / 1.25);
+    },
+    { passive: false }
+  );
+
   canvas.addEventListener("pointerdown", (ev) => {
     const hit = hitTest(ev.clientX);
-    if (!hit) return;
-    dragging = hit;
     canvas.setPointerCapture(ev.pointerId);
-    canvas.classList.add("waveform-canvas--dragging");
+    if (hit) {
+      dragging = { kind: "handle", ...hit };
+      canvas.classList.add("waveform-canvas--dragging");
+    } else if (mono) {
+      dragging = { kind: "pan", startClientX: ev.clientX, startViewStart: viewStart };
+      canvas.classList.add("waveform-canvas--dragging");
+    }
   });
   canvas.addEventListener("pointermove", (ev) => {
     if (!dragging) return;
-    const r = regions[dragging.idx];
-    let t = timeAtClientX(ev.clientX);
-    t = dragging.which === "s" ? Math.max(0, Math.min(r.e - MIN_GAP_SEC, t)) : Math.max(r.s + MIN_GAP_SEC, Math.min(duration, t));
-    r[dragging.which] = t;
-    redraw();
+    const rect = canvas.getBoundingClientRect();
+    if (dragging.kind === "handle") {
+      const r = regions[dragging.idx];
+      let t = xToTime(ev.clientX - rect.left, rect.width);
+      t = dragging.which === "s" ? Math.max(0, Math.min(r.e - MIN_GAP_SEC, t)) : Math.max(r.s + MIN_GAP_SEC, Math.min(duration, t));
+      r[dragging.which] = t;
+      redraw();
+    } else if (dragging.kind === "pan") {
+      const dxPx = ev.clientX - dragging.startClientX;
+      const dtSec = -(dxPx / Math.max(1, rect.width)) * viewDuration;
+      setView(dragging.startViewStart + dtSec, viewDuration);
+    }
   });
   function endDrag() {
     if (dragging) canvas.classList.remove("waveform-canvas--dragging");
+    if (dragging && dragging.kind === "handle") {
+      const r = regions[dragging.idx];
+      const snapped = snapToZeroCrossing(r[dragging.which]);
+      r[dragging.which] =
+        dragging.which === "s" ? Math.max(0, Math.min(r.e - MIN_GAP_SEC, snapped)) : Math.max(r.s + MIN_GAP_SEC, Math.min(duration, snapped));
+      redraw();
+    }
     dragging = null;
   }
   canvas.addEventListener("pointerup", endDrag);
@@ -1189,14 +1415,21 @@ function createEditableWaveform(peaks, duration, initialRegions) {
   window.addEventListener("resize", redraw);
 
   return {
-    canvas,
+    el: wrap,
     getRegions: () => regions.map((r) => [r.s, r.e]),
     destroy: () => window.removeEventListener("resize", redraw),
   };
 }
 
 /** Swaps a result-file block into edit mode: draggable waveform + Save/Cancel, replacing the static view. */
-function enterEditMode(block, editContext, viz, staticArea, editBtn) {
+/**
+ * Swaps a result-file block into edit mode for either its chops or its one-shots (`kind`),
+ * replacing the static view with a draggable waveform + Save/Cancel. Saving mutates just that
+ * half of `state` (chopRows/chopMarkers or oneShotRows/oneShotMarkers) and re-renders the whole
+ * card from it, so editing one never discards the other's already-exported results.
+ */
+function enterEditMode(block, state, staticArea, editBtn, kind) {
+  const isChops = kind === "chops";
   staticArea.hidden = true;
   editBtn.disabled = true;
 
@@ -1205,11 +1438,18 @@ function enterEditMode(block, editContext, viz, staticArea, editBtn) {
 
   const hint = document.createElement("p");
   hint.className = "chop-editor-hint";
-  hint.textContent = "Drag the white handles to adjust cut points, then save. Adding or removing chops isn't supported yet.";
+  hint.textContent = `Drag the white handles to adjust cut points (they snap to the nearest zero-crossing when you let go), scroll to zoom, drag the waveform to pan. Save re-exports. Adding or removing ${
+    isChops ? "chops" : "one-shots"
+  } isn't supported yet.`;
   editorWrap.appendChild(hint);
 
-  const editor = createEditableWaveform(viz.peaks, viz.duration, viz.chopMarkers);
-  editorWrap.appendChild(editor.canvas);
+  const editor = createEditableWaveform({
+    mono: state.mono,
+    sampleRate: state.sampleRate,
+    duration: state.duration,
+    initialRegions: isChops ? state.chopMarkers : state.oneShotMarkers,
+  });
+  editorWrap.appendChild(editor.el);
 
   const actions = document.createElement("div");
   actions.className = "modal-actions chop-editor-actions";
@@ -1238,20 +1478,22 @@ function enterEditMode(block, editContext, viz, staticArea, editBtn) {
     cancelBtn.disabled = true;
     saveBtn.textContent = "Re-exporting…";
     try {
-      const result = await reExportSingleFile(editContext, editor.getRegions());
-      log(`  ${editContext.fileInfo.name}: re-exported ${result.chopRows.length} chop(s) with edited boundaries`);
-      const newBlock = renderFileResult(
-        editContext.fileInfo.name,
-        block.dataset.keyText || "",
-        block.dataset.bpmText || "",
-        result.chopRows,
-        [],
-        { peaks: result.peaks, duration: result.duration, chopMarkers: result.chopMarkers, oneShotMarkers: [] },
-        editContext
-      );
+      const regions = editor.getRegions();
+      if (isChops) {
+        const result = await reExportSingleFile(state.editContext, regions);
+        state.chopRows = result.chopRows;
+        state.chopMarkers = result.chopMarkers;
+        log(`  ${state.editContext.fileInfo.name}: re-exported ${result.chopRows.length} chop(s) with edited boundaries`);
+      } else {
+        const result = await reExportOneShots(state.editContext, regions);
+        state.oneShotRows = result.rows;
+        state.oneShotMarkers = result.markers;
+        log(`  ${state.editContext.fileInfo.name}: re-exported ${result.rows.length} one-shot(s) with edited boundaries`);
+      }
+      const newBlock = renderFileResult(state);
       block.replaceWith(newBlock);
     } catch (err) {
-      log(`  ERROR re-exporting ${editContext.fileInfo.name}: ${err.message || err}`);
+      log(`  ERROR re-exporting ${state.editContext.fileInfo.name}: ${err.message || err}`);
       console.error(err);
       saveBtn.disabled = false;
       cancelBtn.disabled = false;
@@ -1260,11 +1502,18 @@ function enterEditMode(block, editContext, viz, staticArea, editBtn) {
   });
 }
 
-function renderFileResult(fileName, keyText, bpmText, chopRows, oneShotRows = [], viz = null, editContext = null) {
+/**
+ * Renders one processed file's result card from a mutable state object:
+ * { fileName, keyText, bpmText, chopRows, chopMarkers, oneShotRows, oneShotMarkers, peaks,
+ *   duration, mono, sampleRate, editContext }. The state object (not just the rendered DOM) is
+ * what the chop/one-shot editors mutate on save, so re-exporting one of the two never discards
+ * the other's already-exported rows - see enterEditMode.
+ */
+function renderFileResult(state) {
+  const { fileName, keyText, bpmText, chopRows, oneShotRows, peaks, duration, chopMarkers, oneShotMarkers, editContext } = state;
+
   const block = document.createElement("div");
   block.className = "result-file";
-  block.dataset.keyText = keyText;
-  block.dataset.bpmText = bpmText;
 
   const header = document.createElement("div");
   header.className = "result-file-header";
@@ -1276,27 +1525,40 @@ function renderFileResult(fileName, keyText, bpmText, chopRows, oneShotRows = []
   metaEl.textContent = `key: ${keyText} · tempo: ${bpmText} · ${chopRows.length} chop(s)${
     oneShotRows.length ? ` · ${oneShotRows.length} one-shot(s)` : ""
   }`;
-  header.appendChild(nameEl);
-  header.appendChild(metaEl);
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "result-file-title-group";
+  titleGroup.appendChild(nameEl);
+  titleGroup.appendChild(metaEl);
+  header.appendChild(titleGroup);
 
-  let editBtn = null;
+  const actionsGroup = document.createElement("div");
+  actionsGroup.className = "result-file-header-actions";
+  let editChopsBtn = null;
   if (editContext && chopRows.length) {
-    editBtn = document.createElement("button");
-    editBtn.className = "btn btn--ghost btn--small";
-    editBtn.textContent = "Edit chops";
-    header.appendChild(editBtn);
+    editChopsBtn = document.createElement("button");
+    editChopsBtn.className = "btn btn--ghost btn--small";
+    editChopsBtn.textContent = "Edit chops";
+    actionsGroup.appendChild(editChopsBtn);
   }
+  let editOneShotsBtn = null;
+  if (editContext && oneShotRows.length) {
+    editOneShotsBtn = document.createElement("button");
+    editOneShotsBtn.className = "btn btn--ghost btn--small";
+    editOneShotsBtn.textContent = "Edit one-shots";
+    actionsGroup.appendChild(editOneShotsBtn);
+  }
+  if (actionsGroup.childElementCount) header.appendChild(actionsGroup);
   block.appendChild(header);
 
   const staticArea = document.createElement("div");
   staticArea.className = "result-file-static";
 
-  if (viz && viz.peaks && viz.peaks.length) {
+  if (peaks && peaks.length) {
     const canvas = document.createElement("canvas");
     canvas.className = "waveform-canvas";
     staticArea.appendChild(canvas);
     // Draw after layout so getBoundingClientRect reports the real rendered width.
-    requestAnimationFrame(() => drawWaveform(canvas, viz.peaks, viz.duration, viz.chopMarkers, viz.oneShotMarkers));
+    requestAnimationFrame(() => drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers));
   }
 
   staticArea.appendChild(renderChopList(chopRows));
@@ -1311,8 +1573,11 @@ function renderFileResult(fileName, keyText, bpmText, chopRows, oneShotRows = []
 
   block.appendChild(staticArea);
 
-  if (editBtn) {
-    editBtn.addEventListener("click", () => enterEditMode(block, editContext, viz, staticArea, editBtn));
+  if (editChopsBtn) {
+    editChopsBtn.addEventListener("click", () => enterEditMode(block, state, staticArea, editChopsBtn, "chops"));
+  }
+  if (editOneShotsBtn) {
+    editOneShotsBtn.addEventListener("click", () => enterEditMode(block, state, staticArea, editOneShotsBtn, "oneshots"));
   }
 
   return block;
@@ -1358,7 +1623,7 @@ async function processBatch() {
       try {
         totalChops += await processOneFile(folder, fileInfo, zipBatch, folderSection);
       } catch (err) {
-        log(`  ERROR on ${fileInfo.name}: ${err.message || err} — skipping this file, batch continues`);
+        log(`  ERROR on ${fileInfo.name}: ${err.message || err} - skipping this file, batch continues`);
         console.error(err);
       }
       // Yield to the event loop so the log/UI stay responsive during a big batch.
@@ -1417,6 +1682,7 @@ splitSubfoldersCheckbox.addEventListener("change", saveSettings);
 function init() {
   versionBadge.textContent = `v${APP_VERSION}`;
   applySettings(loadSettings());
+  updateNamingPreview(); // outside applySettings so it also runs for first-time visitors with nothing saved yet
 
   outputBanner.textContent = FSA_SUPPORTED
     ? "Chops are saved straight into each folder's wav/ and chops/ subfolders."
@@ -1424,7 +1690,7 @@ function init() {
   outputBanner.className = FSA_SUPPORTED ? "banner banner--good" : "banner banner--info";
 
   if (!FSA_FILE_PICKER_SUPPORTED && FSA_SUPPORTED) {
-    addFilesBtn.title = "This browser supports folder writing but not the individual-file picker — falling back to a plain file chooser.";
+    addFilesBtn.title = "This browser supports folder writing but not the individual-file picker - falling back to a plain file chooser.";
   }
 
   renderParamsPanel();
@@ -1434,7 +1700,7 @@ function init() {
   essentiaAvailable().then((available) => {
     essentiaStatus.textContent = available
       ? "Key & tempo detection ready."
-      : "Key & tempo detection unavailable (couldn't load essentia.js) — chopping still works normally.";
+      : "Key & tempo detection unavailable (couldn't load essentia.js) - chopping still works normally.";
     essentiaStatus.className = available ? "essentia-status essentia-status--ok" : "essentia-status essentia-status--warn";
   });
 }
