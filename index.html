@@ -6,7 +6,7 @@
 <title>The Good Bits - auto sample chopper</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Share+Tech+Mono&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
@@ -27,7 +27,14 @@
   }
 </script>
 <header class="page-header">
-  <p class="eyebrow">✦ automatic sample chopper</p>
+  <div class="header-top-row">
+    <p class="eyebrow">✦ automatic sample chopper</p>
+    <div class="theme-switcher" role="group" aria-label="Interface style">
+      <button type="button" class="theme-switcher-btn" data-theme-choice="classic">Classic</button>
+      <button type="button" class="theme-switcher-btn" data-theme-choice="terminal">Terminal</button>
+      <button type="button" class="theme-switcher-btn" data-theme-choice="console">Console</button>
+    </div>
+  </div>
   <h1>The Good Bits <span id="version-badge" class="version-badge"></span></h1>
   <p class="subtitle">Finds candidate musical phrases and loop-ready drum breaks in long source recordings - a fast first-pass editor, not a final chopper. All processing happens locally in your browser; nothing is uploaded anywhere.</p>
 </header>

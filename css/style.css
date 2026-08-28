@@ -21,6 +21,92 @@
   --font-body: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-family: var(--font-body);
+
+  /* waveform canvas + log panel colors, kept as variables so the theme switcher can restyle
+     canvas-drawn content (waveform bars/markers are painted in JS, not CSS - see js/app.js) */
+  --wave-bg: #0c0e13;
+  --wave-fill: rgba(139, 124, 255, 0.55);
+  --wave-line: rgba(237, 238, 243, 0.5);
+  --wave-handle: #edeef3;
+  --wave-marker: #56d0c8;
+  --wave-region-a: rgba(86, 208, 200, 0.1);
+  --wave-region-b: rgba(139, 124, 255, 0.1);
+  --log-bg: #08090c;
+  --log-text: #aab3c9;
+  --glow-1: rgba(139, 124, 255, 0.12);
+  --glow-2: rgba(86, 208, 200, 0.08);
+}
+
+/* Green Terminal: CRT phosphor look - dark green-black chassis, monospace everywhere. */
+[data-theme="terminal"] {
+  --bg: #060a06;
+  --bg-panel: #081208;
+  --bg-raised: #0d1a0d;
+  --bg-raised-hover: #123a17;
+  --border: #1f4a24;
+  --border-soft: #163a1b;
+  --text: #cdffd9;
+  --text-dim: #6fcf85;
+  --text-faint: #3f8a52;
+  --accent: #39ff6c;
+  --accent-2: #7dffb0;
+  --accent-dim: #1f6b34;
+  --accent-grad: linear-gradient(120deg, #2be05a 0%, #39ff6c 50%, #8dffbe 100%);
+  --good: #39ff6c;
+  --warn: #d9d95a;
+  --danger: #ff6b57;
+  --radius: 4px;
+  --radius-sm: 3px;
+  --font-display: "Share Tech Mono", monospace;
+  --font-body: "Share Tech Mono", monospace;
+  --font-mono: "Share Tech Mono", monospace;
+  --wave-bg: #030a03;
+  --wave-fill: rgba(57, 255, 108, 0.55);
+  --wave-line: rgba(205, 255, 217, 0.5);
+  --wave-handle: #cdffd9;
+  --wave-marker: #7dffb0;
+  --wave-region-a: rgba(57, 255, 108, 0.12);
+  --wave-region-b: rgba(125, 255, 176, 0.1);
+  --log-bg: #020602;
+  --log-text: #8fe6a0;
+  --glow-1: rgba(57, 255, 108, 0.1);
+  --glow-2: rgba(125, 255, 176, 0.06);
+}
+
+/* Rack Console: classic S-series rack sampler - beige-grey chassis, red/blue hardware accents. */
+[data-theme="console"] {
+  --bg: #d6d0c0;
+  --bg-panel: #cec8b7;
+  --bg-raised: #e5e0d1;
+  --bg-raised-hover: #ece8da;
+  --border: #a49c85;
+  --border-soft: #b8b09a;
+  --text: #2c2820;
+  --text-dim: #5a5343;
+  --text-faint: #837a63;
+  --accent: #d5473a;
+  --accent-2: #2c6d9e;
+  --accent-dim: #b8a888;
+  --accent-grad: linear-gradient(120deg, #2c6d9e 0%, #3f8ec9 50%, #d5473a 100%);
+  --good: #3f7a4a;
+  --warn: #c9942f;
+  --danger: #d5473a;
+  --radius: 8px;
+  --radius-sm: 5px;
+  --font-display: "Barlow Condensed", -apple-system, sans-serif;
+  --font-body: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Share Tech Mono", monospace;
+  --wave-bg: #1c1c1f;
+  --wave-fill: rgba(63, 142, 201, 0.6);
+  --wave-line: rgba(238, 236, 224, 0.55);
+  --wave-handle: #eeece0;
+  --wave-marker: #d5473a;
+  --wave-region-a: rgba(63, 142, 201, 0.14);
+  --wave-region-b: rgba(213, 71, 58, 0.12);
+  --log-bg: #201d16;
+  --log-text: #8fd0ea;
+  --glow-1: rgba(63, 142, 201, 0.12);
+  --glow-2: rgba(213, 71, 58, 0.08);
 }
 
 * {
@@ -29,14 +115,32 @@
 
 body {
   background: var(--bg);
-  background-image: radial-gradient(circle at 12% -10%, rgba(139, 124, 255, 0.12), transparent 45%),
-    radial-gradient(circle at 88% 0%, rgba(86, 208, 200, 0.08), transparent 40%);
+  background-image: radial-gradient(circle at 12% -10%, var(--glow-1), transparent 45%),
+    radial-gradient(circle at 88% 0%, var(--glow-2), transparent 40%);
   background-attachment: fixed;
   color: var(--text);
   margin: 0;
   padding: 0 1.5rem 4rem;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  transition: background-color 0.2s ease, color 0.2s ease;
+  position: relative;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+/* Green Terminal: a faint CRT scanline overlay across the whole page. Purely decorative -
+   pointer-events is off so it never interferes with clicks underneath. */
+[data-theme="terminal"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image: repeating-linear-gradient(0deg, rgba(57, 255, 108, 0.05) 0px, rgba(57, 255, 108, 0.05) 1px, transparent 1px, transparent 3px);
+  pointer-events: none;
+  z-index: 999;
 }
 
 main {
@@ -55,6 +159,14 @@ main {
   padding: 3.2rem 0 1.4rem;
 }
 
+.header-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
 .eyebrow {
   font-family: var(--font-mono);
   font-size: 0.78rem;
@@ -62,6 +174,41 @@ main {
   text-transform: uppercase;
   color: var(--accent-2);
   margin: 0 0 0.6rem;
+}
+
+.theme-switcher {
+  display: flex;
+  gap: 0.2rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem;
+  margin-bottom: 0.6rem;
+}
+
+.theme-switcher-btn {
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.theme-switcher-btn:hover {
+  color: var(--text);
+}
+
+.theme-switcher-btn.is-active {
+  background: var(--accent-grad);
+  color: #0b0c12;
+  font-weight: 600;
 }
 
 .page-header h1 {
@@ -106,7 +253,7 @@ main {
 /* panels */
 
 .panel {
-  background: linear-gradient(180deg, var(--bg-panel) 0%, rgba(22, 24, 31, 0.85) 100%);
+  background: linear-gradient(180deg, var(--bg-panel) 0%, color-mix(in srgb, var(--bg-panel) 85%, black) 100%);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   padding: 1.6rem 1.7rem 1.8rem;
@@ -133,8 +280,8 @@ main {
   letter-spacing: 0.04em;
   text-transform: none;
   color: var(--accent-2);
-  background: rgba(86, 208, 200, 0.1);
-  border: 1px solid rgba(86, 208, 200, 0.25);
+  background: color-mix(in srgb, var(--accent-2) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 25%, transparent);
   border-radius: 999px;
   padding: 0.15rem 0.55rem;
 }
@@ -167,7 +314,7 @@ main {
   background: linear-gradient(var(--bg-raised-hover), var(--bg-raised-hover)) padding-box,
     var(--accent-grad) border-box;
   border: 1px solid transparent;
-  box-shadow: 0 0 0 1px rgba(139, 124, 255, 0.25), 0 8px 24px -12px rgba(139, 124, 255, 0.45);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent), 0 8px 24px -12px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .mode-card-icon {
@@ -232,14 +379,14 @@ main {
 }
 
 .banner--good {
-  background: rgba(95, 211, 153, 0.1);
-  border-color: rgba(95, 211, 153, 0.2);
+  background: color-mix(in srgb, var(--good) 10%, transparent);
+  border-color: color-mix(in srgb, var(--good) 20%, transparent);
   color: var(--good);
 }
 
 .banner--info {
-  background: rgba(232, 185, 92, 0.1);
-  border-color: rgba(232, 185, 92, 0.2);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 20%, transparent);
   color: var(--warn);
 }
 
@@ -462,7 +609,7 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--accent-grad);
   border: 2px solid #0b0c12;
   cursor: pointer;
-  box-shadow: 0 0 0 1px rgba(139, 124, 255, 0.4);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 input[type="range"]::-moz-range-thumb {
@@ -580,7 +727,7 @@ input[type="text"]:hover {
 
 .log-panel {
   margin-top: 1rem;
-  background: #08090c;
+  background: var(--log-bg);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   padding: 0.9rem 1.1rem;
@@ -588,7 +735,7 @@ input[type="text"]:hover {
   overflow-y: auto;
   font-family: var(--font-mono);
   font-size: 0.8rem;
-  color: #aab3c9;
+  color: var(--log-text);
 }
 
 .log-line {
@@ -628,8 +775,8 @@ input[type="text"]:hover {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.4rem;
-  border-color: rgba(232, 185, 92, 0.3);
-  background: rgba(232, 185, 92, 0.06);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
 }
 
 .result-file--skipped .result-file-meta {
@@ -641,7 +788,7 @@ input[type="text"]:hover {
   width: 100%;
   height: 72px;
   border-radius: var(--radius-sm);
-  background: #0c0e13;
+  background: var(--wave-bg);
   margin-bottom: 0.9rem;
 }
 

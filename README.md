@@ -13,6 +13,12 @@ site on GitHub Pages.
 
 ## Features
 
+- **A choice of interface styles.** The three buttons top-right (Classic,
+  Terminal, Console) swap the whole page's look on the fly - Classic is the
+  default, Terminal is a green CRT/phosphor look, and Console is styled
+  after a classic beige-grey rack sampler with red and blue hardware-style
+  accents. Purely cosmetic (nothing about detection or export changes), and
+  your choice is remembered in this browser.
 - **Auto or manual detection settings.** Auto mode (on by default) just uses
   sensible defaults per mode, so you don't have to make any decisions to get
   started - flip it off if you want to hand-tune silence sensitivity, phrase
@@ -79,7 +85,7 @@ site on GitHub Pages.
 - **A batch that survives one bad file.** If a single file fails to decode
   or analyze, it's logged and skipped; the rest of the batch keeps going.
 
-The version number shown next to the title (e.g. `v0.6`) ticks up with each
+The version number shown next to the title (e.g. `v0.7`) ticks up with each
 meaningful change, so you can tell at a glance whether you're looking at the
 latest build.
 

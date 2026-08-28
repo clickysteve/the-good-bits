@@ -98,6 +98,8 @@ const detectSettings = { key: true, tempo: true };
 const timestretchSettings = { enabled: false, mode: "target-tempo", targetBpm: 120, ratio: 1.0, character: "clean" };
 
 const SETTINGS_STORAGE_KEY = "good-bits-settings-v1";
+const THEME_STORAGE_KEY = "good-bits-theme-v1";
+const THEMES = ["classic", "terminal", "console"];
 
 // Reset at the start of every batch; "continue"/"skip" once the user checks "remember for
 // this batch" in the no-tempo-detected confirm dialog, so they aren't asked file after file.
@@ -161,6 +163,7 @@ const detectKeyCheckbox = $("#detect-key-checkbox");
 const detectTempoCheckbox = $("#detect-tempo-checkbox");
 const essentiaStatus = $("#essentia-status");
 const versionBadge = $("#version-badge");
+const themeSwitcherBtns = document.querySelectorAll(".theme-switcher-btn");
 const drumOptions = $("#drum-options");
 const drumBarsSelect = $("#drum-bars-select");
 const oneShotsCheckbox = $("#one-shots-checkbox");
@@ -528,6 +531,46 @@ function loadSettings() {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// UI theme switcher (Classic / Terminal / Console) - a cosmetic skin only,
+// swaps CSS custom properties via [data-theme] on <html>. Canvas-drawn
+// waveforms read their colors from those same properties (see themeColor()
+// and registerThemeRepaint() below), so switching themes recolors already-
+// rendered results too, not just future ones.
+// ---------------------------------------------------------------------------
+
+function applyTheme(theme, { persist = true } = {}) {
+  const safeTheme = THEMES.includes(theme) ? theme : "classic";
+  if (safeTheme === "classic") {
+    document.documentElement.removeAttribute("data-theme");
+  } else {
+    document.documentElement.setAttribute("data-theme", safeTheme);
+  }
+  themeSwitcherBtns.forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.themeChoice === safeTheme);
+  });
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, safeTheme);
+    } catch (_) {
+      /* best-effort only */
+    }
+  }
+  repaintForTheme();
+}
+
+function loadTheme() {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY) || "classic";
+  } catch (_) {
+    return "classic";
+  }
+}
+
+themeSwitcherBtns.forEach((btn) => {
+  btn.addEventListener("click", () => applyTheme(btn.dataset.themeChoice));
+});
 
 /** Apply a saved settings blob to state + the DOM controls, before the first render. */
 function applySettings(saved) {
@@ -1155,6 +1198,30 @@ function renderChopList(chopRows) {
   return list;
 }
 
+/** Reads a CSS custom property's current value (theme-dependent), falling back if unset. */
+function themeColor(varName, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+  return v || fallback;
+}
+
+// Waveforms are canvas-drawn, so switching themes doesn't recolor them for free the way CSS-styled
+// elements do - each drawn canvas registers a small repaint closure here, and applyTheme() replays
+// them all. Entries for canvases no longer in the document are dropped the next time it runs.
+const themeRepaints = [];
+function registerThemeRepaint(canvas, run) {
+  themeRepaints.push({ canvas, run });
+}
+function repaintForTheme() {
+  for (let i = themeRepaints.length - 1; i >= 0; i--) {
+    const { canvas, run } = themeRepaints[i];
+    if (!canvas.isConnected) {
+      themeRepaints.splice(i, 1);
+      continue;
+    }
+    run();
+  }
+}
+
 /** Draws a waveform-with-markers preview. Sized to the canvas's actual rendered width for crispness. */
 function drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers) {
   const rectWidth = Math.max(200, Math.round(canvas.getBoundingClientRect().width || 600));
@@ -1168,7 +1235,7 @@ function drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers) {
   ctx.clearRect(0, 0, w, h);
 
   const barWidth = w / peaks.length;
-  ctx.fillStyle = "rgba(139, 124, 255, 0.55)";
+  ctx.fillStyle = themeColor("--wave-fill", "rgba(139, 124, 255, 0.55)");
   for (let i = 0; i < peaks.length; i++) {
     const amp = Math.max(1, peaks[i] * (h * 0.46));
     const x = i * barWidth;
@@ -1176,7 +1243,7 @@ function drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers) {
   }
 
   if (duration > 0) {
-    ctx.strokeStyle = "rgba(237, 238, 243, 0.5)";
+    ctx.strokeStyle = themeColor("--wave-line", "rgba(237, 238, 243, 0.5)");
     ctx.lineWidth = 1;
     for (const [s, e] of chopMarkers || []) {
       for (const t of [s, e]) {
@@ -1188,7 +1255,7 @@ function drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers) {
       }
     }
 
-    ctx.fillStyle = "#56d0c8";
+    ctx.fillStyle = themeColor("--wave-marker", "#56d0c8");
     for (const [s] of oneShotMarkers || []) {
       const x = (s / duration) * w;
       ctx.beginPath();
@@ -1245,6 +1312,7 @@ function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) 
   const canvas = document.createElement("canvas");
   canvas.className = "waveform-canvas waveform-canvas--editable";
   wrap.appendChild(canvas);
+  registerThemeRepaint(canvas, () => redraw());
 
   const regions = initialRegions.map(([s, e]) => ({ s, e }));
   const MIN_GAP_SEC = 0.03;
@@ -1298,25 +1366,28 @@ function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) 
     const peaks = mono ? computePeaksInRange(mono, viewStart * sampleRate, (viewStart + viewDuration) * sampleRate, BIN_COUNT) : null;
     if (peaks) {
       const barWidth = w / peaks.length;
-      ctx.fillStyle = "rgba(139, 124, 255, 0.55)";
+      ctx.fillStyle = themeColor("--wave-fill", "rgba(139, 124, 255, 0.55)");
       for (let i = 0; i < peaks.length; i++) {
         const amp = Math.max(1, peaks[i] * (h * 0.46));
         ctx.fillRect(i * barWidth, mid - amp, Math.max(1, barWidth - 0.4), amp * 2);
       }
     }
 
+    const regionColorA = themeColor("--wave-region-a", "rgba(86, 208, 200, 0.1)");
+    const regionColorB = themeColor("--wave-region-b", "rgba(139, 124, 255, 0.1)");
     regions.forEach((r, idx) => {
       const x0 = Math.max(0, timeToX(r.s, w));
       const x1 = Math.min(w, timeToX(r.e, w));
       if (x1 <= x0) return; // region isn't in the visible window
-      ctx.fillStyle = idx % 2 === 0 ? "rgba(86, 208, 200, 0.1)" : "rgba(139, 124, 255, 0.1)";
+      ctx.fillStyle = idx % 2 === 0 ? regionColorA : regionColorB;
       ctx.fillRect(x0, 0, x1 - x0, h);
     });
+    const handleColor = themeColor("--wave-handle", "#edeef3");
     regions.forEach((r) => {
       for (const t of [r.s, r.e]) {
         const x = timeToX(t, w);
         if (x < -6 || x > w + 6) continue;
-        ctx.strokeStyle = "#edeef3";
+        ctx.strokeStyle = handleColor;
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(x, 0);
@@ -1324,7 +1395,7 @@ function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) 
         ctx.stroke();
         ctx.beginPath();
         ctx.arc(x, mid, 5, 0, Math.PI * 2);
-        ctx.fillStyle = "#edeef3";
+        ctx.fillStyle = handleColor;
         ctx.fill();
       }
     });
@@ -1559,6 +1630,7 @@ function renderFileResult(state) {
     staticArea.appendChild(canvas);
     // Draw after layout so getBoundingClientRect reports the real rendered width.
     requestAnimationFrame(() => drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers));
+    registerThemeRepaint(canvas, () => drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers));
   }
 
   staticArea.appendChild(renderChopList(chopRows));
@@ -1681,6 +1753,7 @@ splitSubfoldersCheckbox.addEventListener("change", saveSettings);
 
 function init() {
   versionBadge.textContent = `v${APP_VERSION}`;
+  applyTheme(loadTheme(), { persist: false });
   applySettings(loadSettings());
   updateNamingPreview(); // outside applySettings so it also runs for first-time visitors with nothing saved yet
 
