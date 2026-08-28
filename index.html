@@ -154,7 +154,41 @@
   </section>
 
   <section class="panel">
-    <h2>6. Process</h2>
+    <h2>6. Time-stretch <span class="section-badge">optional</span></h2>
+    <label class="checkbox-label">
+      <input id="timestretch-enable-checkbox" type="checkbox" />
+      Time-stretch chops on export (pitch is preserved)
+    </label>
+    <div id="timestretch-options" class="naming-grid" hidden>
+      <div class="export-row">
+        <label for="timestretch-mode-select">Mode</label>
+        <select id="timestretch-mode-select">
+          <option value="target-tempo">Match a target tempo</option>
+          <option value="fixed-ratio">Fixed ratio</option>
+        </select>
+      </div>
+      <div class="export-row" id="timestretch-target-row">
+        <label for="timestretch-target-bpm-input">Target tempo <span id="timestretch-target-bpm-value">120 BPM</span></label>
+        <input id="timestretch-target-bpm-input" type="range" min="40" max="220" step="1" value="120" />
+      </div>
+      <div class="export-row" id="timestretch-ratio-row" hidden>
+        <label for="timestretch-ratio-input">Stretch amount <span id="timestretch-ratio-value">100%</span></label>
+        <input id="timestretch-ratio-input" type="range" min="25" max="400" step="1" value="100" />
+      </div>
+      <div class="export-row">
+        <label for="timestretch-character-select">Character</label>
+        <select id="timestretch-character-select">
+          <option value="clean">Clean</option>
+          <option value="vintage">Vintage — grainy, warbly, 90s sampler style</option>
+          <option value="glitch">Glitch — extreme, metallic, low-bit</option>
+        </select>
+      </div>
+    </div>
+    <p class="naming-note">Applies to the main chops only — one-shots and the wav/ copy of the original are untouched. In "Match a target tempo" mode, a file with no confident tempo detected exports unstretched.</p>
+  </section>
+
+  <section class="panel">
+    <h2>7. Process</h2>
     <button id="process-btn" class="btn btn--primary btn--large" disabled>Process Batch</button>
     <div id="log-panel" class="log-panel"></div>
   </section>

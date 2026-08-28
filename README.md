@@ -32,6 +32,20 @@ site on GitHub Pages.
   panel with its chop boundaries and any one-shot hits marked, so you can
   see at a glance how the auto-detection carved it up before you go
   digging through the audio players.
+- **Manual chop-boundary editing.** Click **Edit chops** on any processed
+  file to drag its start/end points directly on the waveform, then
+  **Save & re-export** to re-cut just that file with your adjusted
+  boundaries. This is drag-only for now — adding or removing chops isn't
+  supported yet.
+- **Optional time-stretch.** Stretch chops on export while preserving
+  pitch, either by matching every file to one target tempo (handy for
+  normalizing a batch to a single BPM) or by a fixed stretch ratio applied
+  to everything. Three "character" presets trade off cleanliness for
+  vibe: Clean is a transparent stretch, Vintage adds the grainy warble of
+  a 90s hardware sampler, and Glitch pushes that further into metallic,
+  low-bit territory. Applies to the main chops only — one-shots and the
+  `wav/` copy of the original are left untouched, and a file with no
+  confident tempo detected exports unstretched in target-tempo mode.
 - **One-shot hit extraction (drums, optional).** Pulls individual kick/snare/
   hat/cymbal-type hits out of a break into their own `one shots/` folder,
   roughly sorted by sound and deduplicated so a loop's repeated hits don't
@@ -55,7 +69,7 @@ site on GitHub Pages.
 - **A batch that survives one bad file.** If a single file fails to decode
   or analyze, it's logged and skipped; the rest of the batch keeps going.
 
-The version number shown next to the title (e.g. `v0.4`) ticks up with each
+The version number shown next to the title (e.g. `v0.5`) ticks up with each
 meaningful change, so you can tell at a glance whether you're looking at the
 latest build.
 
@@ -112,6 +126,15 @@ numbers only, name + number, or name + key/tempo + number — along with the
 separator character and a max name length, independent of mode. Your
 choices (and most other settings) are remembered in this browser between
 visits.
+
+Once a file has processed, its result card shows an **Edit chops** button
+if it produced any chops — click it to drag the boundaries on that file's
+waveform directly, then **Save & re-export** to re-cut just that file. The
+optional **Time-stretch** panel (section 6) applies to every export in the
+batch, not per-file: turn it on, pick a mode (match a target tempo, or a
+fixed ratio) and a character (Clean/Vintage/Glitch), and it's baked into
+every chop as it's exported — including a manual re-export from the
+editor.
 
 ## Deploying to GitHub Pages
 
@@ -254,6 +277,7 @@ unit-tested with plain Node:
 ```
 node test/dsp.test.mjs
 node test/io-fs.test.mjs
+node test/timestretch.test.mjs
 ```
 
 There are also a few optional browser-integration tests that exercise the
@@ -288,3 +312,7 @@ node test/run-e2e-check.mjs   # needs a fixture WAV — see the file's header co
   trained model — it's a reasonable sort for kick/snare/hat/cymbal-ish
   sounds, but will mislabel unusual or layered hits. Always worth a quick
   listen through the `one shots/` folder before relying on the labels.
+- The manual chop editor only lets you drag existing boundaries — adding or
+  removing chop points isn't supported yet.
+- Time-stretch is one setting for the whole batch, not per-chop; a proper
+  per-chop stretch control would need the editor built out further first.

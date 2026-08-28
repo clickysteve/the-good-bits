@@ -123,6 +123,22 @@ main {
   font-weight: 500;
 }
 
+.section-badge {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--accent-2);
+  background: rgba(86, 208, 200, 0.1);
+  border: 1px solid rgba(86, 208, 200, 0.25);
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+}
+
 /* mode cards */
 
 .mode-cards {
@@ -359,6 +375,11 @@ main {
   flex: none;
 }
 
+.btn--small {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.78rem;
+}
+
 /* params */
 
 .params-panel-header {
@@ -479,6 +500,13 @@ input[type="text"]:hover {
   margin-bottom: 0.9rem;
 }
 
+/* .naming-grid sets its own display, which silently overrides the [hidden]
+   attribute otherwise — same trap as .drum-options above. #timestretch-options
+   reuses this class and is toggled via `hidden`, so it needs this override. */
+.naming-grid[hidden] {
+  display: none;
+}
+
 .naming-note {
   color: var(--text-faint);
   font-size: 0.82rem;
@@ -596,6 +624,17 @@ input[type="text"]:hover {
   margin-bottom: 0.9rem;
 }
 
+.waveform-canvas--editable {
+  height: 84px;
+  cursor: pointer;
+  touch-action: none;
+  border: 1px solid var(--border-soft);
+}
+
+.waveform-canvas--dragging {
+  cursor: grabbing;
+}
+
 .result-file-header {
   display: flex;
   justify-content: space-between;
@@ -648,6 +687,24 @@ input[type="text"]:hover {
   height: 32px;
   flex: 1;
   max-width: 320px;
+}
+
+/* manual chop editor */
+
+.chop-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.chop-editor-hint {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 0.82rem;
+}
+
+.chop-editor-actions {
+  margin-top: 0.1rem;
 }
 
 /* confirm dialog */

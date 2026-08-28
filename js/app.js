@@ -18,6 +18,7 @@ import {
   pickOnsets,
   computePeaks,
 } from "./dsp.js";
+import { wsolaStretchChannels, ratioForTargetTempo } from "./timestretch.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
 import { APP_VERSION } from "./version.js";
@@ -79,6 +80,9 @@ const namingSettings = {
 
 const exportSettings = { bitDepth: 24, fadeMs: 5, zcSearchMs: 15 };
 const detectSettings = { key: true, tempo: true };
+
+// Applied to main chops only (not one-shots, not the wav/ copy) at export time.
+const timestretchSettings = { enabled: false, mode: "target-tempo", targetBpm: 120, ratio: 1.0, character: "clean" };
 
 const SETTINGS_STORAGE_KEY = "good-bits-settings-v1";
 
@@ -151,6 +155,14 @@ const namingPatternSelect = $("#naming-pattern-select");
 const namingSeparatorSelect = $("#naming-separator-select");
 const namingMaxLenInput = $("#naming-maxlen-input");
 const namingFolderTagCheckbox = $("#naming-folder-tag-checkbox");
+const timestretchEnableCheckbox = $("#timestretch-enable-checkbox");
+const timestretchOptions = $("#timestretch-options");
+const timestretchModeSelect = $("#timestretch-mode-select");
+const timestretchTargetRow = $("#timestretch-target-row");
+const timestretchTargetBpmInput = $("#timestretch-target-bpm-input");
+const timestretchRatioRow = $("#timestretch-ratio-row");
+const timestretchRatioInput = $("#timestretch-ratio-input");
+const timestretchCharacterSelect = $("#timestretch-character-select");
 
 // ---------------------------------------------------------------------------
 // Logging / progress
@@ -412,6 +424,47 @@ function buildChopFileName(stem, tag, index) {
 }
 
 // ---------------------------------------------------------------------------
+// Time-stretch
+// ---------------------------------------------------------------------------
+
+function updateTimestretchModeVisibility() {
+  timestretchTargetRow.hidden = timestretchSettings.mode !== "target-tempo";
+  timestretchRatioRow.hidden = timestretchSettings.mode !== "fixed-ratio";
+}
+
+timestretchEnableCheckbox.addEventListener("change", () => {
+  timestretchSettings.enabled = timestretchEnableCheckbox.checked;
+  timestretchOptions.hidden = !timestretchSettings.enabled;
+  saveSettings();
+});
+timestretchModeSelect.addEventListener("change", () => {
+  timestretchSettings.mode = timestretchModeSelect.value;
+  updateTimestretchModeVisibility();
+  saveSettings();
+});
+timestretchTargetBpmInput.addEventListener("input", () => {
+  timestretchSettings.targetBpm = parseInt(timestretchTargetBpmInput.value, 10);
+  $("#timestretch-target-bpm-value").textContent = `${timestretchTargetBpmInput.value} BPM`;
+  saveSettings();
+});
+timestretchRatioInput.addEventListener("input", () => {
+  timestretchSettings.ratio = parseInt(timestretchRatioInput.value, 10) / 100;
+  $("#timestretch-ratio-value").textContent = `${timestretchRatioInput.value}%`;
+  saveSettings();
+});
+timestretchCharacterSelect.addEventListener("change", () => {
+  timestretchSettings.character = timestretchCharacterSelect.value;
+  saveSettings();
+});
+
+/** ratio to pass to wsolaStretchChannels for this file, or 1 (no-op) if stretching doesn't apply. */
+function resolveStretchRatio(detectedBpm) {
+  if (!timestretchSettings.enabled) return 1;
+  if (timestretchSettings.mode === "fixed-ratio") return timestretchSettings.ratio;
+  return detectedBpm ? ratioForTargetTempo(detectedBpm, timestretchSettings.targetBpm) : 1;
+}
+
+// ---------------------------------------------------------------------------
 // Settings persistence (this browser only — a light convenience, not sync)
 // ---------------------------------------------------------------------------
 
@@ -427,6 +480,7 @@ function saveSettings() {
         naming: namingSettings,
         exportSettings,
         detectSettings,
+        timestretch: timestretchSettings,
         splitSubfolders: splitSubfoldersCheckbox.checked,
       })
     );
@@ -486,6 +540,18 @@ function applySettings(saved) {
   }
   if (typeof saved.splitSubfolders === "boolean") {
     splitSubfoldersCheckbox.checked = saved.splitSubfolders;
+  }
+  if (saved.timestretch) {
+    Object.assign(timestretchSettings, saved.timestretch);
+    timestretchEnableCheckbox.checked = timestretchSettings.enabled;
+    timestretchOptions.hidden = !timestretchSettings.enabled;
+    timestretchModeSelect.value = timestretchSettings.mode;
+    timestretchTargetBpmInput.value = String(timestretchSettings.targetBpm);
+    $("#timestretch-target-bpm-value").textContent = `${timestretchSettings.targetBpm} BPM`;
+    timestretchRatioInput.value = String(Math.round(timestretchSettings.ratio * 100));
+    $("#timestretch-ratio-value").textContent = `${Math.round(timestretchSettings.ratio * 100)}%`;
+    timestretchCharacterSelect.value = timestretchSettings.character;
+    updateTimestretchModeVisibility();
   }
   updateDrumOptionsVisibility();
 }
@@ -774,37 +840,20 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
 
   log(`    key: ${keyText} | tempo: ${bpmText} | ${regions.length} candidate phrase(s)`);
 
-  if (folder.kind === "fsa") {
-    await clearOldChopsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
-  }
-
-  const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
-  const fadeOutSamples = fadeInSamples;
-  const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
-
-  const chopRows = [];
-  const chopMarkers = [];
-  let made = 0;
-  for (const [s, e] of regions) {
-    made++;
-    let startSample = Math.max(0, Math.round(s * buffer.sampleRate));
-    let endSample = Math.min(mono.length, Math.round(e * buffer.sampleRate));
-    if (zcWindow > 0) {
-      startSample = findNearestZeroCrossing(mono, startSample, zcWindow);
-      endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
-    }
-    if (endSample <= startSample) continue;
-
-    const sliced = sliceChannels(channels, startSample, endSample);
-    applyFades(sliced, fadeInSamples, fadeOutSamples);
-    const blob = encodeWav(sliced, buffer.sampleRate, exportSettings.bitDepth);
-
-    const fileName = buildChopFileName(stem, tag, made);
-    await writeOutput(folder, "chops", `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`, fileName, blob, zipBatch);
-
-    chopRows.push({ fileName, blob, seconds: (endSample - startSample) / buffer.sampleRate });
-    chopMarkers.push([startSample / buffer.sampleRate, endSample / buffer.sampleRate]);
-  }
+  const editContext = { folder, fileInfo, stem, tag, taggedStem, detectedBpm: kt.bpm };
+  const { chopRows, chopMarkers } = await exportChopsForRegions({
+    folder,
+    fileInfo,
+    regions,
+    stem,
+    tag,
+    taggedStem,
+    buffer,
+    channels,
+    mono,
+    zipBatch,
+    detectedBpm: kt.bpm,
+  });
 
   log(`    created ${chopRows.length} chop(s)`);
 
@@ -819,8 +868,84 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
 
   const peaks = computePeaks(mono, 400);
   const duration = mono.length / buffer.sampleRate;
-  renderFileResult(folderResultsEl, fileInfo.name, keyText, bpmText, chopRows, oneShotRows, { peaks, duration, chopMarkers, oneShotMarkers });
+  const block = renderFileResult(fileInfo.name, keyText, bpmText, chopRows, oneShotRows, { peaks, duration, chopMarkers, oneShotMarkers }, editContext);
+  folderResultsEl.appendChild(block);
   return chopRows.length;
+}
+
+/**
+ * Writes chops for a set of [start,end] second regions against an already-decoded file, applying
+ * zero-crossing snap, optional time-stretch (main chops only), and fades. Shared by the initial
+ * auto-detected pass and by the manual chop editor's "Save & re-export".
+ */
+async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, detectedBpm }) {
+  if (folder.kind === "fsa") {
+    await clearOldChopsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
+  }
+
+  const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
+  const fadeOutSamples = fadeInSamples;
+  const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
+  const stretchRatio = resolveStretchRatio(detectedBpm);
+
+  const sortedRegions = [...regions].sort((a, b) => a[0] - b[0]);
+  const chopRows = [];
+  const chopMarkers = [];
+  let made = 0;
+  for (const [s, e] of sortedRegions) {
+    made++;
+    let startSample = Math.max(0, Math.round(s * buffer.sampleRate));
+    let endSample = Math.min(mono.length, Math.round(e * buffer.sampleRate));
+    if (zcWindow > 0) {
+      startSample = findNearestZeroCrossing(mono, startSample, zcWindow);
+      endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
+    }
+    if (endSample <= startSample) continue;
+
+    let sliced = sliceChannels(channels, startSample, endSample);
+    if (stretchRatio !== 1) {
+      sliced = wsolaStretchChannels(sliced, buffer.sampleRate, stretchRatio, timestretchSettings.character);
+    }
+    applyFades(sliced, fadeInSamples, fadeOutSamples);
+    const blob = encodeWav(sliced, buffer.sampleRate, exportSettings.bitDepth);
+
+    const fileName = buildChopFileName(stem, tag, made);
+    await writeOutput(folder, "chops", `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`, fileName, blob, zipBatch);
+
+    chopRows.push({ fileName, blob, seconds: sliced[0].length / buffer.sampleRate });
+    chopMarkers.push([startSample / buffer.sampleRate, endSample / buffer.sampleRate]);
+  }
+  return { chopRows, chopMarkers };
+}
+
+/** Re-decodes a source file and re-exports its main chops from a manually-edited region list. */
+async function reExportSingleFile(editContext, editedRegions) {
+  const { folder, fileInfo, stem, tag, taggedStem, detectedBpm } = editContext;
+  const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
+  const { buffer } = await decodeFile(file, fileInfo.ext);
+  const channels = bufferChannels(buffer);
+  const mono = toMono(channels);
+  const zipBatch = folder.kind === "fsa" ? null : new ZipBatch();
+
+  const { chopRows, chopMarkers } = await exportChopsForRegions({
+    folder,
+    fileInfo,
+    regions: editedRegions,
+    stem,
+    tag,
+    taggedStem,
+    buffer,
+    channels,
+    mono,
+    zipBatch,
+    detectedBpm,
+  });
+
+  if (zipBatch) {
+    await zipBatch.downloadAs(`${sanitizeForPath(taggedStem, namingSettings.maxLen)}_re-exported.zip`);
+  }
+
+  return { chopRows, chopMarkers, peaks: computePeaks(mono, 400), duration: mono.length / buffer.sampleRate };
 }
 
 function renderSkippedFileResult(folderSection, fileName, reason) {
@@ -960,38 +1085,237 @@ function drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers) {
   }
 }
 
-function renderFileResult(folderSection, fileName, keyText, bpmText, chopRows, oneShotRows = [], viz = null) {
+/**
+ * Interactive version of the waveform preview: existing chop-boundary handles can be dragged
+ * (pointer events, so mouse/touch/pen all work). Returns {canvas, getRegions, destroy}. Adding or
+ * removing boundaries isn't supported yet — v1 is deliberately just "nudge what's already there".
+ */
+function createEditableWaveform(peaks, duration, initialRegions) {
+  const canvas = document.createElement("canvas");
+  canvas.className = "waveform-canvas waveform-canvas--editable";
+  const regions = initialRegions.map(([s, e]) => ({ s, e }));
+  let dragging = null; // { idx, which: 's' | 'e' }
+
+  function redraw() {
+    const rectWidth = Math.max(200, Math.round(canvas.getBoundingClientRect().width || 600));
+    canvas.width = rectWidth;
+    canvas.height = 84;
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width;
+    const h = canvas.height;
+    const mid = h / 2;
+    ctx.clearRect(0, 0, w, h);
+
+    const barWidth = w / peaks.length;
+    ctx.fillStyle = "rgba(139, 124, 255, 0.55)";
+    for (let i = 0; i < peaks.length; i++) {
+      const amp = Math.max(1, peaks[i] * (h * 0.46));
+      ctx.fillRect(i * barWidth, mid - amp, Math.max(1, barWidth - 0.4), amp * 2);
+    }
+
+    if (duration <= 0) return;
+    regions.forEach((r, idx) => {
+      const x0 = (r.s / duration) * w;
+      const x1 = (r.e / duration) * w;
+      ctx.fillStyle = idx % 2 === 0 ? "rgba(86, 208, 200, 0.1)" : "rgba(139, 124, 255, 0.1)";
+      ctx.fillRect(x0, 0, x1 - x0, h);
+    });
+    regions.forEach((r) => {
+      for (const t of [r.s, r.e]) {
+        const x = (t / duration) * w;
+        ctx.strokeStyle = "#edeef3";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(x, mid, 5, 0, Math.PI * 2);
+        ctx.fillStyle = "#edeef3";
+        ctx.fill();
+      }
+    });
+  }
+
+  function timeAtClientX(clientX) {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    return rect.width > 0 ? (x / rect.width) * duration : 0;
+  }
+
+  function hitTest(clientX) {
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0) return null;
+    const toleranceSec = (8 / rect.width) * duration;
+    const t = timeAtClientX(clientX);
+    let best = null;
+    let bestDist = toleranceSec;
+    regions.forEach((r, idx) => {
+      for (const which of ["s", "e"]) {
+        const d = Math.abs(r[which] - t);
+        if (d < bestDist) {
+          bestDist = d;
+          best = { idx, which };
+        }
+      }
+    });
+    return best;
+  }
+
+  const MIN_GAP_SEC = 0.03;
+  canvas.addEventListener("pointerdown", (ev) => {
+    const hit = hitTest(ev.clientX);
+    if (!hit) return;
+    dragging = hit;
+    canvas.setPointerCapture(ev.pointerId);
+    canvas.classList.add("waveform-canvas--dragging");
+  });
+  canvas.addEventListener("pointermove", (ev) => {
+    if (!dragging) return;
+    const r = regions[dragging.idx];
+    let t = timeAtClientX(ev.clientX);
+    t = dragging.which === "s" ? Math.max(0, Math.min(r.e - MIN_GAP_SEC, t)) : Math.max(r.s + MIN_GAP_SEC, Math.min(duration, t));
+    r[dragging.which] = t;
+    redraw();
+  });
+  function endDrag() {
+    if (dragging) canvas.classList.remove("waveform-canvas--dragging");
+    dragging = null;
+  }
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+
+  redraw();
+  window.addEventListener("resize", redraw);
+
+  return {
+    canvas,
+    getRegions: () => regions.map((r) => [r.s, r.e]),
+    destroy: () => window.removeEventListener("resize", redraw),
+  };
+}
+
+/** Swaps a result-file block into edit mode: draggable waveform + Save/Cancel, replacing the static view. */
+function enterEditMode(block, editContext, viz, staticArea, editBtn) {
+  staticArea.hidden = true;
+  editBtn.disabled = true;
+
+  const editorWrap = document.createElement("div");
+  editorWrap.className = "chop-editor";
+
+  const hint = document.createElement("p");
+  hint.className = "chop-editor-hint";
+  hint.textContent = "Drag the white handles to adjust cut points, then save. Adding or removing chops isn't supported yet.";
+  editorWrap.appendChild(hint);
+
+  const editor = createEditableWaveform(viz.peaks, viz.duration, viz.chopMarkers);
+  editorWrap.appendChild(editor.canvas);
+
+  const actions = document.createElement("div");
+  actions.className = "modal-actions chop-editor-actions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "btn btn--ghost";
+  cancelBtn.textContent = "Cancel";
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "btn btn--primary";
+  saveBtn.textContent = "Save & re-export";
+  actions.appendChild(cancelBtn);
+  actions.appendChild(saveBtn);
+  editorWrap.appendChild(actions);
+
+  block.insertBefore(editorWrap, staticArea);
+
+  function exit() {
+    editor.destroy();
+    editorWrap.remove();
+    staticArea.hidden = false;
+    editBtn.disabled = false;
+  }
+
+  cancelBtn.addEventListener("click", exit);
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    cancelBtn.disabled = true;
+    saveBtn.textContent = "Re-exporting…";
+    try {
+      const result = await reExportSingleFile(editContext, editor.getRegions());
+      log(`  ${editContext.fileInfo.name}: re-exported ${result.chopRows.length} chop(s) with edited boundaries`);
+      const newBlock = renderFileResult(
+        editContext.fileInfo.name,
+        block.dataset.keyText || "",
+        block.dataset.bpmText || "",
+        result.chopRows,
+        [],
+        { peaks: result.peaks, duration: result.duration, chopMarkers: result.chopMarkers, oneShotMarkers: [] },
+        editContext
+      );
+      block.replaceWith(newBlock);
+    } catch (err) {
+      log(`  ERROR re-exporting ${editContext.fileInfo.name}: ${err.message || err}`);
+      console.error(err);
+      saveBtn.disabled = false;
+      cancelBtn.disabled = false;
+      saveBtn.textContent = "Save & re-export";
+    }
+  });
+}
+
+function renderFileResult(fileName, keyText, bpmText, chopRows, oneShotRows = [], viz = null, editContext = null) {
   const block = document.createElement("div");
   block.className = "result-file";
+  block.dataset.keyText = keyText;
+  block.dataset.bpmText = bpmText;
 
   const header = document.createElement("div");
   header.className = "result-file-header";
-  header.innerHTML = `<span class="result-file-name">${escapeHtml(fileName)}</span><span class="result-file-meta">key: ${escapeHtml(
-    keyText
-  )} &middot; tempo: ${escapeHtml(bpmText)} &middot; ${chopRows.length} chop(s)${
-    oneShotRows.length ? ` &middot; ${oneShotRows.length} one-shot(s)` : ""
-  }</span>`;
+  const nameEl = document.createElement("span");
+  nameEl.className = "result-file-name";
+  nameEl.textContent = fileName;
+  const metaEl = document.createElement("span");
+  metaEl.className = "result-file-meta";
+  metaEl.textContent = `key: ${keyText} · tempo: ${bpmText} · ${chopRows.length} chop(s)${
+    oneShotRows.length ? ` · ${oneShotRows.length} one-shot(s)` : ""
+  }`;
+  header.appendChild(nameEl);
+  header.appendChild(metaEl);
+
+  let editBtn = null;
+  if (editContext && chopRows.length) {
+    editBtn = document.createElement("button");
+    editBtn.className = "btn btn--ghost btn--small";
+    editBtn.textContent = "Edit chops";
+    header.appendChild(editBtn);
+  }
   block.appendChild(header);
+
+  const staticArea = document.createElement("div");
+  staticArea.className = "result-file-static";
 
   if (viz && viz.peaks && viz.peaks.length) {
     const canvas = document.createElement("canvas");
     canvas.className = "waveform-canvas";
-    block.appendChild(canvas);
+    staticArea.appendChild(canvas);
     // Draw after layout so getBoundingClientRect reports the real rendered width.
     requestAnimationFrame(() => drawWaveform(canvas, viz.peaks, viz.duration, viz.chopMarkers, viz.oneShotMarkers));
   }
 
-  block.appendChild(renderChopList(chopRows));
+  staticArea.appendChild(renderChopList(chopRows));
 
   if (oneShotRows.length) {
     const oneShotHeading = document.createElement("div");
     oneShotHeading.className = "result-subheading";
     oneShotHeading.textContent = "One-shots";
-    block.appendChild(oneShotHeading);
-    block.appendChild(renderChopList(oneShotRows));
+    staticArea.appendChild(oneShotHeading);
+    staticArea.appendChild(renderChopList(oneShotRows));
   }
 
-  folderSection.appendChild(block);
+  block.appendChild(staticArea);
+
+  if (editBtn) {
+    editBtn.addEventListener("click", () => enterEditMode(block, editContext, viz, staticArea, editBtn));
+  }
+
+  return block;
 }
 
 function escapeHtml(str) {
