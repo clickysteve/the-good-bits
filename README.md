@@ -25,7 +25,13 @@ site on GitHub Pages.
 - **Tempo-locked drum chopping, in bars.** Choose a chop length in bars (1,
   2, 3, 4, 6, 8, 16…) and it's converted to seconds from the detected tempo,
   then boundaries snap to the beat grid so chop lengths are exact and loop
-  cleanly. Falls back to a fixed length if no confident tempo is found.
+  cleanly. If tempo isn't confidently detected on a drums-mode file, you get
+  a warning and a choice: continue with a fixed fallback length, or skip
+  that file — with an option to apply your choice to the rest of the batch.
+- **Waveform previews.** Each processed file gets a waveform in the results
+  panel with its chop boundaries and any one-shot hits marked, so you can
+  see at a glance how the auto-detection carved it up before you go
+  digging through the audio players.
 - **One-shot hit extraction (drums, optional).** Pulls individual kick/snare/
   hat/cymbal-type hits out of a break into their own `one shots/` folder,
   roughly sorted by sound and deduplicated so a loop's repeated hits don't
@@ -49,7 +55,7 @@ site on GitHub Pages.
 - **A batch that survives one bad file.** If a single file fails to decode
   or analyze, it's logged and skipped; the rest of the batch keeps going.
 
-The version number shown next to the title (e.g. `v0.3`) ticks up with each
+The version number shown next to the title (e.g. `v0.4`) ticks up with each
 meaningful change, so you can tell at a glance whether you're looking at the
 latest build.
 

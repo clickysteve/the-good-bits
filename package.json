@@ -2,7 +2,7 @@
   "name": "the-good-bits",
   "private": true,
   "type": "module",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The Good Bits: browser-based auto sample chopper. Silence/phrase detection for melodic sources, tempo-locked loop chopping and one-shot extraction for drums, auto key/tempo detection. Static site, deploy as-is to GitHub Pages.",
   "scripts": {
     "serve": "npx http-server -c-1 ."

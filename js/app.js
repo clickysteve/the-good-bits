@@ -16,6 +16,7 @@ import {
   onsetStrengthCurve,
   computeRmsEnvelope,
   pickOnsets,
+  computePeaks,
 } from "./dsp.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
@@ -80,6 +81,10 @@ const exportSettings = { bitDepth: 24, fadeMs: 5, zcSearchMs: 15 };
 const detectSettings = { key: true, tempo: true };
 
 const SETTINGS_STORAGE_KEY = "good-bits-settings-v1";
+
+// Reset at the start of every batch; "continue"/"skip" once the user checks "remember for
+// this batch" in the no-tempo-detected confirm dialog, so they aren't asked file after file.
+let drumTempoSkipPolicy = null;
 
 const PARAM_SCHEMAS = {
   phrases: [
@@ -159,8 +164,90 @@ function log(line) {
   logPanel.scrollTop = logPanel.scrollHeight;
 }
 
+function logWarn(line) {
+  const el = document.createElement("div");
+  el.className = "log-line log-line--warn";
+  el.textContent = `⚠ ${line}`;
+  logPanel.appendChild(el);
+  logPanel.scrollTop = logPanel.scrollHeight;
+}
+
 function clearLog() {
   logPanel.innerHTML = "";
+}
+
+// ---------------------------------------------------------------------------
+// Confirm dialog (themed replacement for window.confirm, since a blocking
+// native dialog would clash with the rest of the UI)
+// ---------------------------------------------------------------------------
+
+function showConfirmDialog({ title, body, confirmLabel = "Continue", cancelLabel = "Cancel", showRemember = false }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+
+    const modal = document.createElement("div");
+    modal.className = "modal";
+
+    const h = document.createElement("h3");
+    h.textContent = title;
+    modal.appendChild(h);
+
+    const p = document.createElement("p");
+    p.textContent = body;
+    modal.appendChild(p);
+
+    let rememberCheckbox = null;
+    if (showRemember) {
+      const label = document.createElement("label");
+      label.className = "checkbox-label modal-remember";
+      rememberCheckbox = document.createElement("input");
+      rememberCheckbox.type = "checkbox";
+      label.appendChild(rememberCheckbox);
+      label.append(" Use this choice for the rest of this batch");
+      modal.appendChild(label);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "modal-actions";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "btn btn--ghost";
+    cancelBtn.textContent = cancelLabel;
+    const confirmBtn = document.createElement("button");
+    confirmBtn.className = "btn btn--primary";
+    confirmBtn.textContent = confirmLabel;
+    actions.appendChild(cancelBtn);
+    actions.appendChild(confirmBtn);
+    modal.appendChild(actions);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    confirmBtn.focus();
+
+    function close(confirmed) {
+      overlay.remove();
+      resolve({ confirmed, remember: rememberCheckbox ? rememberCheckbox.checked : false });
+    }
+    cancelBtn.addEventListener("click", () => close(false));
+    confirmBtn.addEventListener("click", () => close(true));
+  });
+}
+
+/** Gate for drums-mode files where tempo detection was attempted but came back empty. */
+async function resolveTempoWarning(fileName) {
+  if (drumTempoSkipPolicy === "continue") return true;
+  if (drumTempoSkipPolicy === "skip") return false;
+
+  logWarn(`no confident tempo detected for "${fileName}"`);
+  const { confirmed, remember } = await showConfirmDialog({
+    title: "No tempo detected",
+    body: `"${fileName}" — no confident tempo was detected, so the drum chop length will fall back to a fixed length instead of your chosen bar count. Continue with the fallback, or skip this file?`,
+    confirmLabel: "Continue with fallback length",
+    cancelLabel: "Skip this file",
+    showRemember: true,
+  });
+  if (remember) drumTempoSkipPolicy = confirmed ? "continue" : "skip";
+  return confirmed;
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +736,18 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   const tag = buildKeyTempoTag(kt, namingSettings.separator);
   const taggedStem = buildTaggedStem(stem, tag);
 
+  const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
+  const bpmText = kt.bpm ? `${Math.round(kt.bpm)} BPM` : kt.available ? "unclear" : "unavailable";
+
+  if (mode === "drums" && wantTempo && !kt.bpm) {
+    const proceed = await resolveTempoWarning(fileInfo.name);
+    if (!proceed) {
+      log(`    skipped — no tempo detected`);
+      renderSkippedFileResult(folderResultsEl, fileInfo.name, "no tempo detected");
+      return 0;
+    }
+  }
+
   // Non-WAV sources get a full 24-bit WAV copy in wav/; true WAV sources are
   // analyzed and chopped in place, with nothing duplicated into wav/.
   if (fileInfo.ext !== ".wav") {
@@ -673,8 +772,6 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     regions = phraseRegions(mono, buffer.sampleRate, modeParams[mode]).regions;
   }
 
-  const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
-  const bpmText = kt.bpm ? `${Math.round(kt.bpm)} BPM` : kt.available ? "unclear" : "unavailable";
   log(`    key: ${keyText} | tempo: ${bpmText} | ${regions.length} candidate phrase(s)`);
 
   if (folder.kind === "fsa") {
@@ -686,6 +783,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
 
   const chopRows = [];
+  const chopMarkers = [];
   let made = 0;
   for (const [s, e] of regions) {
     made++;
@@ -705,24 +803,39 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     await writeOutput(folder, "chops", `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`, fileName, blob, zipBatch);
 
     chopRows.push({ fileName, blob, seconds: (endSample - startSample) / buffer.sampleRate });
+    chopMarkers.push([startSample / buffer.sampleRate, endSample / buffer.sampleRate]);
   }
 
   log(`    created ${chopRows.length} chop(s)`);
 
   let oneShotRows = [];
+  let oneShotMarkers = [];
   if (mode === "drums" && extractOneShots) {
-    oneShotRows = await extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, buffer.sampleRate, zipBatch);
+    const extracted = await extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, buffer.sampleRate, zipBatch);
+    oneShotRows = extracted.rows;
+    oneShotMarkers = extracted.markers;
     log(`    extracted ${oneShotRows.length} one-shot hit(s)`);
   }
 
-  renderFileResult(folderResultsEl, fileInfo.name, keyText, bpmText, chopRows, oneShotRows);
+  const peaks = computePeaks(mono, 400);
+  const duration = mono.length / buffer.sampleRate;
+  renderFileResult(folderResultsEl, fileInfo.name, keyText, bpmText, chopRows, oneShotRows, { peaks, duration, chopMarkers, oneShotMarkers });
   return chopRows.length;
 }
 
-/** Finds, classifies, dedupes and writes one-shot hits for a drum-mode source file. */
+function renderSkippedFileResult(folderSection, fileName, reason) {
+  const block = document.createElement("div");
+  block.className = "result-file result-file--skipped";
+  block.innerHTML = `<span class="result-file-name">${escapeHtml(fileName)}</span> <span class="result-file-meta">skipped — ${escapeHtml(
+    reason
+  )}</span>`;
+  folderSection.appendChild(block);
+}
+
+/** Finds, classifies, dedupes and writes one-shot hits for a drum-mode source file. Returns {rows, markers}. */
 async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, sampleRate, zipBatch) {
   const { times, vals } = computeRmsEnvelope(mono, sampleRate, 20, 10);
-  if (!vals.length) return [];
+  if (!vals.length) return { rows: [], markers: [] };
   const diffs = onsetStrengthCurve(vals);
   const onsets = pickOnsets(times, diffs, 0.65, 0.08);
   const windows = findOneShotWindows(mono, sampleRate, onsets);
@@ -737,7 +850,7 @@ async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, chann
   });
 
   const kept = dedupeHits(candidates);
-  if (kept.length === 0) return [];
+  if (kept.length === 0) return { rows: [], markers: [] };
 
   if (folder.kind === "fsa") {
     await clearOldOneShotsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
@@ -746,6 +859,7 @@ async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, chann
   const fadeOutSamples = Math.round(0.008 * sampleRate); // short tail fade only — a full fade-in would blunt the transient
   const counters = {};
   const rows = [];
+  const markers = [];
   for (const hit of kept) {
     counters[hit.label] = (counters[hit.label] || 0) + 1;
     const sliced = sliceChannels(channels, hit.startSample, hit.endSample);
@@ -761,8 +875,9 @@ async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, chann
       zipBatch
     );
     rows.push({ fileName, blob, seconds: (hit.endSample - hit.startSample) / sampleRate });
+    markers.push([hit.startSample / sampleRate, hit.endSample / sampleRate]);
   }
-  return rows;
+  return { rows, markers };
 }
 
 // ---------------------------------------------------------------------------
@@ -799,7 +914,53 @@ function renderChopList(chopRows) {
   return list;
 }
 
-function renderFileResult(folderSection, fileName, keyText, bpmText, chopRows, oneShotRows = []) {
+/** Draws a waveform-with-markers preview. Sized to the canvas's actual rendered width for crispness. */
+function drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers) {
+  const rectWidth = Math.max(200, Math.round(canvas.getBoundingClientRect().width || 600));
+  canvas.width = rectWidth;
+  canvas.height = 72;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  const mid = h / 2;
+
+  ctx.clearRect(0, 0, w, h);
+
+  const barWidth = w / peaks.length;
+  ctx.fillStyle = "rgba(139, 124, 255, 0.55)";
+  for (let i = 0; i < peaks.length; i++) {
+    const amp = Math.max(1, peaks[i] * (h * 0.46));
+    const x = i * barWidth;
+    ctx.fillRect(x, mid - amp, Math.max(1, barWidth - 0.4), amp * 2);
+  }
+
+  if (duration > 0) {
+    ctx.strokeStyle = "rgba(237, 238, 243, 0.5)";
+    ctx.lineWidth = 1;
+    for (const [s, e] of chopMarkers || []) {
+      for (const t of [s, e]) {
+        const x = (t / duration) * w;
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, 0);
+        ctx.lineTo(x + 0.5, h);
+        ctx.stroke();
+      }
+    }
+
+    ctx.fillStyle = "#56d0c8";
+    for (const [s] of oneShotMarkers || []) {
+      const x = (s / duration) * w;
+      ctx.beginPath();
+      ctx.moveTo(x - 3, 0);
+      ctx.lineTo(x + 3, 0);
+      ctx.lineTo(x, 6);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+}
+
+function renderFileResult(folderSection, fileName, keyText, bpmText, chopRows, oneShotRows = [], viz = null) {
   const block = document.createElement("div");
   block.className = "result-file";
 
@@ -811,6 +972,15 @@ function renderFileResult(folderSection, fileName, keyText, bpmText, chopRows, o
     oneShotRows.length ? ` &middot; ${oneShotRows.length} one-shot(s)` : ""
   }</span>`;
   block.appendChild(header);
+
+  if (viz && viz.peaks && viz.peaks.length) {
+    const canvas = document.createElement("canvas");
+    canvas.className = "waveform-canvas";
+    block.appendChild(canvas);
+    // Draw after layout so getBoundingClientRect reports the real rendered width.
+    requestAnimationFrame(() => drawWaveform(canvas, viz.peaks, viz.duration, viz.chopMarkers, viz.oneShotMarkers));
+  }
+
   block.appendChild(renderChopList(chopRows));
 
   if (oneShotRows.length) {
@@ -837,6 +1007,7 @@ async function processBatch() {
   updateProcessButton();
   clearLog();
   resultsPanel.innerHTML = "";
+  drumTempoSkipPolicy = null;
 
   const zipBatch = FSA_SUPPORTED ? null : new ZipBatch();
   let totalChops = 0;

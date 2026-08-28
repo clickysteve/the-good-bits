@@ -29,6 +29,7 @@ import {
   findOneShotWindows,
   dedupeHits,
   peakAbs,
+  computePeaks,
 } from "../js/dsp.js";
 import { encodeWav, parseWav, parseAiff } from "../js/audio-codec.js";
 
@@ -272,6 +273,23 @@ test("peakAbs: finds the largest absolute sample in range", () => {
   const mono = new Float32Array([0.1, -0.9, 0.3, 0.05]);
   assert.ok(Math.abs(peakAbs(mono, 0, mono.length) - 0.9) < 1e-6);
   assert.ok(Math.abs(peakAbs(mono, 2, mono.length) - 0.3) < 1e-6);
+});
+
+// --- waveform preview -------------------------------------------------------
+
+test("computePeaks: one bin per block, each holding that block's max-abs sample", () => {
+  const mono = new Float32Array([0.1, 0.2, -0.9, 0.3, 0.4, 0.5, -0.05, 0.05]);
+  const peaks = computePeaks(mono, 4); // 2 samples per bin
+  assert.equal(peaks.length, 4);
+  assert.ok(Math.abs(peaks[0] - 0.2) < 1e-6);
+  assert.ok(Math.abs(peaks[1] - 0.9) < 1e-6);
+  assert.ok(Math.abs(peaks[2] - 0.5) < 1e-6);
+  assert.ok(Math.abs(peaks[3] - 0.05) < 1e-6);
+});
+
+test("computePeaks: handles an empty signal and a zero bin count without throwing", () => {
+  assert.equal(computePeaks(new Float32Array(0), 10).length, 10);
+  assert.equal(computePeaks(new Float32Array(100), 0).length, 0);
 });
 
 // --- zero-crossing / fades -------------------------------------------------

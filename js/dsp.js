@@ -398,6 +398,29 @@ export function resampleLinear(mono, fromRate, toRate) {
 }
 
 // ---------------------------------------------------------------------------
+// Waveform preview
+// ---------------------------------------------------------------------------
+
+/** Downsample mono audio to `binCount` peak (max-abs) values in [0,1], for drawing a waveform. */
+export function computePeaks(mono, binCount) {
+  const n = mono.length;
+  const out = new Float32Array(binCount);
+  if (n === 0 || binCount <= 0) return out;
+  const binSize = n / binCount;
+  for (let b = 0; b < binCount; b++) {
+    const start = Math.floor(b * binSize);
+    const end = b === binCount - 1 ? n : Math.max(start + 1, Math.floor((b + 1) * binSize));
+    let peak = 0;
+    for (let i = start; i < end; i++) {
+      const v = Math.abs(mono[i]);
+      if (v > peak) peak = v;
+    }
+    out[b] = peak;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Naming helpers
 // ---------------------------------------------------------------------------
 
