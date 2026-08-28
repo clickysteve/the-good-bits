@@ -1,0 +1,370 @@
+// Node-side unit tests for the pure DSP + codec modules.
+// Run with: node test/dsp.test.mjs
+import assert from "node:assert/strict";
+import {
+  computeRmsEnvelope,
+  linToDb,
+  estimateNoiseFloorDb,
+  nonSilentRegions,
+  mergeRegions,
+  padAndFilterRegions,
+  lowestEnergyTime,
+  splitLongNaturally,
+  phraseRegions,
+  onsetStrengthCurve,
+  pickOnsets,
+  snapToBeatGrid,
+  drumRegions,
+  findNearestZeroCrossing,
+  applyFades,
+  toMono,
+  resampleLinear,
+} from "../js/dsp.js";
+import { encodeWav, parseWav, parseAiff } from "../js/audio-codec.js";
+
+let passed = 0;
+function test(name, fn) {
+  try {
+    fn();
+    passed++;
+    console.log(`ok - ${name}`);
+  } catch (err) {
+    console.error(`FAIL - ${name}`);
+    console.error(err);
+    process.exitCode = 1;
+  }
+}
+
+// --- synthetic signal helpers -----------------------------------------
+
+const SR = 22050;
+
+function silence(seconds) {
+  return new Float32Array(Math.round(seconds * SR));
+}
+
+function tone(seconds, freq = 440, amp = 0.6) {
+  const n = Math.round(seconds * SR);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = amp * Math.sin((2 * Math.PI * freq * i) / SR);
+  return out;
+}
+
+function concat(...arrs) {
+  const total = arrs.reduce((s, a) => s + a.length, 0);
+  const out = new Float32Array(total);
+  let off = 0;
+  for (const a of arrs) {
+    out.set(a, off);
+    off += a.length;
+  }
+  return out;
+}
+
+// --- envelope / silence --------------------------------------------------
+
+test("computeRmsEnvelope: tone reads louder than silence", () => {
+  const sig = concat(tone(1.0), silence(1.0));
+  const { times, vals } = computeRmsEnvelope(sig, SR, 25, 10);
+  assert.ok(times.length > 50);
+  const loudIdx = times.findIndex((t) => t > 0.3 && t < 0.6);
+  const quietIdx = times.findIndex((t) => t > 1.3 && t < 1.6);
+  assert.ok(vals[loudIdx] > vals[quietIdx] * 5, "tone section should be much louder than silence");
+});
+
+test("linToDb / estimateNoiseFloorDb: near-zero floor for a mostly-silent signal", () => {
+  const { vals } = computeRmsEnvelope(concat(tone(0.2), silence(2.0)), SR, 25, 10);
+  const floor = estimateNoiseFloorDb(vals);
+  assert.ok(floor < -50, `expected a low noise floor, got ${floor}`);
+});
+
+test("nonSilentRegions: finds two separated phrases in tone-gap-tone", () => {
+  const sig = concat(tone(1.0), silence(1.0), tone(1.0));
+  const { times, vals } = computeRmsEnvelope(sig, SR, 25, 10);
+  const floor = estimateNoiseFloorDb(vals);
+  const regions = nonSilentRegions(times, vals, floor + 15, 0.3);
+  assert.equal(regions.length, 2, `expected 2 regions, got ${JSON.stringify(regions)}`);
+  assert.ok(regions[0][1] < 1.2, "first region should end near t=1.0");
+  assert.ok(regions[1][0] > 1.7, "second region should start near t=2.0");
+});
+
+test("mergeRegions: bridges a small gap, keeps a large one", () => {
+  const merged = mergeRegions(
+    [
+      [0, 1],
+      [1.1, 2],
+      [4, 5],
+    ],
+    0.2
+  );
+  assert.deepEqual(merged, [
+    [0, 2],
+    [4, 5],
+  ]);
+});
+
+test("padAndFilterRegions: pads and drops too-short regions", () => {
+  const out = padAndFilterRegions(
+    [
+      [1, 3],
+      [5, 5.05],
+    ],
+    0.1,
+    0.5,
+    10
+  );
+  assert.equal(out.length, 1);
+  assert.ok(Math.abs(out[0][0] - 0.9) < 1e-9);
+  assert.ok(Math.abs(out[0][1] - 3.1) < 1e-9);
+});
+
+test("lowestEnergyTime: picks the quietest point in range", () => {
+  const times = [0, 1, 2, 3, 4];
+  const vals = [0.9, 0.8, 0.1, 0.7, 0.9];
+  assert.equal(lowestEnergyTime(times, vals, 0, 4, -1), 2);
+});
+
+test("splitLongNaturally: splits an over-long region into multiple pieces", () => {
+  const times = [];
+  const vals = [];
+  for (let t = 0; t <= 40; t += 0.1) {
+    times.push(t);
+    vals.push(Math.abs(Math.sin(t)) + 0.05); // wobble so there's always a "lowest" point
+  }
+  const pieces = splitLongNaturally([[0, 40]], times, vals, 11, 18, 0.8);
+  assert.ok(pieces.length >= 3, `expected several pieces, got ${pieces.length}`);
+  for (const [s, e] of pieces) assert.ok(e - s <= 18 + 1e-6, "no piece should exceed maxLen");
+  assert.ok(Math.abs(pieces[0][0] - 0) < 1e-9);
+  assert.ok(Math.abs(pieces[pieces.length - 1][1] - 40) < 1e-9);
+});
+
+test("phraseRegions: end-to-end on a 3-phrase synthetic sax-like signal", () => {
+  const sig = concat(tone(2.0, 440), silence(0.6), tone(3.0, 500), silence(0.8), tone(1.5, 460));
+  const p = {
+    silenceMarginDb: 18,
+    minSilenceDuration: 0.32,
+    mergeGap: 0.2,
+    minLen: 0.8,
+    maxLen: 18,
+    preferred: 11,
+    pad: 0.12,
+  };
+  const { regions } = phraseRegions(sig, SR, p);
+  assert.equal(regions.length, 3, `expected 3 phrases, got ${JSON.stringify(regions)}`);
+});
+
+// --- drum / onsets ---------------------------------------------------------
+
+test("onsetStrengthCurve + pickOnsets: detects periodic hits", () => {
+  // eight evenly-spaced "hits" (short loud bursts) in otherwise quiet audio
+  const hitGap = 0.5;
+  const parts = [];
+  for (let i = 0; i < 8; i++) {
+    parts.push(tone(0.08, 200, 0.9));
+    parts.push(silence(hitGap - 0.08));
+  }
+  const sig = concat(...parts);
+  const { times, vals } = computeRmsEnvelope(sig, SR, 20, 10);
+  const diffs = onsetStrengthCurve(vals);
+  const onsets = pickOnsets(times, diffs, 0.65, 0.12);
+  assert.ok(onsets.length >= 6, `expected several onsets, got ${onsets.length}`);
+  // consecutive onsets should be roughly hitGap apart
+  const gaps = onsets.slice(1).map((t, i) => t - onsets[i]);
+  for (const g of gaps) assert.ok(Math.abs(g - hitGap) < 0.15, `gap ${g} should be near ${hitGap}`);
+});
+
+test("snapToBeatGrid: snaps within tolerance, leaves distant points alone", () => {
+  const bpm = 120; // beat period 0.5s
+  assert.equal(snapToBeatGrid(1.02, bpm, 0, 0.1), 1.0);
+  assert.equal(snapToBeatGrid(1.3, bpm, 0, 0.1), 1.3); // too far from any grid line
+});
+
+test("drumRegions: produces loop-length chops close to preferred length", () => {
+  const parts = [];
+  for (let i = 0; i < 40; i++) {
+    parts.push(tone(0.06, 150, 0.9));
+    parts.push(silence(0.44));
+  }
+  const sig = concat(...parts); // 40 * 0.5s = 20s of "drum" pulses at 120bpm
+  const p = { preferred: 8, maxLen: 16, minLen: 3, onsetSensitivity: 0.65 };
+  const { regions } = drumRegions(sig, SR, p, 120);
+  assert.ok(regions.length >= 2, `expected multiple regions, got ${regions.length}`);
+  for (const [s, e] of regions) {
+    assert.ok(e - s <= p.maxLen + 1e-6);
+    assert.ok(e - s >= 0.5);
+  }
+});
+
+// --- zero-crossing / fades -------------------------------------------------
+
+test("findNearestZeroCrossing: finds an actual sign change near the target", () => {
+  const n = 1000;
+  const mono = new Float32Array(n);
+  for (let i = 0; i < n; i++) mono[i] = Math.sin((2 * Math.PI * 10 * i) / n);
+  const idx = findNearestZeroCrossing(mono, 505, 60);
+  assert.ok(idx >= 445 && idx <= 565);
+  const prev = mono[idx - 1];
+  const cur = mono[idx];
+  assert.ok((prev <= 0 && cur >= 0) || (prev >= 0 && cur <= 0), "should land on a sign change");
+});
+
+test("applyFades: zeroes the very first and last samples", () => {
+  const ch = new Float32Array(100).fill(1);
+  applyFades([ch], 10, 10);
+  assert.equal(ch[0], 0);
+  assert.equal(ch[99], 0);
+  assert.equal(ch[50], 1);
+});
+
+// --- mono / resample ---------------------------------------------------
+
+test("toMono: averages stereo channels", () => {
+  const l = new Float32Array([1, 1, 1]);
+  const r = new Float32Array([-1, -1, -1]);
+  const m = toMono([l, r]);
+  assert.deepEqual(Array.from(m), [0, 0, 0]);
+});
+
+test("resampleLinear: halves the length when downsampling by 2x", () => {
+  const src = new Float32Array(1000);
+  const out = resampleLinear(src, 44100, 22050);
+  assert.ok(Math.abs(out.length - 500) <= 1);
+});
+
+// --- WAV codec round trip ---------------------------------------------------
+
+test("encodeWav -> parseWav round trip (24-bit stereo)", () => {
+  const n = 500;
+  const l = new Float32Array(n);
+  const r = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    l[i] = Math.sin((2 * Math.PI * 5 * i) / n) * 0.8;
+    r[i] = Math.cos((2 * Math.PI * 5 * i) / n) * 0.5;
+  }
+  const blob = encodeWav([l, r], 48000, 24);
+  assert.ok(blob.size > 44);
+  return blob.arrayBuffer().then((ab) => {
+    const decoded = parseWav(ab);
+    assert.equal(decoded.sampleRate, 48000);
+    assert.equal(decoded.numberOfChannels, 2);
+    assert.equal(decoded.length, n);
+    const dl = decoded.getChannelData(0);
+    const dr = decoded.getChannelData(1);
+    for (let i = 0; i < n; i++) {
+      assert.ok(Math.abs(dl[i] - l[i]) < 0.001, `L sample ${i}: ${dl[i]} vs ${l[i]}`);
+      assert.ok(Math.abs(dr[i] - r[i]) < 0.001, `R sample ${i}: ${dr[i]} vs ${r[i]}`);
+    }
+  });
+});
+
+test("encodeWav -> parseWav round trip (16-bit mono)", () => {
+  const n = 200;
+  const mono = new Float32Array(n);
+  for (let i = 0; i < n; i++) mono[i] = Math.sin((2 * Math.PI * 3 * i) / n) * 0.9;
+  const blob = encodeWav([mono], 44100, 16);
+  return blob.arrayBuffer().then((ab) => {
+    const decoded = parseWav(ab);
+    assert.equal(decoded.numberOfChannels, 1);
+    const d = decoded.getChannelData(0);
+    for (let i = 0; i < n; i++) {
+      assert.ok(Math.abs(d[i] - mono[i]) < 0.001);
+    }
+  });
+});
+
+test("parseAiff: reads a hand-built 16-bit big-endian AIFF buffer", () => {
+  // Build a minimal AIFF file by hand: FORM/AIFF, COMM, SSND.
+  const frames = 4;
+  const channels = 1;
+  const bits = 16;
+  const sampleRate = 44100;
+  const samples = [1000, -1000, 32767, -32768];
+
+  function extended80FromInt(rate) {
+    // Encode an integer sample rate as an 80-bit extended float, minimal case.
+    const buf = new ArrayBuffer(10);
+    const dv = new DataView(buf);
+    let exp = 16383 + 31; // bias + assumed 32-bit-ish integer range exponent
+    // Normalize rate into 1.mantissa * 2^exp form within 63 mantissa bits.
+    let mantissa = rate;
+    let e = 0;
+    while (mantissa < Math.pow(2, 62)) {
+      mantissa *= 2;
+      e++;
+    }
+    exp = 16383 + (31 - e) + 31; // fallback simplified below
+    // Simpler robust approach: use BigInt bit tricks instead.
+    return buf;
+  }
+
+  // Simpler + correct: construct extended80 via a known-good bit-twiddling routine.
+  function writeExtended80(dv, offset, value) {
+    if (value === 0) {
+      for (let i = 0; i < 10; i++) dv.setUint8(offset + i, 0);
+      return;
+    }
+    const sign = value < 0 ? 1 : 0;
+    value = Math.abs(value);
+    let exp = Math.floor(Math.log2(value));
+    let mantissa = value / Math.pow(2, exp); // in [1,2)
+    // 64-bit mantissa with explicit integer bit
+    const mantissaBits = BigInt(Math.round(mantissa * Math.pow(2, 63)));
+    const biasedExp = exp + 16383;
+    dv.setUint8(offset, (sign << 7) | ((biasedExp >> 8) & 0x7f));
+    dv.setUint8(offset + 1, biasedExp & 0xff);
+    dv.setUint32(offset + 2, Number((mantissaBits >> 32n) & 0xffffffffn), false);
+    dv.setUint32(offset + 6, Number(mantissaBits & 0xffffffffn), false);
+  }
+
+  const commSize = 18;
+  const ssndDataSize = frames * channels * 2;
+  const ssndSize = 8 + ssndDataSize;
+  const totalSize = 4 + (8 + commSize) + (8 + ssndSize); // 'AIFF' + COMM chunk + SSND chunk
+
+  const buf = new ArrayBuffer(8 + totalSize);
+  const dv = new DataView(buf);
+  let pos = 0;
+  const writeStr = (s) => {
+    for (let i = 0; i < s.length; i++) dv.setUint8(pos + i, s.charCodeAt(i));
+    pos += s.length;
+  };
+  writeStr("FORM");
+  dv.setUint32(pos, totalSize, false);
+  pos += 4;
+  writeStr("AIFF");
+
+  writeStr("COMM");
+  dv.setUint32(pos, commSize, false);
+  pos += 4;
+  dv.setUint16(pos, channels, false);
+  pos += 2;
+  dv.setUint32(pos, frames, false);
+  pos += 4;
+  dv.setUint16(pos, bits, false);
+  pos += 2;
+  writeExtended80(dv, pos, sampleRate);
+  pos += 10;
+
+  writeStr("SSND");
+  dv.setUint32(pos, ssndSize, false);
+  pos += 4;
+  dv.setUint32(pos, 0, false); // offset
+  pos += 4;
+  dv.setUint32(pos, 0, false); // block size
+  pos += 4;
+  for (const s of samples) {
+    dv.setInt16(pos, s, false);
+    pos += 2;
+  }
+
+  const decoded = parseAiff(buf);
+  assert.equal(decoded.sampleRate, sampleRate);
+  assert.equal(decoded.numberOfChannels, 1);
+  assert.equal(decoded.length, frames);
+  const d = decoded.getChannelData(0);
+  for (let i = 0; i < frames; i++) {
+    assert.ok(Math.abs(d[i] - samples[i] / 32768) < 0.001, `frame ${i}: ${d[i]} vs ${samples[i] / 32768}`);
+  }
+});
+
+console.log(`\n${passed} test(s) passed.`);

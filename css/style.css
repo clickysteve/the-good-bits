@@ -1,0 +1,376 @@
+:root {
+  --bg: #12141a;
+  --bg-panel: #1a1d26;
+  --bg-raised: #22262f;
+  --border: #2e3340;
+  --text: #e8eaf0;
+  --text-dim: #9aa1b1;
+  --accent: #7c9eff;
+  --accent-dim: #4a5a8a;
+  --good: #57c78a;
+  --warn: #e0b04f;
+  --danger: #e2687a;
+  --radius: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  padding: 0 1.5rem 4rem;
+  line-height: 1.5;
+}
+
+main {
+  max-width: 880px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.page-header {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 2.5rem 0 0.5rem;
+}
+
+.page-header h1 {
+  font-size: 1.8rem;
+  margin: 0 0 0.4rem;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  color: var(--text-dim);
+  max-width: 640px;
+  margin: 0;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.4rem 1.6rem 1.6rem;
+}
+
+.panel h2 {
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 0 0 1rem;
+}
+
+/* mode cards */
+
+.mode-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.75rem;
+}
+
+.mode-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  cursor: pointer;
+  background: var(--bg-raised);
+  transition: border-color 0.15s, transform 0.05s;
+}
+
+.mode-card:hover {
+  border-color: var(--accent-dim);
+}
+
+.mode-card--active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.mode-card h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.mode-card p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.88rem;
+}
+
+/* banner */
+
+.banner {
+  border-radius: var(--radius);
+  padding: 0.7rem 1rem;
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+}
+
+.banner--good {
+  background: rgba(87, 199, 138, 0.12);
+  color: var(--good);
+}
+
+.banner--info {
+  background: rgba(224, 176, 79, 0.12);
+  color: var(--warn);
+}
+
+/* folder queue */
+
+.folder-controls {
+  display: flex;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.folder-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.folder-list-empty {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  padding: 0.5rem 0;
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.9rem;
+}
+
+.folder-row-name {
+  font-weight: 600;
+}
+
+.folder-row-count {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+/* buttons */
+
+.btn {
+  font: inherit;
+  border-radius: 8px;
+  padding: 0.55rem 1.1rem;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--accent-dim);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0d1220;
+  font-weight: 600;
+}
+
+.btn--primary:hover {
+  filter: brightness(1.08);
+}
+
+.btn--large {
+  padding: 0.75rem 1.6rem;
+  font-size: 1rem;
+}
+
+.btn--ghost {
+  background: transparent;
+}
+
+.btn--icon {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+/* params */
+
+.params-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.1rem;
+  margin-bottom: 1rem;
+}
+
+.param-row input[type="range"] {
+  width: 100%;
+}
+
+.param-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  margin-bottom: 0.3rem;
+}
+
+.param-value {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.param-row--checkbox {
+  grid-column: 1 / -1;
+  margin-bottom: 1rem;
+}
+
+/* export settings */
+
+.export-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.1rem;
+}
+
+.export-row label {
+  display: block;
+  font-size: 0.85rem;
+  margin-bottom: 0.35rem;
+  color: var(--text-dim);
+}
+
+.export-row input[type="range"],
+.export-row select {
+  width: 100%;
+}
+
+.export-row--checkbox label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text);
+}
+
+.essentia-status {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  margin: 1rem 0 0;
+}
+
+.essentia-status--ok {
+  color: var(--good);
+}
+
+.essentia-status--warn {
+  color: var(--warn);
+}
+
+/* log */
+
+.log-panel {
+  margin-top: 1rem;
+  background: #0c0e13;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.8rem 1rem;
+  height: 220px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  color: #b8c4d9;
+}
+
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* results */
+
+.results-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+}
+
+.result-folder h3 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+  color: var(--accent);
+}
+
+.result-file {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.8rem 1rem;
+  margin-bottom: 0.7rem;
+}
+
+.result-file-header {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.result-file-name {
+  font-weight: 600;
+}
+
+.result-file-meta {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.chop-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.chop-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  font-size: 0.85rem;
+}
+
+.chop-name {
+  min-width: 130px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.chop-row audio {
+  height: 32px;
+  flex: 1;
+  max-width: 320px;
+}
+
+.page-footer {
+  max-width: 880px;
+  margin: 2rem auto 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  text-align: center;
+}

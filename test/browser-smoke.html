@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8" /><title>smoke test</title></head>
+<body>
+<pre id="out">running...</pre>
+<script src="https://cdn.jsdelivr.net/npm/essentia.js@0.1.3/dist/essentia-wasm.web.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/essentia.js@0.1.3/dist/essentia.js-core.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script type="module">
+import { phraseRegions, drumRegions, toMono } from "../js/dsp.js";
+import { encodeWav, parseWav } from "../js/audio-codec.js";
+import { analyzeKeyAndTempo, essentiaAvailable } from "../js/essentia-bridge.js";
+import { ZipBatch } from "../js/io-fs.js";
+
+const out = document.getElementById("out");
+const results = [];
+function report(name, ok, detail) {
+  results.push(`${ok ? "OK" : "FAIL"} - ${name}${detail ? " :: " + detail : ""}`);
+  out.textContent = results.join("\n");
+}
+
+function tone(sr, seconds, freq, amp = 0.6) {
+  const n = Math.round(seconds * sr);
+  const buf = new Float32Array(n);
+  for (let i = 0; i < n; i++) buf[i] = amp * Math.sin((2 * Math.PI * freq * i) / sr);
+  return buf;
+}
+function silence(sr, seconds) {
+  return new Float32Array(Math.round(seconds * sr));
+}
+function concat(...arrs) {
+  const total = arrs.reduce((s, a) => s + a.length, 0);
+  const out = new Float32Array(total);
+  let off = 0;
+  for (const a of arrs) { out.set(a, off); off += a.length; }
+  return out;
+}
+
+async function main() {
+  // 1. essentia availability + key/tempo on a synthetic A440-ish tone loop
+  try {
+    const avail = await essentiaAvailable();
+    report("essentia.js loads", avail, avail ? "" : "essentia unavailable (CDN/network?)");
+
+    if (avail) {
+      const sr = 44100;
+      // build a crude 120bpm "kick" pulse train, 8 seconds
+      const parts = [];
+      for (let i = 0; i < 16; i++) { parts.push(tone(sr, 0.05, 100, 0.9)); parts.push(silence(sr, 0.45)); }
+      const drumMono = concat(...parts);
+      const kt = await analyzeKeyAndTempo(drumMono, sr, { key: false, tempo: true });
+      report("PercivalBpmEstimator returns a plausible bpm", kt.bpm !== null && kt.bpm > 40 && kt.bpm < 220, `bpm=${kt.bpm}`);
+
+      const toneMono = tone(sr, 3.0, 261.63, 0.5); // C4
+      const ktKey = await analyzeKeyAndTempo(toneMono, sr, { key: true, tempo: false });
+      report("KeyExtractor returns a key/scale", !!ktKey.key && !!ktKey.scale, `key=${ktKey.key} ${ktKey.scale} strength=${ktKey.keyStrength}`);
+    }
+  } catch (err) {
+    report("essentia pipeline", false, err.message || String(err));
+  }
+
+  // 2. phrase + drum region detection sanity on synthetic signals (already unit-tested in Node; quick browser re-check)
+  try {
+    const sr = 22050;
+    const sig = concat(tone(sr, 2.0, 440), silence(sr, 0.6), tone(sr, 2.5, 500), silence(sr, 0.8), tone(sr, 1.2, 460));
+    const p = { silenceMarginDb: 18, minSilenceDuration: 0.32, mergeGap: 0.2, minLen: 0.8, maxLen: 18, preferred: 11, pad: 0.12 };
+    const { regions } = phraseRegions(sig, sr, p);
+    report("phraseRegions in browser context", regions.length === 3, `regions=${JSON.stringify(regions)}`);
+  } catch (err) {
+    report("phraseRegions in browser context", false, err.message || String(err));
+  }
+
+  // 3. WAV encode -> decode round trip using real Blob/ArrayBuffer in-browser
+  try {
+    const sr = 48000;
+    const n = 2000;
+    const l = new Float32Array(n);
+    for (let i = 0; i < n; i++) l[i] = Math.sin((2 * Math.PI * 220 * i) / sr) * 0.7;
+    const blob = encodeWav([l], sr, 24);
+    const ab = await blob.arrayBuffer();
+    const decoded = parseWav(ab);
+    let maxErr = 0;
+    const d = decoded.getChannelData(0);
+    for (let i = 0; i < n; i++) maxErr = Math.max(maxErr, Math.abs(d[i] - l[i]));
+    report("WAV encode/decode round trip in browser", decoded.sampleRate === sr && maxErr < 0.001, `maxErr=${maxErr}`);
+  } catch (err) {
+    report("WAV encode/decode round trip in browser", false, err.message || String(err));
+  }
+
+  // 4. ZipBatch produces a real, readable zip
+  try {
+    const zb = new ZipBatch();
+    const blob1 = encodeWav([tone(22050, 0.2, 300)], 22050, 16);
+    const blob2 = encodeWav([tone(22050, 0.2, 400)], 22050, 16);
+    zb.addFile("MySource", "chops", "take1", "01.wav", blob1);
+    zb.addFile("MySource", "chops", "take1", "02.wav", blob2);
+    const zipBlob = await zb.zip.generateAsync({ type: "blob" });
+    const reloaded = await window.JSZip.loadAsync(zipBlob);
+    const names = Object.keys(reloaded.files).filter((n) => n.endsWith(".wav"));
+    report("ZipBatch produces a valid zip with expected files", names.length === 2, names.join(", "));
+  } catch (err) {
+    report("ZipBatch produces a valid zip with expected files", false, err.message || String(err));
+  }
+
+  out.textContent = results.join("\n") + "\n\nSMOKE_TEST_DONE";
+}
+
+main();
+</script>
+</body>
+</html>
