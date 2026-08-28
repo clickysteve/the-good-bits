@@ -38,6 +38,10 @@ site on GitHub Pages.
 - **A batch that survives one bad file.** If a single file fails to decode
   or analyze, it's logged and skipped; the rest of the batch keeps going.
 
+The version number shown next to the title (e.g. `v0.2`) ticks up with each
+meaningful change, so you can tell at a glance whether you're looking at the
+latest build.
+
 ## Quick start
 
 **You must serve this folder over local HTTP — do not just double-click

@@ -1,6 +1,7 @@
 import { phraseRegions, drumRegions, toMono, findNearestZeroCrossing, applyFades, sanitizeForPath, buildKeyTempoTag } from "./dsp.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
+import { APP_VERSION } from "./version.js";
 import {
   AUDIO_EXTS,
   supportsFileSystemAccess,
@@ -104,6 +105,7 @@ const zcMsSlider = $("#zc-ms-slider");
 const detectKeyCheckbox = $("#detect-key-checkbox");
 const detectTempoCheckbox = $("#detect-tempo-checkbox");
 const essentiaStatus = $("#essentia-status");
+const versionBadge = $("#version-badge");
 
 // ---------------------------------------------------------------------------
 // Logging / progress
@@ -656,6 +658,8 @@ detectTempoCheckbox.addEventListener("change", () => {
 // ---------------------------------------------------------------------------
 
 function init() {
+  versionBadge.textContent = `v${APP_VERSION}`;
+
   outputBanner.textContent = FSA_SUPPORTED
     ? "Chops are saved straight into each folder's wav/ and chops/ subfolders."
     : "This browser can't write directly to folders, so the whole batch will be bundled into one ZIP for you to download and unzip wherever you like.";

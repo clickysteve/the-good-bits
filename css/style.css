@@ -46,6 +46,21 @@ main {
   letter-spacing: -0.01em;
 }
 
+.version-badge {
+  display: inline-block;
+  vertical-align: middle;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  margin-left: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .subtitle {
   color: var(--text-dim);
   max-width: 640px;

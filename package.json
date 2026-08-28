@@ -2,7 +2,7 @@
   "name": "auto-sample-chopper-web",
   "private": true,
   "type": "module",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Browser-based auto sample chopper: silence/phrase detection for melodic sources, tempo-locked loop chopping for drums, auto key/tempo detection. Static site, deploy as-is to GitHub Pages.",
   "scripts": {
     "serve": "npx http-server -c-1 ."
