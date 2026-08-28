@@ -3,7 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Auto Sample Chopper</title>
+<title>The Good Bits — auto sample chopper</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
@@ -24,8 +27,9 @@
   }
 </script>
 <header class="page-header">
-  <h1>Auto Sample Chopper <span id="version-badge" class="version-badge"></span></h1>
-  <p class="subtitle">Finds candidate musical phrases and loop-ready drum breaks in long source recordings — an automated first-pass editor, not a final chopper. All processing happens locally in your browser; nothing is uploaded anywhere.</p>
+  <p class="eyebrow">✦ automatic sample chopper</p>
+  <h1>The Good Bits <span id="version-badge" class="version-badge"></span></h1>
+  <p class="subtitle">Finds candidate musical phrases and loop-ready drum breaks in long source recordings — a fast first-pass editor, not a final chopper. All processing happens locally in your browser; nothing is uploaded anywhere.</p>
 </header>
 
 <main>
@@ -33,17 +37,33 @@
     <h2>1. Mode</h2>
     <div class="mode-cards">
       <div class="mode-card mode-card--active" data-mode="phrases">
+        <span class="mode-card-icon" aria-hidden="true">🎷</span>
         <h3>Sax / Trumpet</h3>
         <p>Pulls natural phrases from pauses in solo horn performances.</p>
       </div>
       <div class="mode-card" data-mode="rhodes">
+        <span class="mode-card-icon" aria-hidden="true">🎹</span>
         <h3>Rhodes</h3>
         <p>Conservative — keeps whole chord progressions and passages together.</p>
       </div>
       <div class="mode-card" data-mode="drums">
+        <span class="mode-card-icon" aria-hidden="true">🥁</span>
         <h3>Drums</h3>
-        <p>Break-sized phrases, optionally snapped to the detected tempo for seamless loops.</p>
+        <p>Break-sized loops snapped to the detected tempo, plus optional one-shot hits.</p>
       </div>
+    </div>
+
+    <div id="drum-options" class="drum-options" hidden>
+      <div class="drum-options-row">
+        <label for="drum-bars-select">Chop length</label>
+        <select id="drum-bars-select"></select>
+        <span class="hint">Uses the detected tempo to compute bar length in seconds; falls back to a fixed length if tempo isn't detected.</span>
+      </div>
+      <label class="checkbox-label">
+        <input id="one-shots-checkbox" type="checkbox" />
+        Also pull out one-shot hits (kick / snare / hats / cymbals) into a separate <code>one shots/</code> folder
+        <span class="hint">Heuristic, not a trained classifier — treat labels as a sort, not ground truth.</span>
+      </label>
     </div>
   </section>
 
@@ -55,7 +75,7 @@
       <button id="add-files-btn" class="btn btn--primary">+ Add Individual Files</button>
       <button id="clear-folders-btn" class="btn btn--ghost">Clear All</button>
     </div>
-    <label class="split-subfolders-label">
+    <label class="checkbox-label">
       <input id="split-subfolders-checkbox" type="checkbox" />
       Treat each subfolder as its own source (instead of one flat batch)
     </label>
@@ -65,8 +85,38 @@
   </section>
 
   <section class="panel">
+    <h2>3. Output naming</h2>
+    <div class="naming-grid">
+      <div class="export-row">
+        <label for="naming-pattern-select">Chop file names</label>
+        <select id="naming-pattern-select">
+          <option value="number">Numbers only — 01.wav</option>
+          <option value="name-number">Source name + number</option>
+          <option value="name-tag-number">Source name + key/tempo + number</option>
+        </select>
+      </div>
+      <div class="export-row">
+        <label for="naming-separator-select">Separator</label>
+        <select id="naming-separator-select">
+          <option value=" ">Space — name C#m 120bpm</option>
+          <option value="_">Underscore — name_C#m_120bpm</option>
+          <option value="-">Hyphen — name-C#m-120bpm</option>
+        </select>
+      </div>
+      <div class="export-row">
+        <label for="naming-maxlen-input">Max name length <span id="naming-maxlen-value">48 chars</span></label>
+        <input id="naming-maxlen-input" type="range" min="16" max="96" step="1" value="48" />
+      </div>
+      <div class="export-row export-row--checkbox">
+        <label><input id="naming-folder-tag-checkbox" type="checkbox" checked /> Tag the chops folder name with detected key/tempo</label>
+      </div>
+    </div>
+    <p class="naming-note">Key/tempo tags are always plain text — no brackets or commas — since some samplers limit both name length and punctuation.</p>
+  </section>
+
+  <section class="panel">
     <div class="params-panel-header">
-      <h2>3. Detection parameters</h2>
+      <h2>4. Detection parameters</h2>
       <label class="auto-params-label">
         <input id="auto-params-checkbox" type="checkbox" checked />
         Auto (recommended settings)
@@ -76,7 +126,7 @@
   </section>
 
   <section class="panel">
-    <h2>4. Export &amp; analysis</h2>
+    <h2>5. Export &amp; analysis</h2>
     <div class="export-grid">
       <div class="export-row">
         <label for="bit-depth-select">Export bit depth</label>
@@ -104,7 +154,7 @@
   </section>
 
   <section class="panel">
-    <h2>5. Process</h2>
+    <h2>6. Process</h2>
     <button id="process-btn" class="btn btn--primary btn--large" disabled>Process Batch</button>
     <div id="log-panel" class="log-panel"></div>
   </section>
@@ -116,7 +166,7 @@
 </main>
 
 <footer class="page-footer">
-  <p>Auto Sample Chopper — runs entirely client-side. See README.md for setup, parameter notes, and format-support caveats.</p>
+  <p>The Good Bits — runs entirely client-side. See README.md for setup, parameter notes, and format-support caveats.</p>
 </footer>
 
 <!-- essentia.js (AGPL-3.0) — key & tempo detection. See README.md for licensing notes. -->

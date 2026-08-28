@@ -20,7 +20,15 @@ import {
   toMono,
   resampleLinear,
   sanitizeForPath,
+  truncateStem,
+  joinNameParts,
   buildKeyTempoTag,
+  barsToSeconds,
+  bandEnergies,
+  classifyHit,
+  findOneShotWindows,
+  dedupeHits,
+  peakAbs,
 } from "../js/dsp.js";
 import { encodeWav, parseWav, parseAiff } from "../js/audio-codec.js";
 
@@ -197,6 +205,75 @@ test("drumRegions: produces loop-length chops close to preferred length", () => 
   }
 });
 
+// --- one-shot extraction ----------------------------------------------------
+
+test("bandEnergies: a low tone reads low-dominant, a high tone reads high-dominant", () => {
+  const lowTone = tone(0.2, 80, 0.8);
+  const { low: lowLow, mid: lowMid, high: lowHigh } = bandEnergies(lowTone, SR, 0, lowTone.length);
+  assert.ok(lowLow > lowMid && lowLow > lowHigh, `expected low band to dominate an 80Hz tone: ${lowLow},${lowMid},${lowHigh}`);
+
+  const highTone = tone(0.2, 9000, 0.8);
+  const { low: hiLow, mid: hiMid, high: hiHigh } = bandEnergies(highTone, SR, 0, highTone.length);
+  assert.ok(hiHigh > hiLow && hiHigh > hiMid, `expected high band to dominate a 9kHz tone: ${hiLow},${hiMid},${hiHigh}`);
+});
+
+test("classifyHit: buckets low/short as kick, high/short as hat, high/long as cymbal", () => {
+  assert.equal(classifyHit({ low: 0.9, mid: 0.1, high: 0.05, durationSec: 0.15 }), "kick");
+  assert.equal(classifyHit({ low: 0.05, mid: 0.1, high: 0.9, durationSec: 0.08 }), "hat");
+  assert.equal(classifyHit({ low: 0.05, mid: 0.15, high: 0.9, durationSec: 0.6 }), "cymbal");
+  assert.equal(classifyHit({ low: 0, mid: 0, high: 0, durationSec: 0.1 }), "perc");
+});
+
+test("findOneShotWindows: one window per onset, ending before the next onset starts", () => {
+  const parts = [];
+  for (let i = 0; i < 4; i++) {
+    parts.push(tone(0.05, 150, 0.9));
+    parts.push(silence(0.25));
+  }
+  const sig = concat(...parts); // hits at ~0, 0.3, 0.6, 0.9
+  const onsets = [0, 0.3, 0.6, 0.9];
+  const windows = findOneShotWindows(sig, SR, onsets);
+  assert.equal(windows.length, 4);
+  for (let i = 0; i < windows.length; i++) {
+    const [s, e] = windows[i];
+    assert.ok(e > s, "window should have positive length");
+    if (i + 1 < windows.length) assert.ok(e <= onsets[i + 1] + 1e-6, "a hit shouldn't run into the next onset");
+  }
+});
+
+test("dedupeHits: keeps the loudest of near-identical hits per label, capped per label", () => {
+  const hits = [
+    { start: 0, label: "kick", low: 0.9, mid: 0.05, high: 0.05, peak: 0.5 },
+    { start: 1, label: "kick", low: 0.89, mid: 0.06, high: 0.05, peak: 0.9 }, // near-duplicate, louder
+    { start: 2, label: "kick", low: 0.05, mid: 0.05, high: 0.9, peak: 0.7 }, // different balance -> distinct kick cluster (mislabeled input, but tests clustering)
+    { start: 3, label: "hat", low: 0.05, mid: 0.05, high: 0.9, peak: 0.3 },
+  ];
+  const kept = dedupeHits(hits, { simThreshold: 0.12, maxPerLabel: 6 });
+  const kicks = kept.filter((h) => h.label === "kick");
+  assert.equal(kicks.length, 2, "the two similar kicks should collapse into one cluster");
+  assert.ok(kicks.some((h) => h.peak === 0.9), "should keep the louder of the near-duplicate pair");
+  assert.equal(kept.filter((h) => h.label === "hat").length, 1);
+});
+
+test("dedupeHits: caps the number kept per label", () => {
+  const hits = Array.from({ length: 10 }, (_, i) => ({
+    start: i,
+    label: "hat",
+    low: 0.01,
+    mid: 0.01,
+    high: 0.9 + i * 0.01, // each slightly different, so each forms its own cluster
+    peak: i,
+  }));
+  const kept = dedupeHits(hits, { simThreshold: 0.001, maxPerLabel: 3 });
+  assert.equal(kept.length, 3);
+});
+
+test("peakAbs: finds the largest absolute sample in range", () => {
+  const mono = new Float32Array([0.1, -0.9, 0.3, 0.05]);
+  assert.ok(Math.abs(peakAbs(mono, 0, mono.length) - 0.9) < 1e-6);
+  assert.ok(Math.abs(peakAbs(mono, 2, mono.length) - 0.3) < 1e-6);
+});
+
 // --- zero-crossing / fades -------------------------------------------------
 
 test("findNearestZeroCrossing: finds an actual sign change near the target", () => {
@@ -226,12 +303,38 @@ test("sanitizeForPath: strips filesystem-unsafe characters", () => {
   assert.equal(sanitizeForPath("  spaced   out  "), "spaced out");
 });
 
-test("buildKeyTempoTag: formats key+tempo, key only, tempo only, and neither", () => {
-  assert.equal(buildKeyTempoTag({ key: "C", scale: "minor", bpm: 92.4 }), " [Cm, 92 BPM]");
-  assert.equal(buildKeyTempoTag({ key: "G", scale: "major", bpm: null }), " [G]");
-  assert.equal(buildKeyTempoTag({ key: null, bpm: 128 }), " [128 BPM]");
+test("buildKeyTempoTag: plain text, no brackets/commas, defaults to a space separator", () => {
+  assert.equal(buildKeyTempoTag({ key: "C", scale: "minor", bpm: 92.4 }), "Cm 92bpm");
+  assert.equal(buildKeyTempoTag({ key: "G", scale: "major", bpm: null }), "G");
+  assert.equal(buildKeyTempoTag({ key: null, bpm: 128 }), "128bpm");
   assert.equal(buildKeyTempoTag({ key: null, bpm: null }), "");
   assert.equal(buildKeyTempoTag(), "");
+  assert.equal(buildKeyTempoTag({ key: "C", scale: "minor", bpm: 120 }, "_"), "Cm_120bpm");
+});
+
+test("truncateStem: cuts to length and trims a dangling separator", () => {
+  assert.equal(truncateStem("short", 20), "short");
+  assert.equal(truncateStem("sax_take_three_long_name", 10), "sax_take_t");
+  assert.equal(truncateStem("sax_take_three", 9), "sax_take");
+});
+
+test("joinNameParts: drops empty parts and joins with the given separator", () => {
+  assert.equal(joinNameParts(["sax", "Cm 120bpm", "01"], " "), "sax Cm 120bpm 01");
+  assert.equal(joinNameParts(["sax", "", null, undefined, "01"], "_"), "sax_01");
+  assert.equal(joinNameParts(["sax"], "-"), "sax");
+});
+
+test("sanitizeForPath: strips unsafe characters and enforces a max length", () => {
+  assert.equal(sanitizeForPath("a/b\\c*d?e,f[g]h"), "a-b-c-d-e-f-g-h");
+  assert.equal(sanitizeForPath("a fairly long sample name here", 12), "a fairly lon");
+});
+
+test("barsToSeconds: bars * beats-per-bar / bpm, null without a usable bpm", () => {
+  assert.ok(Math.abs(barsToSeconds(4, 120) - 8) < 1e-9); // 4 bars @ 120bpm, 4/4 = 8s
+  assert.ok(Math.abs(barsToSeconds(2, 100) - 4.8) < 1e-9);
+  assert.equal(barsToSeconds(4, null), null);
+  assert.equal(barsToSeconds(4, 0), null);
+  assert.equal(barsToSeconds(0, 120), null);
 });
 
 // --- mono / resample ---------------------------------------------------

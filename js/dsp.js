@@ -401,21 +401,208 @@ export function resampleLinear(mono, fromRate, toRate) {
 // Naming helpers
 // ---------------------------------------------------------------------------
 
-/** Strip characters that are unsafe in a file/folder name on any common OS. */
-export function sanitizeForPath(str) {
-  return str.replace(/[\/\\:*?"<>|]/g, "-").replace(/\s+/g, " ").trim();
+/**
+ * Strip characters that are unsafe in a file/folder name on any common OS,
+ * collapse whitespace, and (if maxLen is given) truncate — some hardware
+ * samplers have fairly tight filename length limits.
+ */
+export function sanitizeForPath(str, maxLen) {
+  let out = str.replace(/[\/\\:*?"<>|,[\]]/g, "-").replace(/\s+/g, " ").trim();
+  if (maxLen && out.length > maxLen) out = truncateStem(out, maxLen);
+  return out;
+}
+
+/** Truncate a name to maxLen characters, trimming any trailing separator left dangling by the cut. */
+export function truncateStem(str, maxLen) {
+  if (!maxLen || str.length <= maxLen) return str;
+  return str.slice(0, maxLen).replace(/[\s_-]+$/, "");
+}
+
+/** Join non-empty name parts with a separator, dropping any empty ones. */
+export function joinNameParts(parts, sep = " ") {
+  return parts.filter((p) => p !== null && p !== undefined && p !== "").join(sep);
 }
 
 /**
- * Build a short "[key, bpm]" tag from a detected key/tempo result, e.g.
- * " [Cm, 92 BPM]" or " [C, 118 BPM]" or " [Cm]" or "" if nothing was
- * detected. Since key/tempo are detected once per source recording (not per
- * chop), this tag is meant to go on the containing folder name once rather
- * than being repeated in every chop's filename.
+ * Build a short, plain-text key/tempo tag from a detected key/tempo result,
+ * e.g. "C#m 120bpm" (sep=" ") or "C#m_120bpm" (sep="_"), "C 118bpm", "Cm", or
+ * "" if nothing was detected. Deliberately has no brackets, commas, or space
+ * between the number and "bpm" — some hardware samplers choke on punctuation
+ * or have narrow name-length budgets, so the plainest form is the default.
+ * Since key/tempo are detected once per source recording (not per chop),
+ * this tag is meant to be combined once with the source name (see
+ * joinNameParts) rather than being rebuilt separately for every chop.
  */
-export function buildKeyTempoTag({ key, scale, bpm } = {}) {
+export function buildKeyTempoTag({ key, scale, bpm } = {}, sep = " ") {
   const parts = [];
   if (key) parts.push(scale === "minor" ? `${key}m` : key);
-  if (bpm) parts.push(`${Math.round(bpm)} BPM`);
-  return parts.length ? ` [${parts.join(", ")}]` : "";
+  if (bpm) parts.push(`${Math.round(bpm)}bpm`);
+  return joinNameParts(parts, sep);
+}
+
+// ---------------------------------------------------------------------------
+// Tempo / bar-length helpers
+// ---------------------------------------------------------------------------
+
+/** Seconds spanned by `bars` bars of `beatsPerBar` beats at `bpm`. Returns null if bpm is unknown. */
+export function barsToSeconds(bars, bpm, beatsPerBar = 4) {
+  if (!bpm || bpm <= 0 || !bars || bars <= 0) return null;
+  return bars * beatsPerBar * (60 / bpm);
+}
+
+// ---------------------------------------------------------------------------
+// One-shot hit extraction (drums)
+// ---------------------------------------------------------------------------
+//
+// Heuristic, not a trained classifier: a hit is bucketed into kick / snare /
+// hat / cymbal / perc from three simple time-domain band-energy measurements
+// (no FFT needed) plus its duration. It's good enough to sort a break's hits
+// into sensible piles, not a substitute for listening to what you got.
+
+/** One-pole low-pass filter (RC filter), used for cheap band-splitting without an FFT. */
+function onePoleLowpass(x, cutoffHz, sampleRate) {
+  const rc = 1 / (2 * Math.PI * cutoffHz);
+  const dt = 1 / sampleRate;
+  const alpha = dt / (rc + dt);
+  const y = new Float32Array(x.length);
+  let prev = 0;
+  for (let i = 0; i < x.length; i++) {
+    prev = prev + alpha * (x[i] - prev);
+    y[i] = prev;
+  }
+  return y;
+}
+
+/** Complementary one-pole high-pass (input minus its low-pass). */
+function onePoleHighpass(x, cutoffHz, sampleRate) {
+  const low = onePoleLowpass(x, cutoffHz, sampleRate);
+  const y = new Float32Array(x.length);
+  for (let i = 0; i < x.length; i++) y[i] = x[i] - low[i];
+  return y;
+}
+
+/** Peak absolute sample value of mono[startSample:endSample], used to rank hits within a dedupe cluster. */
+export function peakAbs(mono, startSample, endSample) {
+  const a = Math.max(0, startSample);
+  const b = Math.min(mono.length, endSample);
+  let peak = 0;
+  for (let i = a; i < b; i++) {
+    const v = Math.abs(mono[i]);
+    if (v > peak) peak = v;
+  }
+  return peak;
+}
+
+function rms(x, start, end) {
+  const a = Math.max(0, start);
+  const b = Math.min(x.length, end);
+  if (b <= a) return 0;
+  let sumSq = 0;
+  for (let i = a; i < b; i++) sumSq += x[i] * x[i];
+  return Math.sqrt(sumSq / (b - a));
+}
+
+/**
+ * Rough low/mid/high RMS energy split of mono[startSample:endSample] using
+ * two cascaded one-pole filters (~150Hz and ~2000Hz crossovers).
+ */
+export function bandEnergies(mono, sampleRate, startSample, endSample) {
+  const a = Math.max(0, startSample);
+  const b = Math.min(mono.length, endSample);
+  if (b <= a) return { low: 0, mid: 0, high: 0 };
+  const slice = mono.slice(a, b);
+  const low = onePoleLowpass(slice, 150, sampleRate);
+  const aboveLow = onePoleHighpass(slice, 150, sampleRate);
+  const mid = onePoleLowpass(aboveLow, 2000, sampleRate);
+  const high = onePoleHighpass(aboveLow, 2000, sampleRate);
+  return { low: rms(low, 0, low.length), mid: rms(mid, 0, mid.length), high: rms(high, 0, high.length) };
+}
+
+/**
+ * Bucket a hit into a rough drum-voice label from its band-energy balance
+ * and duration. Heuristic thresholds tuned by ear, not measurement — treat
+ * the labels as a starting sort, not ground truth.
+ */
+export function classifyHit({ low, mid, high, durationSec }) {
+  const total = low + mid + high;
+  if (total <= 1e-9) return "perc";
+  const lowR = low / total;
+  const midR = mid / total;
+  const highR = high / total;
+
+  if (lowR >= 0.5 && durationSec < 0.5) return "kick";
+  if (highR >= 0.45) return durationSec < 0.18 ? "hat" : "cymbal";
+  if (midR >= 0.32 || (lowR < 0.5 && highR < 0.45)) return "snare";
+  return "perc";
+}
+
+/**
+ * From a set of onset times, find candidate one-shot windows: each hit runs
+ * from its onset (minus a small pre-roll) until the envelope decays back to
+ * the noise floor, the next onset arrives, or maxHitSec is reached —
+ * whichever comes first. Very short blips (below minHitSec) are dropped.
+ */
+export function findOneShotWindows(mono, sampleRate, onsets, { minHitSec = 0.03, maxHitSec = 1.2, preRollSec = 0.003 } = {}) {
+  const { times, vals } = computeRmsEnvelope(mono, sampleRate, 15, 5);
+  const noiseFloorDb = estimateNoiseFloorDb(vals);
+  const decayThresholdDb = noiseFloorDb + 6;
+  const duration = mono.length / sampleRate;
+
+  const windows = [];
+  for (let i = 0; i < onsets.length; i++) {
+    const onset = onsets[i];
+    const nextOnset = i + 1 < onsets.length ? onsets[i + 1] : duration;
+    const hardEnd = Math.min(duration, onset + maxHitSec, nextOnset);
+
+    let end = hardEnd;
+    for (let k = 0; k < times.length; k++) {
+      if (times[k] <= onset) continue;
+      if (times[k] >= hardEnd) break;
+      if (linToDb(vals[k]) <= decayThresholdDb) {
+        end = times[k];
+        break;
+      }
+    }
+
+    const start = Math.max(0, onset - preRollSec);
+    if (end - start >= minHitSec) windows.push([start, end]);
+  }
+  return windows;
+}
+
+/**
+ * Greedily dedupe hits of the same label that look like repeats of the same
+ * sound (close band-energy balance), keeping only the loudest representative
+ * of each cluster, capped at maxPerLabel. Returns hits sorted by start time.
+ */
+export function dedupeHits(hits, { simThreshold = 0.12, maxPerLabel = 6 } = {}) {
+  const byLabel = new Map();
+  for (const hit of hits) {
+    if (!byLabel.has(hit.label)) byLabel.set(hit.label, []);
+    byLabel.get(hit.label).push(hit);
+  }
+
+  const kept = [];
+  for (const group of byLabel.values()) {
+    const clusters = []; // { rep, members:[...] }
+    for (const hit of group) {
+      const total = hit.low + hit.mid + hit.high || 1e-9;
+      const vec = [hit.low / total, hit.mid / total, hit.high / total];
+      let cluster = clusters.find((c) => {
+        const d = Math.hypot(c.vec[0] - vec[0], c.vec[1] - vec[1], c.vec[2] - vec[2]);
+        return d <= simThreshold;
+      });
+      if (!cluster) {
+        cluster = { vec, rep: hit };
+        clusters.push(cluster);
+      } else if ((hit.peak || 0) > (cluster.rep.peak || 0)) {
+        cluster.rep = hit;
+      }
+    }
+    clusters
+      .sort((a, b) => (b.rep.peak || 0) - (a.rep.peak || 0))
+      .slice(0, maxPerLabel)
+      .forEach((c) => kept.push(c.rep));
+  }
+  return kept.sort((a, b) => a.start - b.start);
 }

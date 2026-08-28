@@ -1,4 +1,4 @@
-# Auto Sample Chopper
+# The Good Bits
 
 **Live app: https://clickysteve.github.io/the-good-bits/**
 
@@ -22,10 +22,21 @@ site on GitHub Pages.
   the threshold is set relative to it — so quiet and hot recordings both
   behave sensibly.
 - **Auto key and tempo detection** (via [essentia.js](https://mtg.github.io/essentia.js/), see licensing note below), shown per source file and baked into the output folder/file name.
-- **Tempo-locked drum chopping.** When a confident tempo is detected, drum
-  break boundaries snap to the beat grid so chop lengths are exact whole
-  numbers of beats and loop cleanly, instead of just landing near a target
-  length.
+- **Tempo-locked drum chopping, in bars.** Choose a chop length in bars (1,
+  2, 3, 4, 6, 8, 16…) and it's converted to seconds from the detected tempo,
+  then boundaries snap to the beat grid so chop lengths are exact and loop
+  cleanly. Falls back to a fixed length if no confident tempo is found.
+- **One-shot hit extraction (drums, optional).** Pulls individual kick/snare/
+  hat/cymbal-type hits out of a break into their own `one shots/` folder,
+  roughly sorted by sound and deduplicated so a loop's repeated hits don't
+  all get kept. Heuristic, not a trained classifier — a useful starting
+  sort, not gospel.
+- **Configurable output naming.** Choose whether chop filenames are numbers
+  only, name + number, or name + key/tempo + number, pick a separator
+  (space/underscore/hyphen), and set a max name length — useful for
+  hardware samplers that limit filename length or don't like punctuation.
+  Key/tempo tags are always plain text, e.g. `C#m 120bpm`, no brackets or
+  commas.
 - **Click-free boundaries.** Every cut point is snapped to the nearest
   zero-crossing and gets a short fade in/out, so chops don't pop at the edges.
 - **Folders or individual files.** Add whole folders, or pick loose files
@@ -38,7 +49,7 @@ site on GitHub Pages.
 - **A batch that survives one bad file.** If a single file fails to decode
   or analyze, it's logged and skipped; the rest of the batch keeps going.
 
-The version number shown next to the title (e.g. `v0.2`) ticks up with each
+The version number shown next to the title (e.g. `v0.3`) ticks up with each
 meaningful change, so you can tell at a glance whether you're looking at the
 latest build.
 
@@ -85,6 +96,17 @@ folder the first time (there's no way for a browser to write back next to a
 loose file without asking) — that choice is remembered for the rest of the
 session.
 
+When Drums is the selected mode, an extra options block appears under the
+mode cards: a **chop length** in bars (converted to seconds from the
+detected tempo), and an opt-in checkbox to also pull out one-shot hits into
+a `one shots/` folder alongside the usual break-length chops.
+
+The **Output naming** panel controls how chop files and folders are named —
+numbers only, name + number, or name + key/tempo + number — along with the
+separator character and a max name length, independent of mode. Your
+choices (and most other settings) are remembered in this browser between
+visits.
+
 ## Deploying to GitHub Pages
 
 1. Push this folder to a GitHub repo.
@@ -117,20 +139,30 @@ Source Folder/
     original source files
     wav/       <- 24-bit WAV copies of any non-WAV source (WAV sources aren't duplicated here)
     chops/
-        <source file name> [key, tempo]/
+        <source file name> C#m 120bpm/
             01.wav
             02.wav
             ...
+    one shots/                          <- only when the drums one-shot option is on
+        <source file name> C#m 120bpm/
+            kick_01.wav
+            snare_01.wav
+            hat_01.wav
+            ...
 ```
 
-The `[key, tempo]` tag (e.g. `sax_take3 [Am, 96 BPM]`) is appended to the
-containing folder name, not repeated on every numbered chop, since key and
-tempo are detected once per source recording and every chop from it shares
-the same tag. It's only added when detection actually succeeds — if key/tempo
-detection is off or unavailable, the folder just keeps its plain name.
+The `C#m 120bpm`-style tag is plain text (no brackets or commas) and is
+appended to the containing folder name by default, not repeated on every
+numbered chop, since key and tempo are detected once per source recording
+and every chop from it shares the same tag — see **Output naming** above for
+the options to change the separator, fold the tag into chop filenames too,
+drop it from the folder name entirely, or cap the name length. It's only
+added when detection actually succeeds — if key/tempo detection is off or
+unavailable, names just keep their plain form.
 
 Re-running a folder deletes and replaces its previously-generated numbered
-chops (anything you've renamed or added yourself is left alone).
+chops and one-shots (anything you've renamed or added yourself is left
+alone).
 
 ## Format support
 
@@ -166,11 +198,22 @@ at its quietest nearby point rather than an arbitrary timestamp.
 - *Padding* — extra room left on each side of a detected phrase before
   fade/zero-crossing snapping happens.
 
-**Drums** walks the file in preferred-length chunks, snapping each boundary
-to a nearby detected transient (or the quietest nearby point if none is
-found), then — if "snap to tempo grid" is on and a confident tempo was
-detected — nudging that boundary onto the nearest beat line so the chop's
-length is a whole number of beats.
+**Drums** walks the file in chunks sized from the chosen **chop length in
+bars** and the detected tempo (falling back to a fixed length if no
+confident tempo was found), snapping each boundary to a nearby detected
+transient (or the quietest nearby point if none is found), then — if "snap
+to tempo grid" is on and a confident tempo was detected — nudging that
+boundary onto the nearest beat line so the chop's length is a whole number
+of beats. *Onset sensitivity* is the one manual knob left for drums, behind
+Auto like everything else.
+
+**One-shot extraction** (drums, opt-in) finds the same onsets, trims each
+hit to where it decays back toward the noise floor (or the next onset,
+whichever comes first, capped around 1.2s), then sorts each hit into
+kick/snare/hat/cymbal/perc from a rough low/mid/high energy balance and
+duration. Hits that look like repeats of the same sound are deduplicated,
+keeping only the loudest few per label, so a break with the same kick
+sample hit forty times doesn't produce forty near-identical files.
 
 **Export settings** (all modes): fade length and zero-crossing search window
 control click protection at every cut; export bit depth is 16 or 24-bit.
@@ -207,15 +250,17 @@ node test/dsp.test.mjs
 node test/io-fs.test.mjs
 ```
 
-There are also two optional browser-integration tests that exercise the
-real essentia.js/JSZip pipeline and the actual page's DOM in a real browser
-(requires the `playwright` package):
+There are also a few optional browser-integration tests that exercise the
+real essentia.js/JSZip pipeline, the page's DOM wiring, and (for
+`run-e2e-check.mjs`) a full process-a-file run through the actual UI, in a
+real browser (requires the `playwright` package):
 
 ```
 npm install --no-save playwright && npx playwright install chromium
 npx http-server -c-1 . -p 8877 &
 node test/run-smoke.mjs
 node test/run-ui-check.mjs
+node test/run-e2e-check.mjs   # needs a fixture WAV — see the file's header comment
 ```
 
 ## Known limitations / natural next steps
@@ -230,6 +275,10 @@ node test/run-ui-check.mjs
 - Folder permissions (File System Access API) aren't remembered across page
   reloads — you'll need to re-add folders each session. Persisting handles
   via IndexedDB is possible but wasn't built in this pass.
-- Drum onset detection is still a single full-spectrum energy curve — a
-  multi-band version (separating kick/snare/hats) would likely improve
+- Drum onset detection (for chop *boundaries*) is still a single
+  full-spectrum energy curve — a multi-band version would likely improve
   boundary accuracy further on busy breaks.
+- One-shot classification is a simple band-energy/duration heuristic, not a
+  trained model — it's a reasonable sort for kick/snare/hat/cymbal-ish
+  sounds, but will mislabel unusual or layered hits. Always worth a quick
+  listen through the `one shots/` folder before relying on the labels.

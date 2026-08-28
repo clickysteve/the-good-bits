@@ -31,7 +31,7 @@ function extOf(name) {
 
 function isExcludedSegment(name) {
   const n = name.toLowerCase();
-  return n === "wav" || n === "chops";
+  return n === "wav" || n === "chops" || n === "one shots";
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +148,25 @@ export async function clearOldChopsFSA(sourceDirHandle, relDir, stem) {
     const destDir = await getNestedDirHandle(chopsRoot, relDir ? `${relDir}/${stem}` : stem, true);
     for await (const [name, handle] of destDir.entries()) {
       if (handle.kind === "file" && /^\d+\.wav$/i.test(name)) {
+        try {
+          await destDir.removeEntry(name);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+  } catch (_) {
+    /* destination didn't exist yet - nothing to clear */
+  }
+}
+
+/** Delete any previously-generated <label>_NN.wav one-shots in a destination directory (idempotent re-runs). */
+export async function clearOldOneShotsFSA(sourceDirHandle, relDir, stem) {
+  try {
+    const root = await sourceDirHandle.getDirectoryHandle("one shots", { create: true });
+    const destDir = await getNestedDirHandle(root, relDir ? `${relDir}/${stem}` : stem, true);
+    for await (const [name, handle] of destDir.entries()) {
+      if (handle.kind === "file" && /^[a-z]+_\d+\.wav$/i.test(name)) {
         try {
           await destDir.removeEntry(name);
         } catch (_) {
