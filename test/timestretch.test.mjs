@@ -82,4 +82,31 @@ test("wsolaStretchChannels: glitch character's bit-crush measurably reduces the 
   assert.ok(distinct(glitch) < distinct(clean), `expected fewer distinct levels in glitch (${distinct(glitch)}) than clean (${distinct(clean)})`);
 });
 
+test("CHARACTERS: warped has the shortest window (choppiest splices) and no bit-crush, crushed has a wide window but heavy bit-crush", () => {
+  assert.ok(CHARACTERS.warped.windowMs < CHARACTERS.glitch.windowMs, "warped should use an even shorter grain than glitch");
+  assert.equal(CHARACTERS.warped.searchMs, 0);
+  assert.equal(CHARACTERS.warped.bitDepth, null);
+  assert.ok(CHARACTERS.crushed.windowMs > CHARACTERS.vintage.windowMs, "crushed should use a longer, smoother grain than vintage");
+  assert.ok(CHARACTERS.crushed.bitDepth < CHARACTERS.glitch.bitDepth, "crushed should quantize harder than glitch");
+});
+
+test("wsolaStretchChannels: warped produces valid, finite, bounded output", () => {
+  const input = tone(0.5, 220, 0.8);
+  const [out] = wsolaStretchChannels([input], SR, 1.4, "warped");
+  let peak = 0;
+  for (const v of out) {
+    assert.ok(Number.isFinite(v), "warped output should be finite");
+    peak = Math.max(peak, Math.abs(v));
+  }
+  assert.ok(peak < 1.5, `expected no runaway gain, peak was ${peak}`);
+});
+
+test("wsolaStretchChannels: crushed's bit-crush reduces distinct sample values even more than glitch", () => {
+  const input = tone(0.4, 220, 0.9);
+  const [glitch] = wsolaStretchChannels([input], SR, 1.3, "glitch");
+  const [crushed] = wsolaStretchChannels([input], SR, 1.3, "crushed");
+  const distinct = (arr) => new Set(Array.from(arr).map((v) => v.toFixed(5))).size;
+  assert.ok(distinct(crushed) < distinct(glitch), `expected fewer distinct levels in crushed (${distinct(crushed)}) than glitch (${distinct(glitch)})`);
+});
+
 console.log(`\n${passed} test(s) passed.`);

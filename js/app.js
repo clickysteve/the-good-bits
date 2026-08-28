@@ -20,6 +20,7 @@ import {
   computePeaksInRange,
 } from "./dsp.js";
 import { wsolaStretchChannels, ratioForTargetTempo } from "./timestretch.js";
+import { OUTPUT_STAGES, DRIVE_TYPES, applyOutputStage, applyDrive, applyCrunch } from "./outputstage.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
 import { APP_VERSION } from "./version.js";
@@ -70,6 +71,11 @@ const BAR_OPTIONS = [1, 2, 3, 4, 6, 8, 16];
 let drumBars = 4;
 let extractOneShots = false;
 
+// Whether the batch chops each file into pieces at all - off means "process the whole file only"
+// (still runs key/tempo detection, the wav/ copy, and any time-stretch/lo-fi processing), so
+// time-stretch and the lo-fi stages can be used standalone without cutting anything up.
+let chopIntoPieces = true;
+
 // Output naming: how the chops folder/filenames are built from the source name and the
 // detected key/tempo tag. Kept separate from params so it applies the same regardless of mode.
 // chopPattern is a typable template using {name}/{tag}/{number} tokens (see buildChopFileName) -
@@ -94,8 +100,14 @@ const LEGACY_PATTERN_MAP = {
 const exportSettings = { bitDepth: 24, fadeMs: 5, zcSearchMs: 15 };
 const detectSettings = { key: true, tempo: true };
 
-// Applied to main chops only (not one-shots, not the wav/ copy) at export time.
+// Applied to main chops and the full-file wav/ copy, but not one-shots, at export time.
 const timestretchSettings = { enabled: false, mode: "target-tempo", targetBpm: 120, ratio: 1.0, character: "clean" };
+
+// Lo-fi processing chain (output-stage character -> drive -> crunch), applied in that order.
+// Same scope as time-stretch: main chops and the full-file wav/ copy, not one-shots.
+const outputStageSettings = { enabled: false, mode: "cassette", mixPct: 100, intensityPct: 50 };
+const driveSettings = { enabled: false, type: "tape", amountPct: 40 };
+const crunchSettings = { enabled: false, bits: 8, rateDivide: 1 };
 
 const SETTINGS_STORAGE_KEY = "good-bits-settings-v1";
 const THEME_STORAGE_KEY = "good-bits-theme-v1";
@@ -179,6 +191,21 @@ const timestretchTargetBpmInput = $("#timestretch-target-bpm-input");
 const timestretchRatioRow = $("#timestretch-ratio-row");
 const timestretchRatioInput = $("#timestretch-ratio-input");
 const timestretchCharacterSelect = $("#timestretch-character-select");
+const chopEnabledCheckbox = $("#chop-enabled-checkbox");
+const detectionParamsPanel = $("#detection-params-panel");
+const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
+const outputstageOptions = $("#outputstage-options");
+const outputstageModeSelect = $("#outputstage-mode-select");
+const outputstageMixSlider = $("#outputstage-mix-slider");
+const outputstageIntensitySlider = $("#outputstage-intensity-slider");
+const driveEnableCheckbox = $("#drive-enable-checkbox");
+const driveOptions = $("#drive-options");
+const driveTypeSelect = $("#drive-type-select");
+const driveAmountSlider = $("#drive-amount-slider");
+const crunchEnableCheckbox = $("#crunch-enable-checkbox");
+const crunchOptions = $("#crunch-options");
+const crunchBitsSlider = $("#crunch-bits-slider");
+const crunchRateSlider = $("#crunch-rate-slider");
 
 // ---------------------------------------------------------------------------
 // Logging / progress
@@ -360,7 +387,8 @@ function renderParamsPanel() {
 }
 
 function updateDrumOptionsVisibility() {
-  drumOptions.hidden = mode !== "drums";
+  drumOptions.hidden = mode !== "drums" || !chopIntoPieces;
+  detectionParamsPanel.hidden = !chopIntoPieces;
 }
 
 modeCards.forEach((card) => {
@@ -371,6 +399,12 @@ modeCards.forEach((card) => {
     renderParamsPanel();
     saveSettings();
   });
+});
+
+chopEnabledCheckbox.addEventListener("change", () => {
+  chopIntoPieces = chopEnabledCheckbox.checked;
+  updateDrumOptionsVisibility();
+  saveSettings();
 });
 
 autoParamsCheckbox.addEventListener("change", () => {
@@ -499,6 +533,100 @@ function resolveStretchRatio(detectedBpm) {
 }
 
 // ---------------------------------------------------------------------------
+// Lo-fi processing: output-stage character, drive (saturation), crunch
+// (bitcrush / sample-rate reduction) - applied in that order, same export
+// scope as time-stretch (main chops + the full-file wav/ copy, not one-shots).
+// ---------------------------------------------------------------------------
+
+for (const stage of OUTPUT_STAGES) {
+  if (stage.key === "clean") continue; // the enable checkbox is the off switch; no need for a "clean" entry in the select
+  const opt = document.createElement("option");
+  opt.value = stage.key;
+  opt.textContent = `${stage.label} - ${stage.description}`;
+  outputstageModeSelect.appendChild(opt);
+}
+outputstageModeSelect.value = outputStageSettings.mode;
+
+for (const d of DRIVE_TYPES) {
+  const opt = document.createElement("option");
+  opt.value = d.key;
+  opt.textContent = `${d.label} - ${d.description}`;
+  driveTypeSelect.appendChild(opt);
+}
+driveTypeSelect.value = driveSettings.type;
+
+outputstageEnableCheckbox.addEventListener("change", () => {
+  outputStageSettings.enabled = outputstageEnableCheckbox.checked;
+  outputstageOptions.hidden = !outputStageSettings.enabled;
+  saveSettings();
+});
+outputstageModeSelect.addEventListener("change", () => {
+  outputStageSettings.mode = outputstageModeSelect.value;
+  saveSettings();
+});
+outputstageMixSlider.addEventListener("input", () => {
+  outputStageSettings.mixPct = parseInt(outputstageMixSlider.value, 10);
+  $("#outputstage-mix-value").textContent = `${outputstageMixSlider.value}%`;
+  saveSettings();
+});
+outputstageIntensitySlider.addEventListener("input", () => {
+  outputStageSettings.intensityPct = parseInt(outputstageIntensitySlider.value, 10);
+  $("#outputstage-intensity-value").textContent = `${outputstageIntensitySlider.value}%`;
+  saveSettings();
+});
+
+driveEnableCheckbox.addEventListener("change", () => {
+  driveSettings.enabled = driveEnableCheckbox.checked;
+  driveOptions.hidden = !driveSettings.enabled;
+  saveSettings();
+});
+driveTypeSelect.addEventListener("change", () => {
+  driveSettings.type = driveTypeSelect.value;
+  saveSettings();
+});
+driveAmountSlider.addEventListener("input", () => {
+  driveSettings.amountPct = parseInt(driveAmountSlider.value, 10);
+  $("#drive-amount-value").textContent = `${driveAmountSlider.value}%`;
+  saveSettings();
+});
+
+crunchEnableCheckbox.addEventListener("change", () => {
+  crunchSettings.enabled = crunchEnableCheckbox.checked;
+  crunchOptions.hidden = !crunchSettings.enabled;
+  saveSettings();
+});
+crunchBitsSlider.addEventListener("input", () => {
+  crunchSettings.bits = parseInt(crunchBitsSlider.value, 10);
+  $("#crunch-bits-value").textContent = `${crunchBitsSlider.value}-bit`;
+  saveSettings();
+});
+crunchRateSlider.addEventListener("input", () => {
+  crunchSettings.rateDivide = parseInt(crunchRateSlider.value, 10);
+  $("#crunch-rate-value").textContent = `${crunchRateSlider.value}x`;
+  saveSettings();
+});
+
+/** true if any lo-fi stage is switched on. */
+function lofiActive() {
+  return outputStageSettings.enabled || driveSettings.enabled || crunchSettings.enabled;
+}
+
+/** Runs the enabled lo-fi stages over a set of channels, in output-stage -> drive -> crunch order. */
+function applyLofiChain(channels, sampleRate) {
+  let out = channels;
+  if (outputStageSettings.enabled) {
+    out = applyOutputStage(out, sampleRate, outputStageSettings.mode, outputStageSettings.mixPct, outputStageSettings.intensityPct);
+  }
+  if (driveSettings.enabled) {
+    out = applyDrive(out, driveSettings.type, driveSettings.amountPct);
+  }
+  if (crunchSettings.enabled) {
+    out = applyCrunch(out, { bits: crunchSettings.bits, rateDivide: crunchSettings.rateDivide });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Settings persistence (this browser only - a light convenience, not sync)
 // ---------------------------------------------------------------------------
 
@@ -511,10 +639,14 @@ function saveSettings() {
         autoParams,
         drumBars,
         extractOneShots,
+        chopIntoPieces,
         naming: namingSettings,
         exportSettings,
         detectSettings,
         timestretch: timestretchSettings,
+        outputStage: outputStageSettings,
+        drive: driveSettings,
+        crunch: crunchSettings,
         splitSubfolders: splitSubfoldersCheckbox.checked,
       })
     );
@@ -591,6 +723,10 @@ function applySettings(saved) {
     extractOneShots = saved.extractOneShots;
     oneShotsCheckbox.checked = extractOneShots;
   }
+  if (typeof saved.chopIntoPieces === "boolean") {
+    chopIntoPieces = saved.chopIntoPieces;
+    chopEnabledCheckbox.checked = chopIntoPieces;
+  }
   if (saved.naming) {
     const mergedNaming = { ...saved.naming };
     delete mergedNaming.maxLen; // no longer a setting - drop it if present from an older save
@@ -629,6 +765,33 @@ function applySettings(saved) {
     $("#timestretch-ratio-value").textContent = `${Math.round(timestretchSettings.ratio * 100)}%`;
     timestretchCharacterSelect.value = timestretchSettings.character;
     updateTimestretchModeVisibility();
+  }
+  if (saved.outputStage) {
+    Object.assign(outputStageSettings, saved.outputStage);
+    outputstageEnableCheckbox.checked = outputStageSettings.enabled;
+    outputstageOptions.hidden = !outputStageSettings.enabled;
+    outputstageModeSelect.value = outputStageSettings.mode;
+    outputstageMixSlider.value = String(outputStageSettings.mixPct);
+    $("#outputstage-mix-value").textContent = `${outputStageSettings.mixPct}%`;
+    outputstageIntensitySlider.value = String(outputStageSettings.intensityPct);
+    $("#outputstage-intensity-value").textContent = `${outputStageSettings.intensityPct}%`;
+  }
+  if (saved.drive) {
+    Object.assign(driveSettings, saved.drive);
+    driveEnableCheckbox.checked = driveSettings.enabled;
+    driveOptions.hidden = !driveSettings.enabled;
+    driveTypeSelect.value = driveSettings.type;
+    driveAmountSlider.value = String(driveSettings.amountPct);
+    $("#drive-amount-value").textContent = `${driveSettings.amountPct}%`;
+  }
+  if (saved.crunch) {
+    Object.assign(crunchSettings, saved.crunch);
+    crunchEnableCheckbox.checked = crunchSettings.enabled;
+    crunchOptions.hidden = !crunchSettings.enabled;
+    crunchBitsSlider.value = String(crunchSettings.bits);
+    $("#crunch-bits-value").textContent = `${crunchSettings.bits}-bit`;
+    crunchRateSlider.value = String(crunchSettings.rateDivide);
+    $("#crunch-rate-value").textContent = `${crunchSettings.rateDivide}x`;
   }
   updateDrumOptionsVisibility();
 }
@@ -882,7 +1045,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
   const bpmText = kt.bpm ? `${Math.round(kt.bpm)} BPM` : kt.available ? "unclear" : "unavailable";
 
-  if (mode === "drums" && wantTempo && !kt.bpm) {
+  if (chopIntoPieces && mode === "drums" && wantTempo && !kt.bpm) {
     const proceed = await resolveTempoWarning(fileInfo.name);
     if (!proceed) {
       log(`    skipped - no tempo detected`);
@@ -899,60 +1062,74 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     log(`    converted to WAV (${method})`);
   }
 
-  // Time-stretch, when it's on, also produces a stretched copy of the FULL track (not just the
-  // chops) alongside the untouched original/converted wav/ copy above - handy for dropping the
-  // whole recording straight into a sampler at the target tempo. Written regardless of source
-  // format, since this is a new derived file rather than a duplicate of the original.
+  // Time-stretch and/or the lo-fi chain, when either is on, also produce a processed copy of the
+  // FULL track (not just the chops) alongside the untouched original/converted wav/ copy above -
+  // handy for dropping the whole recording into a sampler, or for using these stages standalone
+  // with chopping turned off. Written regardless of source format or chopIntoPieces, since this is
+  // a new derived file rather than a duplicate of the original.
   const fullStretchRatio = resolveStretchRatio(kt.bpm);
-  if (fullStretchRatio !== 1) {
-    const stretchedChannels = wsolaStretchChannels(channels, buffer.sampleRate, fullStretchRatio, timestretchSettings.character);
-    const stretchedBlob = encodeWav(stretchedChannels, buffer.sampleRate, 24);
-    await writeOutput(folder, "wav", fileInfo.relativeDir, `${taggedStem} stretched.wav`, stretchedBlob, zipBatch);
-    log(`    wrote a full-length time-stretched copy`);
+  const fullStretched = fullStretchRatio !== 1;
+  const fullLofi = lofiActive();
+  if (fullStretched || fullLofi) {
+    let derivedChannels = fullStretched
+      ? wsolaStretchChannels(channels, buffer.sampleRate, fullStretchRatio, timestretchSettings.character)
+      : channels.map((ch) => Float32Array.from(ch));
+    derivedChannels = applyLofiChain(derivedChannels, buffer.sampleRate);
+    const derivedName = `${taggedStem}${fullStretched ? " stretched" : ""}${fullLofi ? " lofi" : ""}.wav`;
+    const derivedBlob = encodeWav(derivedChannels, buffer.sampleRate, 24);
+    await writeOutput(folder, "wav", fileInfo.relativeDir, derivedName, derivedBlob, zipBatch);
+    log(`    wrote a full-length ${[fullStretched && "time-stretched", fullLofi && "lo-fi"].filter(Boolean).join(" + ")} copy`);
   }
-
-  const modeParams = activeParams();
-  let regions;
-  if (mode === "drums") {
-    const barsSec = barsToSeconds(drumBars, kt.bpm);
-    const drumParams = { ...modeParams.drums };
-    if (barsSec) {
-      drumParams.preferred = barsSec;
-      drumParams.minLen = Math.max(0.4, barsSec * 0.5);
-      drumParams.maxLen = barsSec * 1.5;
-    } // else: no confident tempo - fall back to the fixed preferred/minLen/maxLen above
-    const snapBpm = drumParams.snapToTempo ? kt.bpm : null;
-    regions = drumRegions(mono, buffer.sampleRate, drumParams, snapBpm).regions;
-  } else {
-    regions = phraseRegions(mono, buffer.sampleRate, modeParams[mode]).regions;
-  }
-
-  log(`    key: ${keyText} | tempo: ${bpmText} | ${regions.length} candidate phrase(s)`);
 
   const editContext = { folder, fileInfo, stem, tag, taggedStem, detectedBpm: kt.bpm };
-  const { chopRows, chopMarkers } = await exportChopsForRegions({
-    folder,
-    fileInfo,
-    regions,
-    stem,
-    tag,
-    taggedStem,
-    buffer,
-    channels,
-    mono,
-    zipBatch,
-    detectedBpm: kt.bpm,
-  });
-
-  log(`    created ${chopRows.length} chop(s)`);
-
+  let chopRows = [];
+  let chopMarkers = [];
   let oneShotRows = [];
   let oneShotMarkers = [];
-  if (mode === "drums" && extractOneShots) {
-    const extracted = await extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, buffer.sampleRate, zipBatch);
-    oneShotRows = extracted.rows;
-    oneShotMarkers = extracted.markers;
-    log(`    extracted ${oneShotRows.length} one-shot hit(s)`);
+
+  if (chopIntoPieces) {
+    const modeParams = activeParams();
+    let regions;
+    if (mode === "drums") {
+      const barsSec = barsToSeconds(drumBars, kt.bpm);
+      const drumParams = { ...modeParams.drums };
+      if (barsSec) {
+        drumParams.preferred = barsSec;
+        drumParams.minLen = Math.max(0.4, barsSec * 0.5);
+        drumParams.maxLen = barsSec * 1.5;
+      } // else: no confident tempo - fall back to the fixed preferred/minLen/maxLen above
+      const snapBpm = drumParams.snapToTempo ? kt.bpm : null;
+      regions = drumRegions(mono, buffer.sampleRate, drumParams, snapBpm).regions;
+    } else {
+      regions = phraseRegions(mono, buffer.sampleRate, modeParams[mode]).regions;
+    }
+
+    log(`    key: ${keyText} | tempo: ${bpmText} | ${regions.length} candidate phrase(s)`);
+
+    ({ chopRows, chopMarkers } = await exportChopsForRegions({
+      folder,
+      fileInfo,
+      regions,
+      stem,
+      tag,
+      taggedStem,
+      buffer,
+      channels,
+      mono,
+      zipBatch,
+      detectedBpm: kt.bpm,
+    }));
+
+    log(`    created ${chopRows.length} chop(s)`);
+
+    if (mode === "drums" && extractOneShots) {
+      const extracted = await extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, buffer.sampleRate, zipBatch);
+      oneShotRows = extracted.rows;
+      oneShotMarkers = extracted.markers;
+      log(`    extracted ${oneShotRows.length} one-shot hit(s)`);
+    }
+  } else {
+    log(`    key: ${keyText} | tempo: ${bpmText} | chop into pieces is off - whole file processed`);
   }
 
   const state = {
@@ -963,6 +1140,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     chopMarkers,
     oneShotRows,
     oneShotMarkers,
+    chopSkipped: !chopIntoPieces,
     peaks: computePeaks(mono, 400),
     duration: mono.length / buffer.sampleRate,
     mono,
@@ -1007,6 +1185,7 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
     if (stretchRatio !== 1) {
       sliced = wsolaStretchChannels(sliced, buffer.sampleRate, stretchRatio, timestretchSettings.character);
     }
+    sliced = applyLofiChain(sliced, buffer.sampleRate);
     applyFades(sliced, fadeInSamples, fadeOutSamples);
     const blob = encodeWav(sliced, buffer.sampleRate, exportSettings.bitDepth);
 
@@ -1581,7 +1760,7 @@ function enterEditMode(block, state, staticArea, editBtn, kind) {
  * the other's already-exported rows - see enterEditMode.
  */
 function renderFileResult(state) {
-  const { fileName, keyText, bpmText, chopRows, oneShotRows, peaks, duration, chopMarkers, oneShotMarkers, editContext } = state;
+  const { fileName, keyText, bpmText, chopRows, oneShotRows, peaks, duration, chopMarkers, oneShotMarkers, editContext, chopSkipped } = state;
 
   const block = document.createElement("div");
   block.className = "result-file";
@@ -1593,7 +1772,7 @@ function renderFileResult(state) {
   nameEl.textContent = fileName;
   const metaEl = document.createElement("span");
   metaEl.className = "result-file-meta";
-  metaEl.textContent = `key: ${keyText} · tempo: ${bpmText} · ${chopRows.length} chop(s)${
+  metaEl.textContent = `key: ${keyText} · tempo: ${bpmText} · ${chopSkipped ? "whole file processed" : `${chopRows.length} chop(s)`}${
     oneShotRows.length ? ` · ${oneShotRows.length} one-shot(s)` : ""
   }`;
   const titleGroup = document.createElement("div");

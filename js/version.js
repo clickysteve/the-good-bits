@@ -6,4 +6,4 @@
 // typo/formatting-only edits). Stay below 1.0 until explicitly told
 // otherwise: 1.0 is a deliberate milestone the user calls, not something
 // that happens automatically once things "work."
-export const APP_VERSION = "0.8";
+export const APP_VERSION = "0.9";

@@ -1,7 +1,7 @@
 // timestretch.js
 //
 // Optional pitch-preserving time-stretch via WSOLA (Waveform Similarity
-// Overlap-Add). Pure functions operating on Float32Array channel data — no
+// Overlap-Add). Pure functions operating on Float32Array channel data - no
 // DOM/Web Audio dependency, so this is unit-testable in Node like the rest
 // of the dsp modules.
 //
@@ -9,7 +9,7 @@
 // searches a window on every grain for the best-matching splice point (what
 // a real WSOLA implementation should do), while VINTAGE and GLITCH search
 // less (or not at all) and quantize the output to a lower bit depth. That
-// combination — phase discontinuities from bad splices, plus a coarse ADC —
+// combination - phase discontinuities from bad splices, plus a coarse ADC -
 // is exactly what gave cheap 90s hardware samplers' time-stretch its
 // metallic, warbly character, so it's a reasonably honest way to get that
 // sound instead of a separate "lo-fi" code path.
@@ -19,6 +19,8 @@ export const CHARACTERS = {
   clean: { windowMs: 46, searchMs: 14, hopFraction: 0.5, bitDepth: null },
   vintage: { windowMs: 24, searchMs: 5, hopFraction: 0.5, bitDepth: 12 },
   glitch: { windowMs: 12, searchMs: 0, hopFraction: 0.5, bitDepth: 8 },
+  warped: { windowMs: 8, searchMs: 0, hopFraction: 0.5, bitDepth: null },
+  crushed: { windowMs: 30, searchMs: 10, hopFraction: 0.5, bitDepth: 6 },
 };
 
 function hannWindow(n) {
@@ -43,7 +45,7 @@ function similarity(ref, cand, candOff, len) {
   return denom > 1e-9 ? dot / denom : 0;
 }
 
-/** Crude bit-depth reduction — old samplers' ADCs were low-bit, so this is part of the "vintage"/"glitch" character. */
+/** Crude bit-depth reduction - old samplers' ADCs were low-bit, so this is part of the "vintage"/"glitch" character. */
 function quantizeInPlace(buf, bits) {
   const levels = Math.pow(2, bits);
   const step = 2 / levels;
@@ -56,7 +58,7 @@ function quantizeInPlace(buf, bits) {
  * multi-channel audio stays phase-aligned instead of each channel drifting
  * independently. ratio = output length / input length: 2.0 is twice as
  * long (slower), 0.5 is half as long (faster). Pitch is preserved
- * (approximately — WSOLA isn't phase-exact, but it's a solid, well
+ * (approximately - WSOLA isn't phase-exact, but it's a solid, well
  * established approach for exactly this).
  */
 export function wsolaStretchChannels(channels, sampleRate, ratio, character = "clean") {

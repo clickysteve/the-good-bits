@@ -50,18 +50,41 @@ site on GitHub Pages.
   with your adjustments. Editing chops and one-shots are independent -
   saving one never discards the other. This is drag-only for now - adding
   or removing regions isn't supported yet.
+- **Chop into pieces is itself optional.** Untick **"Chop into pieces"** at
+  the top of the Mode panel to skip chopping entirely - key/tempo
+  detection, the `wav/` copy, and time-stretch/lo-fi processing all still
+  run on the whole file, just nothing gets cut up. Useful when all you
+  want is a stretched and/or lo-fi'd copy of a full recording. Chop,
+  time-stretch, and lo-fi processing are otherwise independent switches -
+  use any one, any two, or all three together.
 - **Optional time-stretch.** Stretch chops on export while preserving
   pitch, either by matching every file to one target tempo (handy for
   normalizing a batch to a single BPM) or by a fixed stretch ratio applied
-  to everything. Three "character" presets trade off cleanliness for
+  to everything. Five "character" presets trade off cleanliness for
   vibe: Clean is a transparent stretch, Vintage adds the grainy warble of
-  a 90s hardware sampler, and Glitch pushes that further into metallic,
-  low-bit territory. Applies to the main chops, and also produces a
-  separate stretched copy of the full source track in `wav/` (named
-  `<source> stretched.wav`) alongside the untouched original/converted
-  copy - handy for dropping the whole recording into a sampler at the
-  target tempo. One-shots are left unstretched, and a file with no
-  confident tempo detected exports unstretched in target-tempo mode.
+  a 90s hardware sampler, Glitch pushes that further into metallic,
+  low-bit territory, Warped uses short choppy grains for a wobbly,
+  broken-pitch feel, and Crushed keeps smooth grains but bit-crushes
+  harder than Glitch. Applies to the main chops, and also produces a
+  separate processed copy of the full source track in `wav/` (see
+  **Lo-fi character** below for how that file gets named when both
+  time-stretch and lo-fi processing are on) - handy for dropping the
+  whole recording into a sampler at the target tempo. One-shots are left
+  unstretched, and a file with no confident tempo detected exports
+  unstretched in target-tempo mode.
+- **Optional lo-fi character.** Three independent, stackable stages
+  (applied in this order): an **output-stage character** modeled on
+  tape/vinyl/radio/broadcast-chain coloration (Cassette, Reel-to-Reel,
+  Damaged, Vinyl, Boombox, AM Radio, VHS Hi-Fi, Bus Comp, Lathe, Phone
+  Bus - each with its own Mix and Intensity), a **drive** saturation
+  stage (Tape/Tube/Diode/Fuzz, with an amount knob), and a **crunch**
+  bitcrusher (bit depth + sample-rate divide). Same export scope as
+  time-stretch: applies to the main chops and to the full-track `wav/`
+  copy, not to one-shots. The output-stage character presets are inspired
+  by the output-stage designs in [Loop Saboteur](https://github.com/clickysteve/Loop-Saboteur),
+  the author's own open-source glitch/chop plugin - ported here as
+  offline, whole-buffer processing rather than a real-time audio-thread
+  effect.
 - **One-shot hit extraction (drums, optional).** Pulls individual
   kick/snare/hat/cymbal-type hits out of a break into their own
   `one shots/` folder, deduplicated so a loop's repeated hits don't all
@@ -135,10 +158,14 @@ folder the first time (there's no way for a browser to write back next to a
 loose file without asking) - that choice is remembered for the rest of the
 session.
 
-When Drums is the selected mode, an extra options block appears under the
-mode cards: a **chop length** in bars (converted to seconds from the
-detected tempo), and an opt-in checkbox to also pull out one-shot hits into
-a `one shots/` folder alongside the usual break-length chops.
+Untick **"Chop into pieces"** under the mode cards if you don't want the
+file cut up at all - key/tempo detection, the `wav/` copy, and any
+time-stretch/lo-fi processing you've turned on still run, just nothing
+gets chopped. When it's on and Drums is the selected mode, an extra
+options block appears: a **chop length** in bars (converted to seconds
+from the detected tempo), and an opt-in checkbox to also pull out
+one-shot hits into a `one shots/` folder alongside the usual break-length
+chops.
 
 The **Output naming** panel controls how chop files are named: type a
 pattern using `{name}`, `{tag}` and `{number}` tokens (e.g.
@@ -154,12 +181,15 @@ point (it snaps to the nearest zero-crossing when released), scroll or
 use the Zoom in/out/Fit buttons to work at finer detail, and drag the
 waveform itself to pan around once zoomed in. **Save & re-export** re-cuts
 just that file's chops or one-shots with your edits, without touching the
-other set. The optional **Time-stretch** panel (section 6) applies to
-every export in the batch, not per-file: turn it on, pick a mode (match a
-target tempo, or a fixed ratio) and a character (Clean/Vintage/Glitch),
-and it's baked into every chop as it's exported - including a manual
-re-export from the editor - plus a separate full-length stretched copy of
-each source file.
+other set. The optional **Time-stretch** panel (section 6) and **Lo-fi
+character** panel (section 7) both apply to every export in the batch,
+not per-file: turn time-stretch on, pick a mode (match a target tempo, or
+a fixed ratio) and a character, and it's baked into every chop as it's
+exported - including a manual re-export from the editor - plus a
+full-length processed copy of each source file. The lo-fi stages
+(output-stage character, drive, crunch) stack the same way and share that
+full-length copy: when time-stretch and lo-fi are both on, you get one
+combined `<name> stretched lofi.wav`, not two separate files.
 
 ## Deploying to GitHub Pages
 
@@ -192,7 +222,9 @@ The app detects which mode it's in and tells you at the top of the page.
 Source Folder/
     original source files
     wav/       <- 24-bit WAV copies of any non-WAV source (WAV sources aren't duplicated here);
-                  also holds "<name> stretched.wav" full-track copies when time-stretch is on
+                  also holds a full-track processed copy whenever time-stretch and/or a lo-fi
+                  stage is on, named "<name> stretched.wav", "<name> lofi.wav", or
+                  "<name> stretched lofi.wav" depending on which are active
     chops/
         <source file name> C#m 120bpm/
             01.wav
@@ -304,6 +336,7 @@ unit-tested with plain Node:
 node test/dsp.test.mjs
 node test/io-fs.test.mjs
 node test/timestretch.test.mjs
+node test/outputstage.test.mjs
 ```
 
 There are also a few optional browser-integration tests that exercise the
@@ -341,5 +374,6 @@ node test/run-e2e-check.mjs   # needs a fixture WAV - see the file's header comm
   filename. Always worth a quick listen through the `one shots/` folder.
 - The manual editor (chops and one-shots) only lets you drag existing
   boundaries - adding or removing regions isn't supported yet.
-- Time-stretch is one setting for the whole batch, not per-chop; a proper
-  per-chop stretch control would need the editor built out further first.
+- Time-stretch and the lo-fi stages are each one setting for the whole
+  batch, not per-chop; proper per-chop controls would need the editor
+  built out further first.
