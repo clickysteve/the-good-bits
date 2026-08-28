@@ -19,6 +19,8 @@ import {
   applyFades,
   toMono,
   resampleLinear,
+  sanitizeForPath,
+  buildKeyTempoTag,
 } from "../js/dsp.js";
 import { encodeWav, parseWav, parseAiff } from "../js/audio-codec.js";
 
@@ -214,6 +216,22 @@ test("applyFades: zeroes the very first and last samples", () => {
   assert.equal(ch[0], 0);
   assert.equal(ch[99], 0);
   assert.equal(ch[50], 1);
+});
+
+// --- naming helpers ---------------------------------------------------
+
+test("sanitizeForPath: strips filesystem-unsafe characters", () => {
+  assert.equal(sanitizeForPath('sax take 3: "the good one"'), "sax take 3- -the good one-");
+  assert.equal(sanitizeForPath("a/b\\c*d?e"), "a-b-c-d-e");
+  assert.equal(sanitizeForPath("  spaced   out  "), "spaced out");
+});
+
+test("buildKeyTempoTag: formats key+tempo, key only, tempo only, and neither", () => {
+  assert.equal(buildKeyTempoTag({ key: "C", scale: "minor", bpm: 92.4 }), " [Cm, 92 BPM]");
+  assert.equal(buildKeyTempoTag({ key: "G", scale: "major", bpm: null }), " [G]");
+  assert.equal(buildKeyTempoTag({ key: null, bpm: 128 }), " [128 BPM]");
+  assert.equal(buildKeyTempoTag({ key: null, bpm: null }), "");
+  assert.equal(buildKeyTempoTag(), "");
 });
 
 // --- mono / resample ---------------------------------------------------

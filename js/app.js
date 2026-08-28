@@ -1,13 +1,17 @@
-import { phraseRegions, drumRegions, toMono, findNearestZeroCrossing, applyFades } from "./dsp.js";
+import { phraseRegions, drumRegions, toMono, findNearestZeroCrossing, applyFades, sanitizeForPath, buildKeyTempoTag } from "./dsp.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
 import {
   AUDIO_EXTS,
   supportsFileSystemAccess,
+  supportsFilePickerFSA,
   pickFolderFSA,
+  pickFilesFSA,
   ensureReadWritePermission,
   collectAudioFilesFSA,
+  discoverImmediateSourceChildren,
   collectAudioFilesLegacy,
+  collectIndividualFilesLegacy,
   writeFileFSA,
   clearOldChopsFSA,
   ZipBatch,
@@ -20,9 +24,12 @@ import {
 let mode = "phrases"; // 'phrases' | 'rhodes' | 'drums'
 let processing = false;
 let nextFolderId = 1;
-const sourceFolders = []; // {id, name, kind:'fsa'|'legacy', handle?, root?, files:[...]}
+let looseFileGroupCounter = 0;
+let looseDestinationHandle = null; // cached FSA destination for individually-picked files
+const sourceFolders = []; // {id, name, kind:'fsa'|'legacy', handle?, isLoose?, files:[...]}
 
 const FSA_SUPPORTED = supportsFileSystemAccess();
+const FSA_FILE_PICKER_SUPPORTED = supportsFilePickerFSA();
 
 const params = {
   phrases: { silenceMarginDb: 18, minSilenceDuration: 0.32, mergeGap: 0.2, minLen: 0.8, maxLen: 18.0, preferred: 11.0, pad: 0.12 },
@@ -30,6 +37,7 @@ const params = {
   drums: { preferred: 8.0, maxLen: 16.0, minLen: 3.0, onsetSensitivity: 0.65, snapToTempo: true, barsPerChop: "auto" },
 };
 const DEFAULT_PARAMS = JSON.parse(JSON.stringify(params));
+let autoParams = true; // when true, always use DEFAULT_PARAMS regardless of any manual edits below
 
 const exportSettings = { bitDepth: 24, fadeMs: 5, zcSearchMs: 15 };
 const detectSettings = { key: true, tempo: true };
@@ -61,17 +69,31 @@ const PARAM_SCHEMAS = {
   ],
 };
 
+function extOf(name) {
+  const i = name.lastIndexOf(".");
+  return i === -1 ? "" : name.slice(i).toLowerCase();
+}
+
+/** The parameter set actually used for processing: defaults while Auto is on, live-edited values otherwise. */
+function activeParams() {
+  return autoParams ? DEFAULT_PARAMS : params;
+}
+
 // ---------------------------------------------------------------------------
 // DOM refs
 // ---------------------------------------------------------------------------
 
 const $ = (sel) => document.querySelector(sel);
 const modeCards = document.querySelectorAll(".mode-card");
+const autoParamsCheckbox = $("#auto-params-checkbox");
 const paramsPanel = $("#params-panel");
 const folderList = $("#folder-list");
 const addFolderBtn = $("#add-folder-btn");
+const addFilesBtn = $("#add-files-btn");
+const splitSubfoldersCheckbox = $("#split-subfolders-checkbox");
 const clearFoldersBtn = $("#clear-folders-btn");
-const legacyInput = $("#legacy-folder-input");
+const legacyFolderInput = $("#legacy-folder-input");
+const legacyFilesInput = $("#legacy-files-input");
 const processBtn = $("#process-btn");
 const outputBanner = $("#output-banner");
 const logPanel = $("#log-panel");
@@ -105,6 +127,16 @@ function clearLog() {
 
 function renderParamsPanel() {
   paramsPanel.innerHTML = "";
+
+  if (autoParams) {
+    const note = document.createElement("p");
+    note.className = "params-auto-note";
+    note.textContent =
+      "Using recommended settings for this mode. Uncheck “Auto” above to fine-tune silence sensitivity, phrase length, and other parameters by hand.";
+    paramsPanel.appendChild(note);
+    return;
+  }
+
   const schema = PARAM_SCHEMAS[mode];
   const grid = document.createElement("div");
   grid.className = "params-grid";
@@ -178,6 +210,11 @@ modeCards.forEach((card) => {
   });
 });
 
+autoParamsCheckbox.addEventListener("change", () => {
+  autoParams = autoParamsCheckbox.checked;
+  renderParamsPanel();
+});
+
 // ---------------------------------------------------------------------------
 // Folder queue UI
 // ---------------------------------------------------------------------------
@@ -187,7 +224,7 @@ function renderFolderList() {
   if (sourceFolders.length === 0) {
     const empty = document.createElement("div");
     empty.className = "folder-list-empty";
-    empty.textContent = "No folders added yet.";
+    empty.textContent = "Nothing added yet.";
     folderList.appendChild(empty);
   }
   for (const folder of sourceFolders) {
@@ -201,7 +238,9 @@ function renderFolderList() {
     nameEl.textContent = folder.name;
     const countEl = document.createElement("div");
     countEl.className = "folder-row-count";
-    countEl.textContent = `${folder.files.length} audio file(s) found`;
+    countEl.textContent = folder.isLoose
+      ? `${folder.files.length} file(s) — output goes to ${folder.destinationLabel || "a chosen folder"}`
+      : `${folder.files.length} audio file(s) found`;
     info.appendChild(nameEl);
     info.appendChild(countEl);
 
@@ -226,10 +265,33 @@ function updateProcessButton() {
   processBtn.disabled = processing || sourceFolders.length === 0;
 }
 
+function folderAlreadyQueued(name) {
+  return sourceFolders.some((f) => f.kind === "fsa" && !f.isLoose && f.name === name);
+}
+
 async function addFolderFSA() {
   const handle = await pickFolderFSA();
   if (!handle) return;
-  if (sourceFolders.some((f) => f.kind === "fsa" && f.handle.name === handle.name)) {
+
+  if (splitSubfoldersCheckbox.checked) {
+    const children = await discoverImmediateSourceChildren(handle);
+    if (children.length > 0) {
+      let added = 0;
+      for (const child of children) {
+        if (folderAlreadyQueued(child.name)) continue;
+        const files = await collectAudioFilesFSA(child.handle);
+        sourceFolders.push({ id: nextFolderId++, name: child.name, kind: "fsa", handle: child.handle, files });
+        added++;
+      }
+      log(`Added ${added} subfolder(s) from "${handle.name}" as separate sources.`);
+      renderFolderList();
+      updateProcessButton();
+      return;
+    }
+    // No qualifying subfolders — fall through and treat the picked folder itself as one source.
+  }
+
+  if (folderAlreadyQueued(handle.name)) {
     log(`"${handle.name}" is already in the queue.`);
     return;
   }
@@ -240,14 +302,60 @@ async function addFolderFSA() {
 }
 
 function addFolderLegacy() {
-  legacyInput.value = "";
-  legacyInput.click();
+  legacyFolderInput.value = "";
+  legacyFolderInput.click();
 }
 
-legacyInput.addEventListener("change", () => {
-  const result = collectAudioFilesLegacy(legacyInput.files);
-  if (!result) return;
-  sourceFolders.push({ id: nextFolderId++, name: result.rootName, kind: "legacy", files: result.files });
+legacyFolderInput.addEventListener("change", () => {
+  const groups = collectAudioFilesLegacy(legacyFolderInput.files, { splitSubfolders: splitSubfoldersCheckbox.checked });
+  for (const g of groups) {
+    sourceFolders.push({ id: nextFolderId++, name: g.rootName, kind: "legacy", files: g.files });
+  }
+  renderFolderList();
+  updateProcessButton();
+});
+
+async function addIndividualFilesFSA() {
+  const handles = await pickFilesFSA();
+  if (handles.length === 0) return;
+
+  if (!looseDestinationHandle) {
+    log("Choose a folder for the wav/ and chops/ output of these files…");
+    looseDestinationHandle = await pickFolderFSA();
+    if (!looseDestinationHandle) return;
+  }
+  const ok = await ensureReadWritePermission(looseDestinationHandle);
+  if (!ok) {
+    log("Permission to write to the chosen output folder was denied.");
+    looseDestinationHandle = null;
+    return;
+  }
+
+  looseFileGroupCounter++;
+  const files = handles.map((h) => ({ relativeDir: "", name: h.name, ext: extOf(h.name), fsaHandle: h }));
+  sourceFolders.push({
+    id: nextFolderId++,
+    name: `Individual files ${looseFileGroupCounter}`,
+    kind: "fsa",
+    handle: looseDestinationHandle,
+    isLoose: true,
+    destinationLabel: looseDestinationHandle.name,
+    files,
+  });
+  renderFolderList();
+  updateProcessButton();
+}
+
+function addIndividualFilesLegacy() {
+  legacyFilesInput.value = "";
+  legacyFilesInput.click();
+}
+
+legacyFilesInput.addEventListener("change", () => {
+  if (legacyFilesInput.files.length === 0) return;
+  looseFileGroupCounter++;
+  const group = collectIndividualFilesLegacy(legacyFilesInput.files, `Individual files ${looseFileGroupCounter}`);
+  sourceFolders.push({ id: nextFolderId++, name: group.rootName, kind: "legacy", isLoose: true, files: group.files });
   renderFolderList();
   updateProcessButton();
 });
@@ -262,8 +370,19 @@ addFolderBtn.addEventListener("click", async () => {
   }
 });
 
+addFilesBtn.addEventListener("click", async () => {
+  try {
+    if (FSA_SUPPORTED && FSA_FILE_PICKER_SUPPORTED) await addIndividualFilesFSA();
+    else addIndividualFilesLegacy();
+  } catch (err) {
+    log(`Could not open the file picker: ${err.message || err}`);
+    console.error(err);
+  }
+});
+
 clearFoldersBtn.addEventListener("click", () => {
   sourceFolders.length = 0;
+  looseDestinationHandle = null;
   renderFolderList();
   updateProcessButton();
 });
@@ -336,24 +455,31 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   const channels = bufferChannels(buffer);
   const mono = toMono(channels);
 
-  // Non-WAV sources get a full 24-bit WAV copy in wav/, mirroring the old
-  // app's behavior. True WAV sources are analyzed and chopped in place.
-  if (fileInfo.ext !== ".wav") {
-    const wavBlob = encodeWav(channels, buffer.sampleRate, 24);
-    await writeOutput(folder, "wav", fileInfo.relativeDir, `${stem}.wav`, wavBlob, zipBatch);
-    log(`    converted to WAV (${method})`);
-  }
-
+  // Key/tempo are detected once per source file, so every chop from this file
+  // shares the same tag. That's why the tag goes on the containing folder
+  // (and the wav/ copy's filename) rather than being repeated on every
+  // numbered chop.
   const wantKey = detectSettings.key;
   const wantTempo = detectSettings.tempo;
   const kt = await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: wantKey, tempo: wantTempo });
+  const tag = buildKeyTempoTag(kt);
+  const taggedStem = sanitizeForPath(stem + tag);
 
+  // Non-WAV sources get a full 24-bit WAV copy in wav/; true WAV sources are
+  // analyzed and chopped in place, with nothing duplicated into wav/.
+  if (fileInfo.ext !== ".wav") {
+    const wavBlob = encodeWav(channels, buffer.sampleRate, 24);
+    await writeOutput(folder, "wav", fileInfo.relativeDir, `${taggedStem}.wav`, wavBlob, zipBatch);
+    log(`    converted to WAV (${method})`);
+  }
+
+  const modeParams = activeParams();
   let regions;
   if (mode === "drums") {
-    const bpm = params.drums.snapToTempo ? kt.bpm : null;
-    regions = drumRegions(mono, buffer.sampleRate, params.drums, bpm).regions;
+    const bpm = modeParams.drums.snapToTempo ? kt.bpm : null;
+    regions = drumRegions(mono, buffer.sampleRate, modeParams.drums, bpm).regions;
   } else {
-    regions = phraseRegions(mono, buffer.sampleRate, params[mode]).regions;
+    regions = phraseRegions(mono, buffer.sampleRate, modeParams[mode]).regions;
   }
 
   const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
@@ -361,7 +487,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   log(`    key: ${keyText} | tempo: ${bpmText} | ${regions.length} candidate phrase(s)`);
 
   if (folder.kind === "fsa") {
-    await clearOldChopsFSA(folder.handle, fileInfo.relativeDir, stem);
+    await clearOldChopsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
   }
 
   const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
@@ -385,7 +511,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     const blob = encodeWav(sliced, buffer.sampleRate, exportSettings.bitDepth);
 
     const fileName = chopFileName(made);
-    await writeOutput(folder, "chops", `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${stem}`, fileName, blob, zipBatch);
+    await writeOutput(folder, "chops", `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`, fileName, blob, zipBatch);
 
     chopRows.push({ fileName, blob, seconds: (endSample - startSample) / buffer.sampleRate });
   }
@@ -531,9 +657,13 @@ detectTempoCheckbox.addEventListener("change", () => {
 
 function init() {
   outputBanner.textContent = FSA_SUPPORTED
-    ? "This browser supports direct folder writing: chops will be saved straight into each folder's wav/ and chops/ subfolders, just like the old app."
+    ? "Chops are saved straight into each folder's wav/ and chops/ subfolders."
     : "This browser can't write directly to folders, so the whole batch will be bundled into one ZIP for you to download and unzip wherever you like.";
   outputBanner.className = FSA_SUPPORTED ? "banner banner--good" : "banner banner--info";
+
+  if (!FSA_FILE_PICKER_SUPPORTED && FSA_SUPPORTED) {
+    addFilesBtn.title = "This browser supports folder writing but not the individual-file picker — falling back to a plain file chooser.";
+  }
 
   renderParamsPanel();
   renderFolderList();

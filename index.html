@@ -48,18 +48,30 @@
   </section>
 
   <section class="panel">
-    <h2>2. Source folders</h2>
+    <h2>2. Source folders &amp; files</h2>
     <p id="output-banner" class="banner"></p>
     <div class="folder-controls">
       <button id="add-folder-btn" class="btn btn--primary">+ Add Source Folder</button>
+      <button id="add-files-btn" class="btn btn--primary">+ Add Individual Files</button>
       <button id="clear-folders-btn" class="btn btn--ghost">Clear All</button>
     </div>
+    <label class="split-subfolders-label">
+      <input id="split-subfolders-checkbox" type="checkbox" />
+      Treat each subfolder as its own source (instead of one flat batch)
+    </label>
     <input id="legacy-folder-input" type="file" webkitdirectory directory multiple hidden />
+    <input id="legacy-files-input" type="file" multiple accept=".wav,.m4a,.aif,.aiff,.flac,.mp3" hidden />
     <div id="folder-list" class="folder-list"></div>
   </section>
 
   <section class="panel">
-    <h2>3. Detection parameters</h2>
+    <div class="params-panel-header">
+      <h2>3. Detection parameters</h2>
+      <label class="auto-params-label">
+        <input id="auto-params-checkbox" type="checkbox" checked />
+        Auto (recommended settings)
+      </label>
+    </div>
     <div id="params-panel" class="params-panel"></div>
   </section>
 

@@ -78,8 +78,6 @@ export function estimateNoiseFloorDb(vals, percentile = 0.10) {
 /**
  * Find non-silent [start,end] regions from an RMS envelope, using an
  * absolute dB threshold and a minimum silence duration to bridge over.
- * This replaces the old ffmpeg `silencedetect` + region-inversion pipeline
- * with straightforward array scanning over the envelope we already have.
  */
 export function nonSilentRegions(times, vals, thresholdDb, minSilenceSec) {
   const n = times.length;
@@ -397,4 +395,27 @@ export function resampleLinear(mono, fromRate, toRate) {
     out[i] = mono[i0] * (1 - frac) + mono[i1] * frac;
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Naming helpers
+// ---------------------------------------------------------------------------
+
+/** Strip characters that are unsafe in a file/folder name on any common OS. */
+export function sanitizeForPath(str) {
+  return str.replace(/[\/\\:*?"<>|]/g, "-").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Build a short "[key, bpm]" tag from a detected key/tempo result, e.g.
+ * " [Cm, 92 BPM]" or " [C, 118 BPM]" or " [Cm]" or "" if nothing was
+ * detected. Since key/tempo are detected once per source recording (not per
+ * chop), this tag is meant to go on the containing folder name once rather
+ * than being repeated in every chop's filename.
+ */
+export function buildKeyTempoTag({ key, scale, bpm } = {}) {
+  const parts = [];
+  if (key) parts.push(scale === "minor" ? `${key}m` : key);
+  if (bpm) parts.push(`${Math.round(bpm)} BPM`);
+  return parts.length ? ` [${parts.join(", ")}]` : "";
 }

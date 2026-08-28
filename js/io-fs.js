@@ -1,24 +1,27 @@
 // io-fs.js
 //
-// Folder selection, recursive audio discovery, and output writing.
+// Folder/file selection, recursive audio discovery, and output writing.
 // Two paths, feature-detected at runtime:
 //
 //   - File System Access API (Chrome/Edge): folders are opened read-write,
-//     so wav/ and chops/ get written straight back into the source folder,
-//     exactly like the old macOS app did.
+//     so wav/ and chops/ get written straight back into the source folder.
 //   - Fallback (Safari/Firefox, or any browser without that API): folders
 //     are read via a hidden <input type="file" webkitdirectory> element,
 //     and the whole batch's output is assembled into one ZIP for download,
 //     mirroring the same folder structure inside it.
 //
-// "Add Folder" can be clicked repeatedly to build up a multi-folder batch,
-// the same way Cmd/Shift-click built a multi-folder selection in the old
-// native folder picker.
+// "Add Source Folder" can be clicked repeatedly to build up a multi-folder
+// batch, the same way Cmd/Shift-click builds a multi-file/folder selection
+// in a native picker.
 
 export const AUDIO_EXTS = new Set([".wav", ".m4a", ".aif", ".aiff", ".flac", ".mp3"]);
 
 export function supportsFileSystemAccess() {
   return typeof window !== "undefined" && "showDirectoryPicker" in window;
+}
+
+export function supportsFilePickerFSA() {
+  return typeof window !== "undefined" && "showOpenFilePicker" in window;
 }
 
 function extOf(name) {
@@ -41,6 +44,25 @@ export async function pickFolderFSA() {
     return await window.showDirectoryPicker({ mode: "readwrite" });
   } catch (err) {
     if (err && err.name === "AbortError") return null;
+    throw err;
+  }
+}
+
+/** Opens the native multi-file picker for individual audio files. Returns [] if the user cancels. */
+export async function pickFilesFSA() {
+  try {
+    const handles = await window.showOpenFilePicker({
+      multiple: true,
+      types: [
+        {
+          description: "Audio files",
+          accept: { "audio/*": [".wav", ".m4a", ".aif", ".aiff", ".flac", ".mp3"] },
+        },
+      ],
+    });
+    return handles.filter((h) => AUDIO_EXTS.has(extOf(h.name)));
+  } catch (err) {
+    if (err && err.name === "AbortError") return [];
     throw err;
   }
 }
@@ -68,6 +90,36 @@ export async function collectAudioFilesFSA(dirHandle, relPrefix = "") {
   }
   out.sort((a, b) => (a.relativeDir + "/" + a.name).localeCompare(b.relativeDir + "/" + b.name));
   return out;
+}
+
+async function hasAudioRecursiveFSA(dirHandle) {
+  for await (const [name, handle] of dirHandle.entries()) {
+    if (handle.kind === "directory") {
+      if (isExcludedSegment(name)) continue;
+      if (await hasAudioRecursiveFSA(handle)) return true;
+    } else if (handle.kind === "file") {
+      if (AUDIO_EXTS.has(extOf(name))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * For "treat each subfolder as its own source": look at the immediate
+ * children of a picked folder and return the ones that contain audio
+ * (directly or nested), each as its own {name, handle}. Returns [] if none
+ * qualify, in which case the caller should fall back to treating the picked
+ * folder itself as a single source.
+ */
+export async function discoverImmediateSourceChildren(rootHandle) {
+  const children = [];
+  for await (const [name, handle] of rootHandle.entries()) {
+    if (handle.kind !== "directory") continue;
+    if (isExcludedSegment(name)) continue;
+    if (await hasAudioRecursiveFSA(handle)) children.push({ name, handle });
+  }
+  children.sort((a, b) => a.name.localeCompare(b.name));
+  return children;
 }
 
 async function getNestedDirHandle(rootHandle, relDir, create) {
@@ -109,33 +161,64 @@ export async function clearOldChopsFSA(sourceDirHandle, relDir, stem) {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy <input webkitdirectory> path
+// Legacy <input webkitdirectory> / <input multiple> path
 // ---------------------------------------------------------------------------
 
 /**
- * Build a source-folder descriptor from a FileList produced by
+ * Build one or more source-folder descriptors from a FileList produced by
  * <input type="file" webkitdirectory>. All files share a common top-level
  * folder name in their webkitRelativePath.
+ *
+ * With splitSubfolders:true, files are grouped by their immediate
+ * subfolder instead of all being lumped under the picked folder — each
+ * subfolder becomes its own source group. Files sitting directly in the
+ * picked folder (no subfolder) stay grouped under the picked folder's own
+ * name.
+ *
+ * Returns an array of {rootName, files} groups (normally length 1).
  */
-export function collectAudioFilesLegacy(fileList) {
+export function collectAudioFilesLegacy(fileList, { splitSubfolders = false } = {}) {
   const files = Array.from(fileList);
-  if (files.length === 0) return null;
-  const firstParts = files[0].webkitRelativePath.split("/");
-  const rootName = firstParts[0];
+  if (files.length === 0) return [];
+  const pickedRootName = files[0].webkitRelativePath.split("/")[0];
 
-  const out = [];
+  const groups = new Map(); // groupName -> files[]
   for (const file of files) {
-    const parts = file.webkitRelativePath.split("/").slice(1); // drop root folder name
+    const parts = file.webkitRelativePath.split("/").slice(1); // drop the picked folder's own name
     if (parts.length === 0) continue;
     const name = parts[parts.length - 1];
-    const relativeDir = parts.slice(0, -1).join("/");
-    if (parts.slice(0, -1).some(isExcludedSegment)) continue;
+    const dirParts = parts.slice(0, -1);
+    if (dirParts.some(isExcludedSegment)) continue;
     const ext = extOf(name);
     if (!AUDIO_EXTS.has(ext)) continue;
-    out.push({ relativeDir, name, ext, legacyFile: file });
+
+    let groupName = pickedRootName;
+    let relativeDir = dirParts.join("/");
+    if (splitSubfolders && dirParts.length > 0) {
+      groupName = `${pickedRootName}/${dirParts[0]}`;
+      relativeDir = dirParts.slice(1).join("/");
+    }
+
+    if (!groups.has(groupName)) groups.set(groupName, []);
+    groups.get(groupName).push({ relativeDir, name, ext, legacyFile: file });
   }
-  out.sort((a, b) => (a.relativeDir + "/" + a.name).localeCompare(b.relativeDir + "/" + b.name));
-  return { rootName, files: out };
+
+  const out = [];
+  for (const [rootName, groupFiles] of groups) {
+    groupFiles.sort((a, b) => (a.relativeDir + "/" + a.name).localeCompare(b.relativeDir + "/" + b.name));
+    out.push({ rootName, files: groupFiles });
+  }
+  out.sort((a, b) => a.rootName.localeCompare(b.rootName));
+  return out;
+}
+
+/** Build a single source-folder descriptor for loose individually-picked files (legacy path). */
+export function collectIndividualFilesLegacy(fileList, groupName) {
+  const files = Array.from(fileList).filter((f) => AUDIO_EXTS.has(extOf(f.name)));
+  return {
+    rootName: groupName,
+    files: files.map((f) => ({ relativeDir: "", name: f.name, ext: extOf(f.name), legacyFile: f })),
+  };
 }
 
 // ---------------------------------------------------------------------------
