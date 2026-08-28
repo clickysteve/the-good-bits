@@ -966,3 +966,307 @@ input[type="text"]:hover {
   font-size: 0.8rem;
   text-align: center;
 }
+
+/* ===========================================================================
+   Theme component treatments
+   ---------------------------------------------------------------------------
+   The [data-theme] blocks above only swap colors/fonts/radius - real hardware
+   doesn't render its mode selector as a rounded web card or its checkboxes as
+   a browser default tickbox, so Terminal and Console additionally restyle the
+   actual controls to match their mockups: Terminal turns them into bracketed
+   ASCII-style text, Console turns them into chunky 3D hardware buttons and
+   toggle switches. Nothing here changes markup or behavior, only appearance.
+   =========================================================================== */
+
+/* --- Green Terminal: bracketed text controls, flat panels, CRT framing --- */
+
+[data-theme="terminal"] .panel {
+  box-shadow: none;
+}
+
+[data-theme="terminal"] .panel h2::before {
+  content: "// ";
+  color: var(--text-faint);
+}
+
+[data-theme="terminal"] .page-header h1 {
+  text-shadow: 0 0 12px rgba(57, 255, 108, 0.35);
+}
+
+[data-theme="terminal"] .version-badge,
+[data-theme="terminal"] .theme-switcher,
+[data-theme="terminal"] .theme-switcher-btn {
+  border-radius: 0;
+}
+
+[data-theme="terminal"] .btn {
+  background: transparent;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+[data-theme="terminal"] .btn:not(.btn--icon)::before {
+  content: "[ ";
+}
+
+[data-theme="terminal"] .btn:not(.btn--icon)::after {
+  content: " ]";
+}
+
+[data-theme="terminal"] .btn:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: var(--accent);
+}
+
+[data-theme="terminal"] .btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #04140a;
+  font-weight: 700;
+}
+
+[data-theme="terminal"] .btn--primary:hover {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  filter: none;
+}
+
+[data-theme="terminal"] .mode-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+[data-theme="terminal"] .mode-card {
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.5rem 0.7rem;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  box-shadow: none;
+}
+
+[data-theme="terminal"] .mode-card:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  transform: none;
+}
+
+[data-theme="terminal"] .mode-card-icon {
+  display: none;
+}
+
+[data-theme="terminal"] .mode-card h3 {
+  font-size: 0.92rem;
+}
+
+[data-theme="terminal"] .mode-card h3::before {
+  content: "[ ] ";
+  color: var(--text-dim);
+}
+
+[data-theme="terminal"] .mode-card p {
+  color: var(--text-faint);
+  font-size: 0.8rem;
+}
+
+[data-theme="terminal"] .mode-card--active {
+  background: var(--accent);
+  border-left-color: var(--accent);
+  box-shadow: none;
+}
+
+[data-theme="terminal"] .mode-card--active h3::before {
+  content: "[x] ";
+}
+
+[data-theme="terminal"] .mode-card--active h3,
+[data-theme="terminal"] .mode-card--active p {
+  color: #04140a;
+}
+
+[data-theme="terminal"] input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: none;
+  width: auto;
+  height: auto;
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  color: var(--text-dim);
+  position: relative;
+  top: 0.15em;
+}
+
+[data-theme="terminal"] input[type="checkbox"]::before {
+  content: "[ ]";
+}
+
+[data-theme="terminal"] input[type="checkbox"]:checked {
+  color: var(--accent);
+}
+
+[data-theme="terminal"] input[type="checkbox"]:checked::before {
+  content: "[x]";
+}
+
+[data-theme="terminal"] select,
+[data-theme="terminal"] input[type="text"],
+[data-theme="terminal"] input[type="number"] {
+  background: var(--wave-bg);
+  border-radius: 0;
+  color: var(--accent-2);
+}
+
+[data-theme="terminal"] .naming-preview {
+  background: var(--log-bg);
+  color: var(--accent-2);
+  text-shadow: 0 0 6px color-mix(in srgb, var(--accent-2) 45%, transparent);
+}
+
+/* A faint CRT bezel framing the whole viewport - border/shadow only, so
+   content underneath is untouched and clicks pass straight through it. */
+[data-theme="terminal"] body::after {
+  content: "";
+  position: fixed;
+  inset: 8px;
+  border: 3px solid #060806;
+  border-radius: 16px;
+  box-shadow: inset 0 0 90px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 998;
+}
+
+/* --- Rack Console: chunky hardware buttons, toggle switches, rack ears --- */
+
+[data-theme="console"] .panel {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 2px 0 var(--border-soft);
+}
+
+[data-theme="console"] .folder-row,
+[data-theme="console"] .result-file {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+[data-theme="console"] .btn {
+  font-family: var(--font-display);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  box-shadow: 0 2px 0 var(--border-soft), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+[data-theme="console"] .btn:active {
+  box-shadow: 0 0 0 var(--border-soft), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+[data-theme="console"] .btn--primary {
+  color: #f4f1e6;
+  box-shadow: 0 3px 0 color-mix(in srgb, var(--accent-2) 55%, black), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+[data-theme="console"] .btn--primary:active {
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--accent-2) 55%, black), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+[data-theme="console"] .btn--ghost,
+[data-theme="console"] .btn--icon {
+  box-shadow: none;
+}
+
+[data-theme="console"] .btn--ghost:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+[data-theme="console"] .mode-card {
+  box-shadow: 0 2px 0 var(--border-soft), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+[data-theme="console"] .mode-card--active {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 90%, white), var(--accent));
+  border-color: color-mix(in srgb, var(--accent) 65%, black);
+  box-shadow: 0 2px 0 color-mix(in srgb, var(--accent) 50%, black), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+[data-theme="console"] .mode-card--active h3,
+[data-theme="console"] .mode-card--active p {
+  color: #f4ece0;
+}
+
+[data-theme="console"] input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--border);
+  position: relative;
+  vertical-align: middle;
+  transition: background 0.15s ease;
+}
+
+[data-theme="console"] input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #f4f1e6;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: left 0.15s ease;
+}
+
+[data-theme="console"] input[type="checkbox"]:checked {
+  background: var(--accent-2);
+}
+
+[data-theme="console"] input[type="checkbox"]:checked::after {
+  left: 18px;
+}
+
+[data-theme="console"] select,
+[data-theme="console"] input[type="text"],
+[data-theme="console"] input[type="number"] {
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+[data-theme="console"] .naming-preview {
+  background: var(--log-bg);
+  color: var(--log-text);
+  text-shadow: 0 0 6px color-mix(in srgb, var(--log-text) 40%, transparent);
+}
+
+/* Rack ears down each side of the viewport, only once there's room to spare
+   either side of the centered 900px column - border/shadow-only decoration,
+   never covers content, so it's skipped below that width. */
+@media (min-width: 1040px) {
+  [data-theme="console"] body::before,
+  [data-theme="console"] body::after {
+    content: "";
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    width: 26px;
+    background-image: radial-gradient(circle at 50% 34px, #57575b 0 5px, transparent 6px),
+      radial-gradient(circle at 50% calc(100% - 34px), #57575b 0 5px, transparent 6px), linear-gradient(90deg, #1c1c1e, #2b2b2e);
+    pointer-events: none;
+    z-index: 5;
+  }
+
+  [data-theme="console"] body::before {
+    left: 0;
+    box-shadow: inset -2px 0 4px rgba(0, 0, 0, 0.4);
+  }
+
+  [data-theme="console"] body::after {
+    right: 0;
+    box-shadow: inset 2px 0 4px rgba(0, 0, 0, 0.4);
+  }
+}
