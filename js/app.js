@@ -10,6 +10,7 @@ import {
   barsToSeconds,
   bandEnergies,
   classifyHit,
+  hitFingerprint,
   findOneShotWindows,
   dedupeHits,
   peakAbs,
@@ -17,13 +18,13 @@ import {
   computeRmsEnvelope,
   pickOnsets,
   computePeaks,
-  computePeaksInRange,
 } from "./dsp.js";
 import { wsolaStretchChannels, ratioForTargetTempo } from "./timestretch.js";
 import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from "./outputstage.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
 import { APP_VERSION } from "./version.js";
+import { createEditableWaveform } from "./editor-waveform.js";
 import {
   AUDIO_EXTS,
   supportsFileSystemAccess,
@@ -235,7 +236,8 @@ const detectKeyCheckbox = $("#detect-key-checkbox");
 const detectTempoCheckbox = $("#detect-tempo-checkbox");
 const essentiaStatus = $("#essentia-status");
 const versionBadge = $("#version-badge");
-const uiModeSwitcherBtns = document.querySelectorAll("#ui-mode-switcher .seg-btn");
+const taskSwitcherBtns = document.querySelectorAll("#task-switcher .seg-btn");
+const settingsToggleBtn = $("#settings-toggle");
 const drumOptions = $("#drum-options");
 const drumBarsSelect = $("#drum-bars-select");
 const oneShotsCheckbox = $("#one-shots-checkbox");
@@ -253,7 +255,6 @@ const timestretchRatioRow = $("#timestretch-ratio-row");
 const timestretchRatioInput = $("#timestretch-ratio-input");
 const timestretchRatioNumber = $("#timestretch-ratio-value");
 const timestretchCharacterSelect = $("#timestretch-character-select");
-const chopEnabledCheckbox = $("#chop-enabled-checkbox");
 const detectionParamsPanel = $("#detection-params-panel");
 const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
 const outputstageOptions = $("#outputstage-options");
@@ -476,12 +477,6 @@ modeCards.forEach((card) => {
   });
 });
 
-chopEnabledCheckbox.addEventListener("change", () => {
-  chopIntoPieces = chopEnabledCheckbox.checked;
-  updateDrumOptionsVisibility();
-  saveSettings();
-});
-
 autoParamsCheckbox.addEventListener("change", () => {
   autoParams = autoParamsCheckbox.checked;
   renderParamsPanel();
@@ -633,7 +628,7 @@ timestretchCharacterSelect.addEventListener("change", () => {
  * snapshot handed to the worker.
  */
 function effectsEnabled() {
-  return document.documentElement.getAttribute("data-ui-mode") === "advanced";
+  return task !== "chop";
 }
 
 /** ratio to pass to wsolaStretchChannels for this file, or 1 (no-op) if stretching doesn't apply. */
@@ -791,46 +786,85 @@ function loadSettings() {
 }
 
 // ---------------------------------------------------------------------------
-// Simple / Advanced density - one layout, two densities. Both share the entire DOM: Simple
-// unmounts the .advanced-only control modules and renders each file as a full card, Advanced
-// mounts the modules and collapses those same cards into table rows. It is a view setting, not
-// a settings profile - everything configured in Advanced keeps its value in Simple, the knobs
-// just stop being shown. Canvas-drawn waveforms don't reflow for free when the row geometry
-// changes, so registered canvases are repainted after every switch.
+// Task: CHOP / STRETCH / BOTH
+//
+// This replaced a Simple/Advanced toggle, which was the wrong axis. Simple/Advanced described how
+// much of the UI you could see; it said nothing about what you came to do, it buried time-stretch
+// as an optional panel inside a mode called "Advanced", and it made "Advanced" mean two unrelated
+// things at once - reveal the settings AND switch the effects chain on. That conflation is why
+// Simple needed a special rule to bypass effects.
+//
+// Task is the honest axis, and it maps onto state the app already had:
+//
+//   CHOP    cut it up, no processing        chopIntoPieces = true,  effects off
+//   STRETCH process it whole, no cutting    chopIntoPieces = false, effects on
+//   BOTH    everything                      chopIntoPieces = true,  effects on
+//
+// So there is no "bypass" special case any more: under CHOP there is simply no stretch stage.
+// Each settings section declares which tasks it belongs to via data-tasks, and irrelevant ones
+// are unmounted rather than shown-but-meaningless.
 // ---------------------------------------------------------------------------
 
-const UI_MODE_STORAGE_KEY = "good-bits-ui-mode-v1";
-const UI_MODES = ["simple", "advanced"];
+const TASK_STORAGE_KEY = "good-bits-task-v1";
+const TASKS = ["chop", "stretch", "both"];
+let task = "chop";
 
-function applyUiMode(uiMode, { persist = true } = {}) {
-  const safeMode = UI_MODES.includes(uiMode) ? uiMode : "simple";
-  document.documentElement.setAttribute("data-ui-mode", safeMode);
-  uiModeSwitcherBtns.forEach((btn) => {
-    btn.classList.toggle("is-active", btn.dataset.uiModeChoice === safeMode);
+function applyTask(next, { persist = true } = {}) {
+  task = TASKS.includes(next) ? next : "chop";
+  document.documentElement.setAttribute("data-task", task);
+  chopIntoPieces = task !== "stretch";
+  taskSwitcherBtns.forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.taskChoice === task);
   });
+  updateDrumOptionsVisibility();
+  updateNamingPreview();
   if (persist) {
     try {
-      localStorage.setItem(UI_MODE_STORAGE_KEY, safeMode);
+      localStorage.setItem(TASK_STORAGE_KEY, task);
     } catch (_) {
       /* best-effort only */
     }
   }
-  // Row geometry differs between the two densities, so anything canvas-drawn needs redrawing
-  // at its new width. Deferred a frame so layout has settled before we measure.
+  // Canvas-drawn waveforms don't reflow for free when the layout around them changes.
   requestAnimationFrame(repaintForTheme);
 }
 
-function loadUiMode() {
+function loadTask() {
   try {
-    return localStorage.getItem(UI_MODE_STORAGE_KEY) || "simple";
+    return localStorage.getItem(TASK_STORAGE_KEY) || "chop";
   } catch (_) {
-    return "simple";
+    return "chop";
   }
 }
 
-uiModeSwitcherBtns.forEach((btn) => {
-  btn.addEventListener("click", () => applyUiMode(btn.dataset.uiModeChoice));
+taskSwitcherBtns.forEach((btn) => {
+  btn.addEventListener("click", () => applyTask(btn.dataset.taskChoice));
 });
+
+// The settings rail is disclosure, kept separate from task. CHOP and STRETCH open with it closed
+// so the app is just "drop audio, go"; BOTH opens with it showing, since seeing everything at once
+// is the whole point of that task.
+const RAIL_STORAGE_KEY = "good-bits-rail-v1";
+
+function applyRail(open, { persist = true } = {}) {
+  document.documentElement.setAttribute("data-rail", open ? "open" : "closed");
+  settingsToggleBtn.classList.toggle("is-active", open);
+  settingsToggleBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (persist) {
+    try {
+      localStorage.setItem(RAIL_STORAGE_KEY, open ? "open" : "closed");
+    } catch (_) {
+      /* best-effort only */
+    }
+  }
+  requestAnimationFrame(repaintForTheme);
+}
+
+function railIsOpen() {
+  return document.documentElement.getAttribute("data-rail") === "open";
+}
+
+settingsToggleBtn.addEventListener("click", () => applyRail(!railIsOpen()));
 
 /** Apply a saved settings blob to state + the DOM controls, before the first render. */
 function applySettings(saved) {
@@ -851,10 +885,8 @@ function applySettings(saved) {
     extractOneShots = saved.extractOneShots;
     oneShotsCheckbox.checked = extractOneShots;
   }
-  if (typeof saved.chopIntoPieces === "boolean") {
-    chopIntoPieces = saved.chopIntoPieces;
-    chopEnabledCheckbox.checked = chopIntoPieces;
-  }
+  // chopIntoPieces is no longer stored: it is derived from the task, so a stale saved value would
+  // fight applyTask() on load.
   if (saved.naming) {
     const mergedNaming = { ...saved.naming };
     delete mergedNaming.maxLen; // no longer a setting - drop it if present from an older save
@@ -1262,7 +1294,9 @@ folderDropZone.addEventListener("drop", async (ev) => {
 
   // Simple mode's whole pitch is "drop it and it's done" - a drop (as opposed to the Add
   // buttons) commits to running right away, using whatever's currently in the batch queue.
-  if (document.documentElement.getAttribute("data-ui-mode") === "simple" && !processing && sourceFolders.length > 0) {
+  // Dropping into CHOP is the "just do it" path, so it runs straight away. In STRETCH and BOTH
+  // you almost certainly want to set something up first, so those wait for you to hit Process.
+  if (task === "chop" && !processing && sourceFolders.length > 0) {
     processBatch();
   }
 });
@@ -1426,7 +1460,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   const wantKey = detectSettings.key;
   const wantTempo = detectSettings.tempo;
   const kt = cached ? cached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: wantKey, tempo: wantTempo });
-  if (cached) log(`    reusing the analysis from your preview`);
+  if (cached) log(`    reusing the analysis from the last run`);
   const tag = buildKeyTempoTag(kt, namingSettings.separator);
   const taggedStem = buildTaggedStem(stem, tag);
 
@@ -1713,7 +1747,8 @@ function detectOneShotRegions(mono, sampleRate) {
     const { low, mid, high } = bandEnergies(mono, sampleRate, startSample, endSample);
     const label = classifyHit({ low, mid, high, durationSec: e - s });
     const peak = peakAbs(mono, startSample, endSample);
-    return { start: s, end: e, startSample, endSample, low, mid, high, peak, label };
+    const fingerprint = hitFingerprint(mono, sampleRate, startSample, endSample);
+    return { start: s, end: e, startSample, endSample, low, mid, high, peak, label, fingerprint };
   });
 
   return dedupeHits(candidates)
@@ -1845,12 +1880,18 @@ function renderFolderResultSection(folder) {
   return section;
 }
 
-function renderChopList(chopRows) {
+/**
+ * The exported-audio list under the waveform. `onPick` links a row back to the waveform, so
+ * selection works in both directions: click a slice on the waveform to light up its row, or click
+ * a row to select that slice.
+ */
+function renderChopList(chopRows, onPick) {
   const list = document.createElement("div");
   list.className = "chop-list";
-  for (const chop of chopRows) {
+  chopRows.forEach((chop, idx) => {
     const row = document.createElement("div");
     row.className = "chop-row";
+    row.dataset.index = String(idx);
     const label = document.createElement("span");
     label.className = "chop-name";
     label.textContent = `${chop.fileName} (${chop.seconds.toFixed(1)}s)`;
@@ -1860,8 +1901,13 @@ function renderChopList(chopRows) {
     audio.src = URL.createObjectURL(chop.blob);
     row.appendChild(label);
     row.appendChild(audio);
+    if (onPick) {
+      // the audio element has its own controls, so only the label area selects
+      label.addEventListener("click", () => onPick(idx));
+      label.style.cursor = "pointer";
+    }
     list.appendChild(row);
-  }
+  });
   return list;
 }
 
@@ -1872,7 +1918,7 @@ function themeColor(varName, fallback) {
 }
 
 // Waveforms are canvas-drawn, so they don't reflow or recolor for free the way CSS-styled elements
-// do - each drawn canvas registers a small repaint closure here, and applyUiMode() replays them all
+// do - each drawn canvas registers a small repaint closure here, and applyTask() replays them all
 // after a density switch changes their width. Entries for canvases no longer in the document are
 // dropped the next time it runs.
 const themeRepaints = [];
@@ -1890,493 +1936,20 @@ function repaintForTheme() {
   }
 }
 
-/** Draws a waveform-with-markers preview. Sized to the canvas's actual rendered width for crispness. */
-function drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers) {
-  const rectWidth = Math.max(200, Math.round(canvas.getBoundingClientRect().width || 600));
-  canvas.width = rectWidth;
-  canvas.height = 72;
-  const ctx = canvas.getContext("2d");
-  const w = canvas.width;
-  const h = canvas.height;
-  const mid = h / 2;
 
-  ctx.clearRect(0, 0, w, h);
-
-  const barWidth = w / peaks.length;
-  ctx.fillStyle = themeColor("--wave-fill", "rgba(139, 124, 255, 0.55)");
-  for (let i = 0; i < peaks.length; i++) {
-    const amp = Math.max(1, peaks[i] * (h * 0.46));
-    const x = i * barWidth;
-    ctx.fillRect(x, mid - amp, Math.max(1, barWidth - 0.4), amp * 2);
-  }
-
-  if (duration > 0) {
-    ctx.strokeStyle = themeColor("--wave-line", "rgba(237, 238, 243, 0.5)");
-    ctx.lineWidth = 1;
-    for (const [s, e] of chopMarkers || []) {
-      for (const t of [s, e]) {
-        const x = (t / duration) * w;
-        ctx.beginPath();
-        ctx.moveTo(x + 0.5, 0);
-        ctx.lineTo(x + 0.5, h);
-        ctx.stroke();
-      }
-    }
-
-    ctx.fillStyle = themeColor("--wave-marker", "#56d0c8");
-    for (const [s] of oneShotMarkers || []) {
-      const x = (s / duration) * w;
-      ctx.beginPath();
-      ctx.moveTo(x - 3, 0);
-      ctx.lineTo(x + 3, 0);
-      ctx.lineTo(x, 6);
-      ctx.closePath();
-      ctx.fill();
-    }
-  }
-}
 
 /**
- * Interactive version of the waveform preview: existing chop-boundary handles can be dragged
- * (pointer events, so mouse/touch/pen all work), new regions can be inserted with "+ Add region",
- * and any region can be removed from the chip list under the waveform. Returns {canvas, getRegions,
- * destroy}.
- */
-function formatEditorTime(t) {
-  const m = Math.floor(t / 60);
-  const s = (t - m * 60).toFixed(2);
-  return m > 0 ? `${m}:${s.padStart(5, "0")}` : `${s}s`;
-}
-
-/**
- * Draggable waveform region editor: start/end handles per region, mouse-wheel zoom (centered on
- * the cursor) plus Zoom in/out/Fit buttons, click-drag panning once zoomed in, and a dragged
- * handle snaps to the nearest zero-crossing when released so edited cuts stay click-free just
- * like the auto-exported ones. `mono`/`sampleRate` are optional - without them (shouldn't happen
- * in normal use) zoom just shows a flat waveform and snapping is skipped.
- */
-function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) {
-  const wrap = document.createElement("div");
-  wrap.className = "editable-waveform";
-
-  const toolbar = document.createElement("div");
-  toolbar.className = "editable-waveform-toolbar";
-  const zoomOutBtn = document.createElement("button");
-  zoomOutBtn.type = "button";
-  zoomOutBtn.className = "btn btn--ghost btn--small";
-  zoomOutBtn.textContent = "Zoom out";
-  const zoomInBtn = document.createElement("button");
-  zoomInBtn.type = "button";
-  zoomInBtn.className = "btn btn--ghost btn--small";
-  zoomInBtn.textContent = "Zoom in";
-  const fitBtn = document.createElement("button");
-  fitBtn.type = "button";
-  fitBtn.className = "btn btn--ghost btn--small";
-  fitBtn.textContent = "Fit";
-  const addRegionBtn = document.createElement("button");
-  addRegionBtn.type = "button";
-  addRegionBtn.className = "btn btn--ghost btn--small";
-  addRegionBtn.textContent = "+ Add region";
-  const zoomLabel = document.createElement("span");
-  zoomLabel.className = "editable-waveform-zoom-label";
-  toolbar.append(zoomOutBtn, zoomInBtn, fitBtn, addRegionBtn, zoomLabel);
-  wrap.appendChild(toolbar);
-
-  const canvas = document.createElement("canvas");
-  canvas.className = "waveform-canvas waveform-canvas--editable";
-  wrap.appendChild(canvas);
-  registerThemeRepaint(canvas, () => redraw());
-
-  const regionList = document.createElement("div");
-  regionList.className = "editable-waveform-region-list";
-  wrap.appendChild(regionList);
-
-  const regions = initialRegions.map(([s, e]) => ({ s, e }));
-  const MIN_GAP_SEC = 0.03;
-  const MIN_VIEW_SEC = Math.min(Math.max(duration, 0.001), 0.25);
-  const BIN_COUNT = 600;
-  let viewStart = 0;
-  let viewDuration = Math.max(duration, MIN_VIEW_SEC);
-  let dragging = null; // { kind: 'handle', idx, which: 's'|'e' } or { kind: 'pan', startClientX, startViewStart }
-
-  function xToTime(xRelative, rectWidth) {
-    return rectWidth > 0 ? viewStart + (xRelative / rectWidth) * viewDuration : viewStart;
-  }
-  function timeToX(t, w) {
-    return viewDuration > 0 ? ((t - viewStart) / viewDuration) * w : 0;
-  }
-
-  function setView(newStart, newDuration) {
-    viewDuration = Math.max(MIN_VIEW_SEC, Math.min(duration, newDuration));
-    viewStart = Math.max(0, Math.min(Math.max(0, duration - viewDuration), newStart));
-    redraw();
-  }
-
-  function zoomAt(anchorTime, factor) {
-    const newDuration = viewDuration / factor;
-    const ratio = viewDuration > 0 ? (anchorTime - viewStart) / viewDuration : 0.5;
-    setView(anchorTime - ratio * newDuration, newDuration);
-  }
-
-  function snapToZeroCrossing(t) {
-    if (!mono || !sampleRate) return t;
-    const windowSamples = Math.max(1, Math.round((exportSettings.zcSearchMs / 1000) * sampleRate));
-    const sampleIndex = Math.round(t * sampleRate);
-    return findNearestZeroCrossing(mono, sampleIndex, windowSamples) / sampleRate;
-  }
-
-  function redraw() {
-    const rectWidth = Math.max(200, Math.round(canvas.getBoundingClientRect().width || 600));
-    canvas.width = rectWidth;
-    canvas.height = 84;
-    const ctx = canvas.getContext("2d");
-    const w = canvas.width;
-    const h = canvas.height;
-    const mid = h / 2;
-    ctx.clearRect(0, 0, w, h);
-
-    if (duration <= 0) {
-      zoomLabel.textContent = "";
-      return;
-    }
-
-    const peaks = mono ? computePeaksInRange(mono, viewStart * sampleRate, (viewStart + viewDuration) * sampleRate, BIN_COUNT) : null;
-    if (peaks) {
-      const barWidth = w / peaks.length;
-      ctx.fillStyle = themeColor("--wave-fill", "rgba(139, 124, 255, 0.55)");
-      for (let i = 0; i < peaks.length; i++) {
-        const amp = Math.max(1, peaks[i] * (h * 0.46));
-        ctx.fillRect(i * barWidth, mid - amp, Math.max(1, barWidth - 0.4), amp * 2);
-      }
-    }
-
-    const regionColorA = themeColor("--wave-region-a", "rgba(86, 208, 200, 0.1)");
-    const regionColorB = themeColor("--wave-region-b", "rgba(139, 124, 255, 0.1)");
-    regions.forEach((r, idx) => {
-      const x0 = Math.max(0, timeToX(r.s, w));
-      const x1 = Math.min(w, timeToX(r.e, w));
-      if (x1 <= x0) return; // region isn't in the visible window
-      ctx.fillStyle = idx % 2 === 0 ? regionColorA : regionColorB;
-      ctx.fillRect(x0, 0, x1 - x0, h);
-    });
-    const handleColor = themeColor("--wave-handle", "#edeef3");
-    regions.forEach((r) => {
-      for (const t of [r.s, r.e]) {
-        const x = timeToX(t, w);
-        if (x < -6 || x > w + 6) continue;
-        ctx.strokeStyle = handleColor;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, h);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(x, mid, 5, 0, Math.PI * 2);
-        ctx.fillStyle = handleColor;
-        ctx.fill();
-      }
-    });
-
-    const zoomX = viewDuration > 0 ? (duration / viewDuration).toFixed(1) : "1.0";
-    zoomLabel.textContent = `${zoomX}x - ${formatEditorTime(viewStart)} to ${formatEditorTime(viewStart + viewDuration)}`;
-    zoomOutBtn.disabled = viewDuration >= duration - 1e-6;
-    zoomInBtn.disabled = viewDuration <= MIN_VIEW_SEC + 1e-6;
-    fitBtn.disabled = zoomOutBtn.disabled;
-  }
-
-  // Lazily-created shared AudioContext for auditioning a region's current edited boundaries
-  // straight from the in-memory mono downmix - no re-export/file-write needed, so it stays in
-  // sync with drags/adds/removes as you make them. Mono only (this editor never has the full
-  // stereo buffer around), which is plenty for judging a cut point.
-  let audioCtx = null;
-  let currentSource = null;
-
-  function stopPreview() {
-    if (currentSource) {
-      try {
-        currentSource.stop();
-      } catch (_) {
-        /* already stopped */
-      }
-      currentSource = null;
-    }
-  }
-
-  function playRegionPreview(r, playBtn) {
-    if (!mono || !sampleRate) return;
-    stopPreview();
-    try {
-      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    } catch (_) {
-      return; // no Web Audio support - button silently does nothing rather than throwing
-    }
-    const startSample = Math.max(0, Math.round(r.s * sampleRate));
-    const endSample = Math.min(mono.length, Math.round(r.e * sampleRate));
-    if (endSample <= startSample) return;
-    const buffer = audioCtx.createBuffer(1, endSample - startSample, sampleRate);
-    buffer.getChannelData(0).set(mono.subarray(startSample, endSample));
-    const source = audioCtx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioCtx.destination);
-    playBtn.classList.add("is-playing");
-    source.onended = () => {
-      playBtn.classList.remove("is-playing");
-      if (currentSource === source) currentSource = null;
-    };
-    source.start();
-    currentSource = source;
-  }
-
-  /** Rebuilds the row of small "start-end [x]" chips under the canvas from the current `regions`. */
-  function renderRegionList() {
-    regionList.innerHTML = "";
-    regions.forEach((r, idx) => {
-      const chip = document.createElement("span");
-      chip.className = "editable-waveform-region-chip";
-      const playBtn = document.createElement("button");
-      playBtn.type = "button";
-      playBtn.className = "editable-waveform-region-play";
-      playBtn.textContent = "▶";
-      playBtn.title = "Preview this region";
-      playBtn.addEventListener("click", () => playRegionPreview(r, playBtn));
-      const label = document.createElement("span");
-      label.textContent = `${idx + 1}: ${formatEditorTime(r.s)} to ${formatEditorTime(r.e)}`;
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.textContent = "×";
-      removeBtn.title = "Remove this region";
-      removeBtn.addEventListener("click", () => removeRegionAt(idx));
-      chip.appendChild(playBtn);
-      chip.appendChild(label);
-      chip.appendChild(removeBtn);
-      regionList.appendChild(chip);
-    });
-    if (regions.length === 0) {
-      const empty = document.createElement("span");
-      empty.className = "editable-waveform-region-chip";
-      empty.textContent = "No regions - use “+ Add region” or Cancel";
-      regionList.appendChild(empty);
-    }
-  }
-
-  /** Inserts a new region centered in the current view, snapped to zero-crossings like a dragged handle. */
-  function addRegionAtCenter() {
-    const center = viewStart + viewDuration / 2;
-    const defaultLen = Math.min(Math.max(duration, MIN_GAP_SEC), Math.max(0.05, viewDuration * 0.25));
-    let s = Math.max(0, center - defaultLen / 2);
-    let e = Math.min(duration, center + defaultLen / 2);
-    if (mono) {
-      s = snapToZeroCrossing(s);
-      e = snapToZeroCrossing(e);
-    }
-    if (e - s < MIN_GAP_SEC) e = Math.min(duration, s + MIN_GAP_SEC);
-    if (e - s < MIN_GAP_SEC) s = Math.max(0, e - MIN_GAP_SEC);
-    regions.push({ s, e });
-    regions.sort((a, b) => a.s - b.s);
-    redraw();
-    renderRegionList();
-  }
-
-  function removeRegionAt(idx) {
-    regions.splice(idx, 1);
-    redraw();
-    renderRegionList();
-  }
-
-  addRegionBtn.addEventListener("click", addRegionAtCenter);
-
-  function hitTest(clientX) {
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0) return null;
-    const toleranceSec = (8 / rect.width) * viewDuration;
-    const t = xToTime(clientX - rect.left, rect.width);
-    let best = null;
-    let bestDist = toleranceSec;
-    regions.forEach((r, idx) => {
-      for (const which of ["s", "e"]) {
-        const d = Math.abs(r[which] - t);
-        if (d < bestDist) {
-          bestDist = d;
-          best = { idx, which };
-        }
-      }
-    });
-    return best;
-  }
-
-  zoomInBtn.addEventListener("click", () => zoomAt(viewStart + viewDuration / 2, 1.8));
-  zoomOutBtn.addEventListener("click", () => zoomAt(viewStart + viewDuration / 2, 1 / 1.8));
-  fitBtn.addEventListener("click", () => setView(0, duration));
-
-  canvas.addEventListener(
-    "wheel",
-    (ev) => {
-      if (!mono || duration <= 0) return;
-      ev.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const anchorTime = xToTime(ev.clientX - rect.left, rect.width);
-      zoomAt(anchorTime, ev.deltaY < 0 ? 1.25 : 1 / 1.25);
-    },
-    { passive: false }
-  );
-
-  canvas.addEventListener("pointerdown", (ev) => {
-    const hit = hitTest(ev.clientX);
-    canvas.setPointerCapture(ev.pointerId);
-    if (hit) {
-      dragging = { kind: "handle", ...hit };
-      canvas.classList.add("waveform-canvas--dragging");
-    } else if (mono) {
-      dragging = { kind: "pan", startClientX: ev.clientX, startViewStart: viewStart };
-      canvas.classList.add("waveform-canvas--dragging");
-    }
-  });
-  canvas.addEventListener("pointermove", (ev) => {
-    if (!dragging) return;
-    const rect = canvas.getBoundingClientRect();
-    if (dragging.kind === "handle") {
-      const r = regions[dragging.idx];
-      let t = xToTime(ev.clientX - rect.left, rect.width);
-      t = dragging.which === "s" ? Math.max(0, Math.min(r.e - MIN_GAP_SEC, t)) : Math.max(r.s + MIN_GAP_SEC, Math.min(duration, t));
-      r[dragging.which] = t;
-      redraw();
-    } else if (dragging.kind === "pan") {
-      const dxPx = ev.clientX - dragging.startClientX;
-      const dtSec = -(dxPx / Math.max(1, rect.width)) * viewDuration;
-      setView(dragging.startViewStart + dtSec, viewDuration);
-    }
-  });
-  function endDrag() {
-    if (dragging) canvas.classList.remove("waveform-canvas--dragging");
-    if (dragging && dragging.kind === "handle") {
-      const r = regions[dragging.idx];
-      const snapped = snapToZeroCrossing(r[dragging.which]);
-      r[dragging.which] =
-        dragging.which === "s" ? Math.max(0, Math.min(r.e - MIN_GAP_SEC, snapped)) : Math.max(r.s + MIN_GAP_SEC, Math.min(duration, snapped));
-      redraw();
-      renderRegionList();
-    }
-    dragging = null;
-  }
-  canvas.addEventListener("pointerup", endDrag);
-  canvas.addEventListener("pointercancel", endDrag);
-
-  redraw();
-  renderRegionList();
-  window.addEventListener("resize", redraw);
-
-  return {
-    el: wrap,
-    getRegions: () => regions.map((r) => [r.s, r.e]),
-    destroy: () => {
-      stopPreview();
-      window.removeEventListener("resize", redraw);
-    },
-  };
-}
-
-/** Swaps a result-file block into edit mode: draggable waveform + Save/Cancel, replacing the static view. */
-/**
- * Swaps a result-file block into edit mode for either its chops or its one-shots (`kind`),
- * replacing the static view with a draggable waveform + Save/Cancel. Saving mutates just that
- * half of `state` (chopRows/chopMarkers or oneShotRows/oneShotMarkers) and re-renders the whole
- * card from it, so editing one never discards the other's already-exported results.
- */
-function enterEditMode(block, state, staticArea, editBtn, kind) {
-  const isChops = kind === "chops";
-  staticArea.hidden = true;
-  editBtn.disabled = true;
-
-  const editorWrap = document.createElement("div");
-  editorWrap.className = "chop-editor";
-
-  const hint = document.createElement("p");
-  hint.className = "chop-editor-hint";
-  hint.textContent = `Drag the white handles to adjust cut points (they snap to the nearest zero-crossing when you let go), scroll to zoom, drag the waveform to pan. Use “+ Add region” to insert a new ${
-    isChops ? "chop" : "one-shot"
-  }, or the × on a chip below the waveform to remove one. Save re-exports.`;
-  editorWrap.appendChild(hint);
-
-  const editor = createEditableWaveform({
-    mono: state.mono,
-    sampleRate: state.sampleRate,
-    duration: state.duration,
-    initialRegions: isChops ? state.chopMarkers : state.oneShotMarkers,
-  });
-  editorWrap.appendChild(editor.el);
-
-  const actions = document.createElement("div");
-  actions.className = "modal-actions chop-editor-actions";
-  const cancelBtn = document.createElement("button");
-  cancelBtn.className = "btn btn--ghost";
-  cancelBtn.textContent = "Cancel";
-  const saveBtn = document.createElement("button");
-  saveBtn.className = "btn btn--primary";
-  saveBtn.textContent = "Apply";
-  actions.appendChild(cancelBtn);
-  actions.appendChild(saveBtn);
-  editorWrap.appendChild(actions);
-
-  block.insertBefore(editorWrap, staticArea);
-
-  function exit() {
-    editor.destroy();
-    editorWrap.remove();
-    staticArea.hidden = false;
-    editBtn.disabled = false;
-  }
-
-  cancelBtn.addEventListener("click", exit);
-
-  // Apply regenerates this file's players and waveform from the edited boundaries and records the
-  // new regions against the file, so a later Export cuts where you said. It deliberately writes
-  // nothing: an edit made while reviewing shouldn't put files on disk behind your back, which is
-  // what the old "Save & re-export" did.
-  saveBtn.addEventListener("click", async () => {
-    saveBtn.disabled = true;
-    cancelBtn.disabled = true;
-    saveBtn.textContent = "Applying…";
-    const wasDryRun = dryRun;
-    dryRun = true;
-    try {
-      const regions = editor.getRegions();
-      const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
-      if (isChops) {
-        const result = await reExportSingleFile(state.editContext, regions);
-        state.chopRows = result.chopRows;
-        state.chopMarkers = result.chopMarkers;
-        if (entry) entry.chopRegions = regions;
-        log(`  ${state.editContext.fileInfo.name}: ${result.chopRows.length} chop(s) updated. Hit Export to save them.`);
-      } else {
-        const result = await reExportOneShots(state.editContext, regions);
-        state.oneShotRows = result.rows;
-        state.oneShotMarkers = result.markers;
-        if (entry) entry.oneShotRegions = regions;
-        log(`  ${state.editContext.fileInfo.name}: ${result.rows.length} one-shot(s) updated. Hit Export to save them.`);
-      }
-      const newBlock = renderFileResult(state);
-      block.replaceWith(newBlock);
-    } catch (err) {
-      log(`  ERROR updating ${state.editContext.fileInfo.name}: ${err.message || err}`);
-      console.error(err);
-      saveBtn.disabled = false;
-      cancelBtn.disabled = false;
-      saveBtn.textContent = "Apply";
-    } finally {
-      dryRun = wasDryRun;
-    }
-  });
-}
-
-/**
- * Renders one processed file's result card from a mutable state object:
- * { fileName, keyText, bpmText, chopRows, chopMarkers, oneShotRows, oneShotMarkers, peaks,
- *   duration, mono, sampleRate, editContext }. The state object (not just the rendered DOM) is
- * what the chop/one-shot editors mutate on save, so re-exporting one of the two never discards
- * the other's already-exported rows - see enterEditMode.
+ * Renders one processed file's card.
+ *
+ * The waveform here is the interactive one, always - there is no separate "edit mode" to enter any
+ * more. Zooming to look at a transient, auditioning a slice and nudging a cut point were all three
+ * clicks deep behind an Edit button, and the audition played the exported file, so hearing an edit
+ * meant re-processing first. Now the waveform is live from the moment a file appears: select a
+ * slice on it and the matching row below highlights, so "delete number six" doesn't involve
+ * counting. Edits stay in memory until Apply, and nothing is written until Export.
  */
 function renderFileResult(state) {
-  const { fileName, keyText, bpmText, chopRows, oneShotRows, peaks, duration, chopMarkers, oneShotMarkers, editContext, chopSkipped } = state;
+  const { fileName, keyText, bpmText, chopRows, oneShotRows, duration, editContext, chopSkipped } = state;
 
   const block = document.createElement("div");
   block.className = "result-file";
@@ -2399,20 +1972,35 @@ function renderFileResult(state) {
 
   const actionsGroup = document.createElement("div");
   actionsGroup.className = "result-file-header-actions";
-  let editChopsBtn = null;
-  if (editContext && chopRows.length) {
-    editChopsBtn = document.createElement("button");
-    editChopsBtn.className = "btn btn--ghost btn--small";
-    editChopsBtn.textContent = "Edit chops";
-    actionsGroup.appendChild(editChopsBtn);
+
+  // Which set of slices the waveform edits. Only offered when there is a choice to make.
+  const hasChops = Boolean(editContext) && state.chopMarkers.length > 0;
+  const hasShots = Boolean(editContext) && state.oneShotMarkers.length > 0;
+  let editing = hasChops ? "chops" : hasShots ? "oneshots" : null;
+
+  let setPicker = null;
+  if (hasChops && hasShots) {
+    setPicker = document.createElement("div");
+    setPicker.className = "seg seg--small";
+    for (const [key, label] of [
+      ["chops", "Chops"],
+      ["oneshots", "One-shots"],
+    ]) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "seg-btn" + (key === editing ? " is-active" : "");
+      b.textContent = label;
+      b.addEventListener("click", () => {
+        if (editing === key) return;
+        editing = key;
+        [...setPicker.children].forEach((c) => c.classList.toggle("is-active", c === b));
+        mountEditor();
+      });
+      setPicker.appendChild(b);
+    }
+    actionsGroup.appendChild(setPicker);
   }
-  let editOneShotsBtn = null;
-  if (editContext && oneShotRows.length) {
-    editOneShotsBtn = document.createElement("button");
-    editOneShotsBtn.className = "btn btn--ghost btn--small";
-    editOneShotsBtn.textContent = "Edit one-shots";
-    actionsGroup.appendChild(editOneShotsBtn);
-  }
+
   // Per-file opt-out: one-shot extraction is a heuristic, and on some breaks it just returns junk.
   // Rather than making that an all-or-nothing batch setting, each file can drop its own.
   if (state.hasOneShots && state.analysisKey) {
@@ -2438,37 +2026,129 @@ function renderFileResult(state) {
   if (actionsGroup.childElementCount) header.appendChild(actionsGroup);
   block.appendChild(header);
 
+  const editorHost = document.createElement("div");
+  editorHost.className = "result-file-editor";
+  block.appendChild(editorHost);
+
+  const applyRow = document.createElement("div");
+  applyRow.className = "result-apply-row";
+  applyRow.hidden = true;
+  const applyNote = document.createElement("span");
+  applyNote.className = "result-apply-note";
+  const revertBtn = document.createElement("button");
+  revertBtn.className = "btn btn--ghost btn--small";
+  revertBtn.textContent = "Revert";
+  const applyBtn = document.createElement("button");
+  applyBtn.className = "btn btn--primary btn--small";
+  applyBtn.textContent = "Apply";
+  applyRow.append(applyNote, revertBtn, applyBtn);
+  block.appendChild(applyRow);
+
   const staticArea = document.createElement("div");
   staticArea.className = "result-file-static";
-
-  if (peaks && peaks.length) {
-    const canvas = document.createElement("canvas");
-    canvas.className = "waveform-canvas";
-    staticArea.appendChild(canvas);
-    // Draw after layout so getBoundingClientRect reports the real rendered width.
-    requestAnimationFrame(() => drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers));
-    registerThemeRepaint(canvas, () => drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers));
-  }
-
-  staticArea.appendChild(renderChopList(chopRows));
-
-  if (oneShotRows.length) {
-    const oneShotHeading = document.createElement("div");
-    oneShotHeading.className = "result-subheading";
-    oneShotHeading.textContent = "One-shots";
-    staticArea.appendChild(oneShotHeading);
-    staticArea.appendChild(renderChopList(oneShotRows));
-  }
-
   block.appendChild(staticArea);
 
-  if (editChopsBtn) {
-    editChopsBtn.addEventListener("click", () => enterEditMode(block, state, staticArea, editChopsBtn, "chops"));
-  }
-  if (editOneShotsBtn) {
-    editOneShotsBtn.addEventListener("click", () => enterEditMode(block, state, staticArea, editOneShotsBtn, "oneshots"));
+  let editor = null;
+  let chopListEl = null;
+  let shotListEl = null;
+
+  /** Highlights the row matching the slice selected on the waveform. */
+  function highlightRow(idx) {
+    for (const list of [chopListEl, shotListEl]) {
+      if (!list) continue;
+      const active = (editing === "chops" && list === chopListEl) || (editing === "oneshots" && list === shotListEl);
+      [...list.querySelectorAll(".chop-row")].forEach((row, i) => {
+        row.classList.toggle("is-selected", active && i === idx);
+      });
+    }
   }
 
+  function renderLists() {
+    staticArea.innerHTML = "";
+    chopListEl = null;
+    shotListEl = null;
+    if (chopRows.length) {
+      const h = document.createElement("div");
+      h.className = "result-subheading";
+      h.textContent = "Chops";
+      chopListEl = renderChopList(chopRows, (i) => editor && editing === "chops" && editor.select(i));
+      staticArea.append(h, chopListEl);
+    }
+    if (oneShotRows.length) {
+      const h = document.createElement("div");
+      h.className = "result-subheading";
+      h.textContent = "One-shots";
+      shotListEl = renderChopList(oneShotRows, (i) => editor && editing === "oneshots" && editor.select(i));
+      staticArea.append(h, shotListEl);
+    }
+  }
+
+  function mountEditor() {
+    if (editor) editor.destroy();
+    editorHost.innerHTML = "";
+    editor = null;
+    if (!editing) return;
+    editor = createEditableWaveform({
+      mono: state.mono,
+      sampleRate: state.sampleRate,
+      duration,
+      initialRegions: editing === "chops" ? state.chopMarkers : state.oneShotMarkers,
+      noun: editing === "chops" ? "chop" : "one-shot",
+      zcSearchMs: exportSettings.zcSearchMs,
+      color: themeColor,
+      onChange: () => {
+        applyRow.hidden = false;
+        applyNote.textContent = `${editing === "chops" ? "Chop" : "One-shot"} edits not applied yet`;
+      },
+      onSelect: highlightRow,
+    });
+    editorHost.appendChild(editor.el);
+    registerThemeRepaint(editor.el, () => editor && editor.redraw());
+  }
+
+  revertBtn.addEventListener("click", () => {
+    applyRow.hidden = true;
+    mountEditor();
+  });
+
+  // Apply regenerates this file's players from the edited boundaries and records the new slices
+  // against the file, so a later Export cuts where you said. It writes nothing.
+  applyBtn.addEventListener("click", async () => {
+    applyBtn.disabled = true;
+    revertBtn.disabled = true;
+    applyBtn.textContent = "Applying…";
+    const wasDryRun = dryRun;
+    dryRun = true;
+    try {
+      const regions = editor.getRegions();
+      const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+      if (editing === "chops") {
+        const result = await reExportSingleFile(state.editContext, regions);
+        state.chopRows = result.chopRows;
+        state.chopMarkers = result.chopMarkers;
+        if (entry) entry.chopRegions = regions;
+        log(`  ${state.editContext.fileInfo.name}: ${result.chopRows.length} chop(s) updated. Hit Export to save.`);
+      } else {
+        const result = await reExportOneShots(state.editContext, regions);
+        state.oneShotRows = result.rows;
+        state.oneShotMarkers = result.markers;
+        if (entry) entry.oneShotRegions = regions;
+        log(`  ${state.editContext.fileInfo.name}: ${result.rows.length} one-shot(s) updated. Hit Export to save.`);
+      }
+      block.replaceWith(renderFileResult(state));
+    } catch (err) {
+      log(`  ERROR updating ${state.editContext.fileInfo.name}: ${err.message || err}`);
+      console.error(err);
+      applyBtn.disabled = false;
+      revertBtn.disabled = false;
+      applyBtn.textContent = "Apply";
+    } finally {
+      dryRun = wasDryRun;
+    }
+  });
+
+  renderLists();
+  mountEditor();
   return block;
 }
 
@@ -2514,7 +2194,7 @@ async function processBatch({ write = true } = {}) {
   clearLog();
   resultsPanel.innerHTML = "";
   drumTempoSkipPolicy = null;
-  log(write ? "Exporting…" : "Previewing. Nothing is saved until you hit Export.");
+  log(write ? "Exporting…" : "Processing. Nothing is saved until you hit Export.");
 
   const zipBatch = FSA_SUPPORTED || dryRun ? null : new ZipBatch();
   let totalChops = 0;
@@ -2571,7 +2251,7 @@ async function processBatch({ write = true } = {}) {
 
   if (dryRun) {
     log(
-      `${cancelRequested ? "Preview cancelled." : "Preview ready."} ${totalChops} chop(s) from ${processedFolders} folder(s). ` +
+      `${cancelRequested ? "Cancelled." : "Done."} ${totalChops} chop(s) from ${processedFolders} folder(s). ` +
         `Adjust anything you want, then hit Export to save.`
     );
   } else {
@@ -2632,7 +2312,15 @@ splitSubfoldersCheckbox.addEventListener("change", saveSettings);
 
 function init() {
   versionBadge.textContent = `v${APP_VERSION}`;
-  applyUiMode(loadUiMode(), { persist: false });
+  applyTask(loadTask(), { persist: false });
+  const savedRail = (() => {
+    try {
+      return localStorage.getItem(RAIL_STORAGE_KEY);
+    } catch (_) {
+      return null;
+    }
+  })();
+  applyRail(savedRail ? savedRail === "open" : task === "both", { persist: false });
   applySettings(loadSettings());
   updateNamingPreview(); // outside applySettings so it also runs for first-time visitors with nothing saved yet
 

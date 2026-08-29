@@ -611,22 +611,42 @@ export function classifyHit({ low, mid, high, durationSec }) {
  * the noise floor, the next onset arrives, or maxHitSec is reached -
  * whichever comes first. Very short blips (below minHitSec) are dropped.
  */
-export function findOneShotWindows(mono, sampleRate, onsets, { minHitSec = 0.03, maxHitSec = 1.2, preRollSec = 0.003 } = {}) {
+export function findOneShotWindows(
+  mono,
+  sampleRate,
+  onsets,
+  { minHitSec = 0.05, maxHitSec = 1.2, preRollSec = 0.004, bleedSec = 0.09, decayDropDb = 26 } = {}
+) {
   const { times, vals } = computeRmsEnvelope(mono, sampleRate, 15, 5);
-  const noiseFloorDb = estimateNoiseFloorDb(vals);
-  const decayThresholdDb = noiseFloorDb + 6;
   const duration = mono.length / sampleRate;
 
   const windows = [];
   for (let i = 0; i < onsets.length; i++) {
     const onset = onsets[i];
     const nextOnset = i + 1 < onsets.length ? onsets[i + 1] : duration;
-    const hardEnd = Math.min(duration, onset + maxHitSec, nextOnset);
 
-    let end = hardEnd;
+    // The next onset is a soft limit, not a hard one. Cutting exactly there was the bug that made
+    // extracted hits useless: in a busy break onsets are ~75ms apart, so every "one-shot" came out
+    // as a 0.0s stub with its tail chopped off. A real hit is allowed to ring a little way into
+    // whatever follows it, which is what a sampler would capture.
+    const hardEnd = Math.min(duration, onset + maxHitSec);
+    const softEnd = Math.min(hardEnd, nextOnset + bleedSec);
+
+    // Decay is measured against THIS hit's own peak, not a whole-file noise floor. The global
+    // floor is meaningless on a dense break (it sits at digital silence, so the test never fired
+    // and the decay logic did nothing at all).
+    let hitPeak = 0;
     for (let k = 0; k < times.length; k++) {
-      if (times[k] <= onset) continue;
-      if (times[k] >= hardEnd) break;
+      if (times[k] < onset) continue;
+      if (times[k] > softEnd) break;
+      if (vals[k] > hitPeak) hitPeak = vals[k];
+    }
+    const decayThresholdDb = linToDb(hitPeak) - decayDropDb;
+
+    let end = softEnd;
+    for (let k = 0; k < times.length; k++) {
+      if (times[k] <= onset + 0.01) continue; // let the transient itself through before testing decay
+      if (times[k] >= softEnd) break;
       if (linToDb(vals[k]) <= decayThresholdDb) {
         end = times[k];
         break;
@@ -634,44 +654,88 @@ export function findOneShotWindows(mono, sampleRate, onsets, { minHitSec = 0.03,
     }
 
     const start = Math.max(0, onset - preRollSec);
-    if (end - start >= minHitSec) windows.push([start, end]);
+
+    // minHitSec is a floor to grow to, not a reason to throw the hit away. A closed hat really is
+    // only ~40ms of sound, and dropping it would lose a legitimate one-shot; padding it out to a
+    // usable length costs nothing but a little silence at the tail.
+    if (end - start < minHitSec) end = Math.min(hardEnd, duration, start + minHitSec);
+    if (end - start > 0) windows.push([start, end]);
   }
   return windows;
 }
 
 /**
- * Greedily dedupe hits of the same label that look like repeats of the same
- * sound (close band-energy balance), keeping only the loudest representative
- * of each cluster, capped at maxPerLabel. Returns hits sorted by start time.
+ * A hit's spectral shape as a short vector, for telling two hits apart.
+ *
+ * Five one-pole bands rather than the three used for labelling, log-scaled (loudness is
+ * perceptually logarithmic, and a linear ratio is dominated by whichever band is loudest) and
+ * mean-centred so the comparison is about spectral SHAPE rather than level - the same snare hit
+ * softer should still read as the same snare.
  */
-export function dedupeHits(hits, { simThreshold = 0.12, maxPerLabel = 6 } = {}) {
-  const byLabel = new Map();
-  for (const hit of hits) {
-    if (!byLabel.has(hit.label)) byLabel.set(hit.label, []);
-    byLabel.get(hit.label).push(hit);
+export function hitFingerprint(mono, sampleRate, startSample, endSample) {
+  const a = Math.max(0, startSample);
+  const b = Math.min(mono.length, endSample);
+  if (b <= a) return [0, 0, 0, 0, 0];
+  const slice = mono.slice(a, b);
+
+  const b0 = onePoleLowpass(slice, 120, sampleRate);
+  const above120 = onePoleHighpass(slice, 120, sampleRate);
+  const b1 = onePoleLowpass(above120, 500, sampleRate);
+  const above500 = onePoleHighpass(above120, 500, sampleRate);
+  const b2 = onePoleLowpass(above500, 2000, sampleRate);
+  const above2k = onePoleHighpass(above500, 2000, sampleRate);
+  const b3 = onePoleLowpass(above2k, 6000, sampleRate);
+  const b4 = onePoleHighpass(above2k, 6000, sampleRate);
+
+  const raw = [b0, b1, b2, b3, b4].map((band) => Math.log10(rms(band, 0, band.length) + 1e-6));
+  const mean = raw.reduce((s, v) => s + v, 0) / raw.length;
+  const centred = raw.map((v) => v - mean);
+  const norm = Math.hypot(...centred) || 1;
+  return centred.map((v) => v / norm);
+}
+
+/**
+ * Greedily dedupe hits that look like repeats of the same sound, keeping the loudest of each
+ * cluster. Returns hits sorted by start time.
+ *
+ * Clustering is GLOBAL and on `hit.fingerprint`, not grouped by the kick/snare/hat label. Grouping
+ * by label made the unreliable part of the pipeline load-bearing twice over: a mislabelled hit
+ * could never match its own twin, while everything sharing a label got compared on three coarse
+ * band ratios and collapsed together. On a real break that reduced 32 detected hits to 2. The
+ * threshold here is a cosine distance between normalised log-band vectors, so it is much tighter
+ * and much less willing to declare two different drums identical.
+ */
+export function dedupeHits(hits, { simThreshold = 0.06, maxKept = 24, minPeakRatio = 0.08 } = {}) {
+  if (hits.length === 0) return [];
+
+  // Ghost notes and bleed between hits are not samples anyone wants; drop anything far below the
+  // loudest hit in the file.
+  const loudest = hits.reduce((m, h) => Math.max(m, h.peak || 0), 0);
+  const candidates = loudest > 0 ? hits.filter((h) => (h.peak || 0) >= loudest * minPeakRatio) : hits.slice();
+
+  const clusters = [];
+  for (const hit of candidates) {
+    const vec = hit.fingerprint;
+    let cluster = null;
+    if (vec) {
+      cluster = clusters.find((c) => {
+        if (!c.vec) return false;
+        // cosine distance; both vectors are already unit-length
+        let dot = 0;
+        for (let i = 0; i < vec.length; i++) dot += c.vec[i] * vec[i];
+        return 1 - dot <= simThreshold;
+      });
+    }
+    if (!cluster) {
+      clusters.push({ vec, rep: hit });
+    } else if ((hit.peak || 0) > (cluster.rep.peak || 0)) {
+      cluster.rep = hit;
+    }
   }
 
-  const kept = [];
-  for (const group of byLabel.values()) {
-    const clusters = []; // { rep, members:[...] }
-    for (const hit of group) {
-      const total = hit.low + hit.mid + hit.high || 1e-9;
-      const vec = [hit.low / total, hit.mid / total, hit.high / total];
-      let cluster = clusters.find((c) => {
-        const d = Math.hypot(c.vec[0] - vec[0], c.vec[1] - vec[1], c.vec[2] - vec[2]);
-        return d <= simThreshold;
-      });
-      if (!cluster) {
-        cluster = { vec, rep: hit };
-        clusters.push(cluster);
-      } else if ((hit.peak || 0) > (cluster.rep.peak || 0)) {
-        cluster.rep = hit;
-      }
-    }
-    clusters
-      .sort((a, b) => (b.rep.peak || 0) - (a.rep.peak || 0))
-      .slice(0, maxPerLabel)
-      .forEach((c) => kept.push(c.rep));
-  }
-  return kept.sort((a, b) => a.start - b.start);
+  return clusters
+    .sort((a, b) => (b.rep.peak || 0) - (a.rep.peak || 0))
+    .slice(0, maxKept)
+    .map((c) => c.rep)
+    .sort((a, b) => a.start - b.start);
 }

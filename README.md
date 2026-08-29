@@ -13,39 +13,44 @@ site on GitHub Pages.
 
 ## Features
 
-- **Preview before anything is written.** **Preview** runs the entire batch
-  and saves nothing: you get every waveform with its cut points marked, every
-  chop and one-shot with a player to audition, and the region editor to drag
-  boundaries around. **Export** is the only button that touches your disk.
-  So the loop is: drop a file, hit Export if you trust it, or hit Preview
-  first, adjust what you don't like, and Export when it looks right. Export
-  reuses the analysis Preview already did, so the second pass skips key,
-  tempo and onset detection entirely.
-- **Fix it before you commit to it.** In a preview, **Edit chops** or
-  **Edit one-shots** opens the waveform, and **Apply** updates that file's
-  chops in place without writing anything. Each file also gets an **export
-  one-shots** tickbox, so when the hit extraction returns junk on one
-  particular break you can drop just that file's one-shots and keep the rest
-  of the batch.
-- **One screen, two densities.** The window is fixed: source material and
-  density along the top, your audio in the middle, and Preview/Export pinned
-  to the bottom. Only the middle scrolls, so the controls and the buttons
-  never scroll away from the waveforms you're judging. The **Simple /
-  Advanced** toggle changes how dense that screen is:
-  - **Simple** is a clean pass. No settings rail, a full-height drop zone,
-    results as large cards, and output that is always the original tempo with
-    no colouration, whatever is configured in Advanced.
-  - **Advanced** adds a full-height settings rail down the left (naming,
-    detection, export, time-stretch, lo-fi, scope) and compresses those same
-    result cards into dense rows with chops laid out in columns, so a
-    forty-file batch stays scannable.
+- **Three tasks, not a difficulty setting.** The app opens on one question:
+  what are you here to do?
+  - **Chop** cuts audio into chops and one-shots. No processing at all -
+    original tempo, no colouration.
+  - **Stretch** is the time-stretch tool on its own. Nothing is cut; whole
+    files go through the stretch and lo-fi chain.
+  - **Both** does the lot, with every option available at once.
 
-  Simple deliberately bypasses the whole effects chain rather than resetting
-  it: a lo-fi setup you can no longer see shouldn't silently keep colouring
-  your output, but it also shouldn't be thrown away. Switch back to Advanced
-  and it is exactly as you left it. Chop length and one-shot extraction sit
-  outside the toggle, in a strip that appears whenever Drums is selected,
-  because they decide what actually comes out of a break.
+  This replaced a Simple/Advanced toggle, which was the wrong axis: it
+  described how much of the interface you could see, said nothing about what
+  you were trying to do, buried time-stretch as an optional panel inside a
+  mode called "Advanced", and made "Advanced" mean two unrelated things at
+  once - reveal the settings *and* switch the effects chain on. Task is the
+  honest split, and it needs no special cases: under Chop there is simply no
+  stretch stage to bypass. How much you see is separate, and lives behind the
+  **Settings** button.
+- **Process shows you the cuts; Export writes them.** **Process** runs the
+  entire batch and saves nothing: every waveform with its cut points marked,
+  every chop and one-shot with a player, and a live editor. **Export** is the
+  only button that touches your disk. So: drop a file and hit Export if you
+  trust it, or hit Process first, fix what you don't like, and Export when
+  it looks right. Export reuses the analysis Process already did, so the
+  second pass skips key, tempo and onset detection entirely.
+- **The waveform is always live.** There is no "edit mode" to enter. Every
+  processed file shows an interactive waveform straight away: scroll to zoom,
+  click a slice to select it, **Space** to hear it (straight from memory, no
+  re-processing), **Delete** to remove it, double-click to add one, and drag
+  any boundary to move it. Selecting a slice highlights its row in the list
+  below, so removing "number six" doesn't involve counting. Because chops from
+  a break are contiguous, the end of one slice and the start of the next are
+  drawn and dragged as a single shared boundary - stacking two identical
+  handles on the same pixel made a drag look like it hadn't worked. Where
+  slices genuinely don't touch (phrase mode leaves gaps) the edges stay
+  independent and carry a direction flag. Edits live in memory until
+  **Apply**; nothing is written until Export.
+- **Per-file one-shot opt-out.** Hit extraction is a heuristic and on some
+  breaks it returns junk, so each file has an **export one-shots** tickbox:
+  drop that file's hits and keep the rest of the batch.
 - **One palette, checked by the test suite.** There used to be three
   interface themes. Two of them shipped body text below the readable
   minimum without anyone noticing (Console's panel labels measured 2.55:1,
@@ -70,30 +75,22 @@ site on GitHub Pages.
   cleanly. If tempo isn't confidently detected on a drums-mode file, you get
   a warning and a choice: continue with a fixed fallback length, or skip
   that file - with an option to apply your choice to the rest of the batch.
-- **Waveform previews.** Each processed file gets a waveform in the results
-  panel with its chop boundaries and any one-shot hits marked, so you can
-  see at a glance how the auto-detection carved it up before you go
-  digging through the audio players.
-- **Manual chop and one-shot editing, with audition.** Click **Edit chops**
-  or **Edit one-shots** on any processed file to open its waveform for
-  editing: drag the start/end handles to adjust cut points (they snap to
-  the nearest zero-crossing when you let go, same as an export), scroll
-  or use the zoom buttons to get in close, drag the waveform to pan once
-  you're zoomed in, then **Apply** to update that file with your
-  adjustments. Every region chip below the waveform has a **▶**
-  button that plays that region back instantly from memory, so you can
-  check a boundary sounds right before committing to it. Use
-  **+ Add region** to drop in a new region (centered in the current view,
-  zero-crossing snapped), or the **×** on a chip to delete that region
-  entirely. Editing chops and one-shots are independent - saving one
-  never discards the other.
-- **Chop into pieces is itself optional.** Untick **"Chop into pieces"** at
-  the top of the Mode panel to skip chopping entirely - key/tempo
-  detection, the `wav/` copy, and time-stretch/lo-fi processing all still
-  run on the whole file, just nothing gets cut up. Useful when all you
-  want is a stretched and/or lo-fi'd copy of a full recording. Chop,
-  time-stretch, and lo-fi processing are otherwise independent switches -
-  use any one, any two, or all three together.
+- **Editing chops and one-shots is independent.** A file with both shows a
+  Chops / One-shots switch above the waveform; adjusting one set never
+  discards the other. Dragged boundaries snap to the nearest zero-crossing
+  when you let go, the same as an export, so hand-edited cuts stay
+  click-free.
+- **One-shot extraction that returns usable hits.** Hits used to be cut hard
+  at the next onset, so on a busy break every "one-shot" came out as a ~40ms
+  stub with its tail chopped off, and a dedupe pass that clustered on three
+  coarse band ratios then collapsed 32 detected hits down to 2. Now a hit is
+  allowed to ring a little way into what follows it, its decay is measured
+  against its own peak rather than a whole-file noise floor (which sits at
+  digital silence on a dense break, so the test never fired), and dedupe
+  clusters on a five-band log-spectral fingerprint with the unreliable
+  kick/snare/hat label kept out of it entirely. On a test break built from
+  five deliberately distinct drums, the old code recovered 3 of them and the
+  new code recovers all 5.
 - **Optional time-stretch.** Stretch chops on export while preserving
   pitch, either by matching every file to one target tempo (handy for
   normalizing a batch to a single BPM, up to 300 BPM) or by a fixed
@@ -166,7 +163,7 @@ site on GitHub Pages.
   in the results panel - no need to dig through Finder to hear what you got.
 - **A batch that survives one bad file.** If a single file fails to decode
   or analyze, it's logged and skipped; the rest of the batch keeps going.
-- **Progress and cancel.** Both Preview and Export show a progress bar as
+- **Progress and cancel.** Both Process and Export show a progress bar as
   they work through the queue, and a **Cancel** button stops after the file
   currently in flight finishes (mid-file cancellation isn't possible, but
   nothing further starts). The heavy per-chop work - time-stretch, the
@@ -208,33 +205,33 @@ Then open the URL it prints (typically `http://localhost:8000`).
 
 ## Using it
 
-Choose a mode, then either **Add folder** (repeatable, to build a
-multi-folder batch), **Add files** (pick one or more loose audio files),
-or drag a folder or audio files from your file manager and drop them
-anywhere on the page.
+Pick a task first: **Chop**, **Stretch** or **Both**. In Chop and Both,
+also pick the source material (Horns / Rhodes / Drums); in Stretch nothing
+is being cut, so that picker isn't shown.
+
+Then either **Add folder** (repeatable, to build a multi-folder batch),
+**Add files** (pick one or more loose audio files), or drag a folder or
+audio files from your file manager and drop them anywhere on the page. In
+Chop, dropping something starts it immediately.
 
 From there it's two buttons:
 
-- **Export** cuts the batch and writes it. If you trust the detection, this
+- **Export** runs the batch and writes it. If you trust the detection, this
   is the whole workflow.
-- **Preview** does the same work and saves nothing. You get every waveform
-  with its cuts marked, a player for every chop and one-shot, and the region
-  editor. Drag boundaries, hit **Apply** to update that file, untick **export
-  one-shots** on any file whose hits came out badly, then hit **Export** when
-  you're happy. Export reuses what Preview already worked out, so it doesn't
-  redetect.
+- **Process** does the same work and saves nothing. You get every waveform
+  with its cuts marked, a player for every chop and one-shot, and a live
+  editor. Drag boundaries, select a slice and hit Space to hear it, Delete to
+  remove it, double-click to add one, hit **Apply** to update that file,
+  untick **export one-shots** on any file whose hits came out badly, then hit
+  **Export** when you're happy. Export reuses what Process already worked
+  out, so it doesn't redetect.
 
-Preview and Export both respect the current density. **Simple** is always a
-clean pass: original tempo, no colouration, whatever Advanced is set to.
-**Advanced** adds a settings rail down the left with everything else -
-naming, detection parameters, export, time-stretch, lo-fi character and
-processing scope - and compresses the result cards into dense rows. Nothing
-you set in Advanced is lost when you go back to Simple; it just stops being
-applied while you're there.
-
-Auto detection is on by default, so you can go straight to Export - untick
-**Auto** in the Detection section of the rail if you want to adjust the
-parameters first.
+Everything else is behind the **Settings** button, which opens a rail down
+the left. What's in it depends on the task: Chop gets source, naming,
+detection and export; Stretch gets source, naming, export, time-stretch and
+lo-fi; Both gets all of it plus processing scope. Auto detection is on by
+default, so you can go straight to Export - untick **Auto** in the Detection
+section if you want to adjust the parameters first.
 
 If a folder you add contains several session subfolders rather than audio
 files directly, tick **"Split into one batch per subfolder"** before
@@ -273,7 +270,7 @@ waveform itself to pan around once zoomed in, and hit a region chip's
 chops or one-shots with your edits, without touching the other set and
 without writing anything: Export is still what saves. The optional
 **Time-stretch** and **Lo-fi character** sections
-(in the Advanced rail) both apply to every export in the batch, not
+(in the Settings rail) both apply to every export in the batch, not
 per-file: turn time-stretch on, pick a mode (match a target tempo, or a
 fixed ratio) and a character, and it's baked into every chop as it's
 exported - including a manual re-export from the editor - plus a

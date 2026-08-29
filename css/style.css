@@ -10,10 +10,11 @@
    .test.mjs fails the build if any text role drops under 4.5:1 against the
    surface it sits on.
 
-   Simple and Advanced are NOT separate layouts. They share this entire
-   stylesheet and the entire DOM. The only differences live in the DENSITY
-   section near the bottom: which regions are mounted (.advanced-only) and
-   which grid the file rows use.
+   The app has one layout and three TASKS - chop, stretch, both - set as
+   data-task on <html>. A task decides which settings sections are mounted
+   (see the TASK section near the bottom); it is not a separate layout or a
+   separate stylesheet. The settings rail is disclosure, tracked separately as
+   data-rail, so "which task" and "how much do I want to see" stay independent.
    =========================================================================== */
 
 :root {
@@ -58,6 +59,7 @@
   --wave-marker: #ff4b3b;
   --wave-region-a: rgba(255, 75, 59, 0.09);
   --wave-region-b: rgba(255, 130, 102, 0.07);
+  --wave-region-sel: rgba(255, 75, 59, 0.16);
   --log-bg: #08090b;
   --log-text: #a8afb7;
 }
@@ -585,16 +587,16 @@ input[type="range"]::-moz-range-thumb {
   border: 1px solid var(--border-soft);
 }
 
-.waveform-canvas--editable { height: 92px; cursor: grab; touch-action: none; border-color: var(--border); }
+.waveform-canvas--editable { height: 108px; cursor: grab; touch-action: none; border-color: var(--border); }
 .waveform-canvas--dragging { cursor: grabbing; }
 
-/* manual chop editor */
+/* the interactive waveform - always present on a result card, not a mode you enter */
 
-.chop-editor { display: flex; flex-direction: column; gap: 9px; }
-.chop-editor-hint { margin: 0; color: var(--text-faint); font-size: 12px; }
-.chop-editor-actions { display: flex; gap: 7px; flex-wrap: wrap; }
-.editable-waveform { display: flex; flex-direction: column; gap: 7px; }
-.editable-waveform-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.editable-waveform { display: flex; flex-direction: column; gap: 6px; outline: none; }
+.editable-waveform:focus-visible .waveform-canvas--editable { border-color: var(--accent); }
+.editable-waveform-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.editable-waveform-toolbar .btn--small { padding: 3px 9px; }
+.editable-waveform-toolbar .is-playing { color: var(--accent); border-color: var(--accent-dim); }
 
 .editable-waveform-zoom-label {
   margin-left: auto;
@@ -604,47 +606,38 @@ input[type="range"]::-moz-range-thumb {
   font-variant-numeric: tabular-nums;
 }
 
-.editable-waveform-region-list { display: flex; flex-wrap: wrap; gap: 5px; }
-
-.editable-waveform-region-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 4px 3px 9px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-raised);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-dim);
-}
-
-.editable-waveform-region-chip button {
-  width: 1.25rem;
-  height: 1.25rem;
-  border-radius: 50%;
-  border: none;
-  background: transparent;
+.editable-waveform-hint {
+  margin: 0;
   color: var(--text-faint);
-  font-size: .85rem;
-  line-height: 1;
-  cursor: pointer;
-  flex: none;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
 }
 
-.editable-waveform-region-chip button:not(.editable-waveform-region-play):hover {
-  color: var(--danger);
-  background: rgba(255, 107, 129, .16);
+.result-file-editor { display: block; }
+
+.result-apply-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 75, 59, .07);
 }
 
-.editable-waveform-region-play { font-size: .6rem; }
+.result-apply-row[hidden] { display: none; }
+.result-apply-note { flex: 1; font-size: 12.5px; color: var(--text-dim); }
 
-.editable-waveform-region-play:hover,
-.editable-waveform-region-play.is-playing {
-  color: var(--accent);
-  background: rgba(255, 75, 59, .16);
+/* the row matching the slice selected on the waveform */
+.chop-row.is-selected {
+  background: rgba(255, 75, 59, .12);
+  box-shadow: inset 2px 0 0 var(--accent);
+  border-radius: var(--radius-sm);
 }
+
+.chop-row.is-selected .chop-name { color: var(--text); }
+
+.seg--small .seg-btn { padding: 4px 9px; font-size: 10px; }
 
 /* ===========================================================================
    LOG + ACTION BAR
@@ -731,21 +724,32 @@ input[type="range"]::-moz-range-thumb {
 .modal-actions { display: flex; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
 
 /* ===========================================================================
-   DENSITY
-   Everything that differs between Simple and Advanced lives here, and
-   nowhere else. Simple: control modules unmounted, generous drop zone,
-   each file a full card. Advanced: modules mounted, drop zone reduced to
-   a strip, the same cards compressed into rows with chops in columns.
+   TASK
+   Everything that differs between chop / stretch / both lives here.
+   A section declares the tasks it belongs to with data-tasks; anything that
+   doesn't apply is unmounted rather than shown and ignored.
    =========================================================================== */
 
-[data-ui-mode="simple"] .advanced-only { display: none; }
+.mod { display: none; }
+[data-task="chop"] .mod[data-tasks~="chop"],
+[data-task="stretch"] .mod[data-tasks~="stretch"],
+[data-task="both"] .mod[data-tasks~="both"] { display: flex; }
 
-/* --- Simple --------------------------------------------------------------- */
+/* Source material only means something when something is being cut. */
+[data-task="stretch"] .chop-only { display: none; }
 
-/* With nothing queued the drop zone is the only thing to do, so it takes the
-   room instead of sitting as a thin bar above an empty window. It stops
+/* The rail is disclosure, independent of task. */
+[data-rail="closed"] .controls { display: none; }
+
+#settings-toggle {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+/* With nothing queued, the drop zone is the only thing to do, so it takes the
+   room rather than sitting as a thin bar above an empty window. It stops
    growing the moment there are results worth looking at. */
-[data-ui-mode="simple"] .dropzone {
+.stage > .dropzone {
   flex: 1 1 auto;
   min-height: 150px;
   flex-direction: column;
@@ -755,45 +759,32 @@ input[type="range"]::-moz-range-thumb {
   padding: 26px 22px;
 }
 
-[data-ui-mode="simple"] .dropzone-copy { align-items: center; }
-[data-ui-mode="simple"] .dropzone-copy strong { font-size: 19px; }
-[data-ui-mode="simple"] .dropzone-actions { justify-content: center; }
+.dropzone-copy { align-items: center; }
+.dropzone-actions { justify-content: center; }
 
-/* Once anything is queued the stage has real content, so the drop zone stops
-   claiming the leftover height. */
-[data-ui-mode="simple"] .stage:has(.folder-row) .dropzone,
-[data-ui-mode="simple"] .stage:has(.result-file) .dropzone {
+.stage:has(.folder-row) > .dropzone,
+.stage:has(.result-file) > .dropzone {
   flex: none;
   min-height: 0;
-  padding: 18px;
+  flex-direction: row;
+  text-align: left;
+  padding: 13px 16px;
+  gap: 16px;
 }
 
-[data-ui-mode="simple"] .log-panel { height: 74px; }
-[data-ui-mode="advanced"] .log-panel { height: 88px; }
+.stage:has(.folder-row) .dropzone-copy,
+.stage:has(.result-file) .dropzone-copy { align-items: flex-start; }
+.stage:has(.folder-row) .dropzone-copy strong,
+.stage:has(.result-file) .dropzone-copy strong { font-size: 14px; }
 
-/* --- Advanced ------------------------------------------------------------- */
-
-[data-ui-mode="advanced"] .stage { gap: 9px; padding: 11px 16px 14px; }
-[data-ui-mode="advanced"] .dropzone { padding: 9px 13px; border-style: solid; }
-[data-ui-mode="advanced"] .dropzone-copy strong { font-size: 13px; }
-[data-ui-mode="advanced"] .dropzone-copy span { display: none; }
-
-[data-ui-mode="advanced"] .folder-row { padding: 6px 11px; }
-[data-ui-mode="advanced"] .result-file { padding: 9px 12px 10px; gap: 7px; }
-[data-ui-mode="advanced"] .result-file-name { font-size: 13.5px; }
-[data-ui-mode="advanced"] .waveform-canvas { height: 44px; }
-[data-ui-mode="advanced"] .waveform-canvas--editable { height: 92px; }
-
-/* The one real structural change: chop rows go from a single stack to
-   columns, which is what makes a 40-file batch scannable. */
-[data-ui-mode="advanced"] .chop-list {
+/* Chop rows lay out in columns whenever there's room. This used to be tied to
+   "Advanced", but a 40-file batch is just as unscannable in any task, and the
+   settings rail already keeps the stage wide. */
+.chop-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(252px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 3px 14px;
 }
-
-[data-ui-mode="advanced"] .chop-name { min-width: 92px; }
-[data-ui-mode="advanced"] .chop-row audio { height: 26px; }
 
 /* ===========================================================================
    RESPONSIVE
@@ -809,7 +800,7 @@ input[type="range"]::-moz-range-thumb {
   .topbar { height: auto; flex-wrap: wrap; padding: 10px 12px; gap: 10px; }
   .log-panel { height: 100px; }
   .actionbar { position: sticky; bottom: 0; }
-  [data-ui-mode="advanced"] .chop-list { grid-template-columns: 1fr; }
+  .chop-list { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

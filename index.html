@@ -28,74 +28,57 @@
 </script>
 
 <!-- ============================================================
-     One layout, two densities. Simple and Advanced share this
-     entire DOM: the only differences are which regions are
-     mounted (.advanced-only) and which grid the file rows use,
-     both driven by data-ui-mode on <html>. See css/style.css.
+     One layout, three tasks. CHOP / STRETCH / BOTH is set as
+     data-task on <html>; each settings section declares the tasks
+     it belongs to via data-tasks, and anything irrelevant to the
+     current task is unmounted rather than shown and ignored. The
+     settings rail is separate disclosure (data-rail), so "what am
+     I doing" and "how much do I want to see" stay independent.
+     See css/style.css.
      ============================================================ -->
 <div class="app">
 
   <header class="topbar">
     <div class="topbar-brand">
-      <span class="brand">Good<span class="brand-accent">Bits</span></span>
-      <span id="version-badge" class="version-badge"></span>
+      <a class="brand" href="https://clickysteve.github.io/the-good-bits/">Good<span class="brand-accent">Bits</span></a>
+      <a id="version-badge" class="version-badge" href="https://github.com/clickysteve/the-good-bits" target="_blank" rel="noopener" title="Source on GitHub"></a>
     </div>
 
-    <div class="mode-picker" role="group" aria-label="Source material">
-      <button type="button" class="mode-btn mode-card mode-card--active" data-mode="phrases" title="Pulls natural phrases from pauses in solo horn performances">Horns</button>
-      <button type="button" class="mode-btn mode-card" data-mode="rhodes" title="Conservative - keeps whole chord progressions and passages together">Rhodes</button>
-      <button type="button" class="mode-btn mode-card" data-mode="drums" title="Break-sized loops snapped to the detected tempo, plus optional one-shot hits">Drums</button>
+    <!-- What you came to do. This is the primary choice; everything else follows from it. -->
+    <div id="task-switcher" class="seg seg--task" role="group" aria-label="What to do">
+      <button type="button" class="seg-btn" data-task-choice="chop" title="Cut audio into chops and one-shots. No processing.">Chop</button>
+      <button type="button" class="seg-btn" data-task-choice="stretch" title="Time-stretch and colour whole files. No cutting.">Stretch</button>
+      <button type="button" class="seg-btn" data-task-choice="both" title="Cut it up and process it, with every option available.">Both</button>
     </div>
 
     <div class="topbar-right">
-      <div id="ui-mode-switcher" class="seg" role="group" aria-label="Interface density">
-        <button type="button" class="seg-btn" data-ui-mode-choice="simple">Simple</button>
-        <button type="button" class="seg-btn" data-ui-mode-choice="advanced">Advanced</button>
+      <!-- Source material. Meaningless in Stretch, where nothing is being cut, so it unmounts. -->
+      <div class="mode-picker chop-only" role="group" aria-label="Source material">
+        <button type="button" class="mode-btn mode-card mode-card--active" data-mode="phrases" title="Pulls natural phrases from pauses in solo horn performances">Horns</button>
+        <button type="button" class="mode-btn mode-card" data-mode="rhodes" title="Conservative - keeps whole chord progressions and passages together">Rhodes</button>
+        <button type="button" class="mode-btn mode-card" data-mode="drums" title="Break-sized loops snapped to the detected tempo, plus optional one-shot hits">Drums</button>
       </div>
+      <button type="button" id="settings-toggle" class="seg-btn seg-btn--solo" aria-expanded="false">Settings</button>
     </div>
   </header>
 
-  <!-- Essentials: visible in both densities, and only when Drums is selected.
-       These two decide what actually comes out of a break, so they don't belong
-       behind the Advanced toggle. -->
-  <div id="drum-options" class="essentials" hidden>
-    <div class="essentials-row">
-      <label for="drum-bars-select">Chop length</label>
-      <select id="drum-bars-select"></select>
-    </div>
-    <label class="check">
-      <input id="one-shots-checkbox" type="checkbox" />
-      <span>Also extract one-shot hits</span>
-    </label>
-    <p class="essentials-note">Bar length comes from the detected tempo, falling back to a fixed length if none is found.</p>
-  </div>
-
   <div class="body">
 
-  <!-- Every remaining setting. Mounted only in Advanced, as a full-height rail down the side:
-       a single column means sliders get real width and sections stack at their natural height,
-       instead of the ragged multi-column strip that squeezed both. -->
-  <div class="controls advanced-only">
+  <!-- The settings rail: a full-height single column down the side, so sliders get real width
+       and sections stack at their natural height. Toggled by the Settings button; which sections
+       appear depends on the current task. -->
+  <div class="controls">
 
-    <section class="mod">
-      <h2 class="mod-h">Chop</h2>
-      <label class="check">
-        <input id="chop-enabled-checkbox" type="checkbox" checked />
-        <span>Chop into pieces</span>
-      </label>
-      <p class="mod-note">Off still runs detection, the <code>wav/</code> copy and any stretch or lo-fi, just without cutting.</p>
-    </section>
-
-    <section class="mod">
+    <section class="mod" data-tasks="chop stretch both">
       <h2 class="mod-h">Source</h2>
       <label class="check">
-        <input id="split-subfolders-checkbox" type="checkbox" />
+        <input id="split-subfolders-checkbox" type="checkbox" checked />
         <span>One batch per subfolder</span>
       </label>
-      <p class="mod-note">Tick <strong>before</strong> adding a folder of session subfolders; each becomes its own source.</p>
+      <p class="mod-note">On by default. A folder of session subfolders becomes one source each; a folder of loose audio is unaffected either way. Set it <strong>before</strong> adding the folder.</p>
     </section>
 
-    <section class="mod">
+    <section class="mod" data-tasks="chop stretch both">
       <h2 class="mod-h">Naming</h2>
       <div class="field">
         <label for="naming-pattern-input">File name pattern</label>
@@ -117,7 +100,7 @@
       <p id="naming-preview" class="naming-preview" aria-live="polite"></p>
     </section>
 
-    <section class="mod" id="detection-params-panel">
+    <section class="mod" data-tasks="chop both" id="detection-params-panel">
       <div class="mod-h-row">
         <h2 class="mod-h">Detection</h2>
         <label class="check check--inline">
@@ -128,7 +111,7 @@
       <div id="params-panel" class="params-panel"></div>
     </section>
 
-    <section class="mod">
+    <section class="mod" data-tasks="chop stretch both">
       <h2 class="mod-h">Export</h2>
       <div class="field">
         <label for="bit-depth-select">Bit depth</label>
@@ -158,7 +141,7 @@
       <p id="essentia-status" class="essentia-status">Loading key &amp; tempo detection…</p>
     </section>
 
-    <section class="mod">
+    <section class="mod" data-tasks="stretch both">
       <h2 class="mod-h">Time-stretch</h2>
       <label class="check">
         <input id="timestretch-enable-checkbox" type="checkbox" />
@@ -202,7 +185,7 @@
       <p class="mod-note">Pitch preserved. No confident tempo means it exports unstretched.</p>
     </section>
 
-    <section class="mod">
+    <section class="mod" data-tasks="stretch both">
       <h2 class="mod-h">Lo-fi character</h2>
 
       <label class="check">
@@ -276,7 +259,7 @@
       <p class="mod-note">Applied in order: output stage, then drive, then crunch.</p>
     </section>
 
-    <section class="mod">
+    <section class="mod" data-tasks="both">
       <h2 class="mod-h">Scope</h2>
       <label class="check">
         <input id="oneshot-processing-checkbox" type="checkbox" />
@@ -312,6 +295,22 @@
         <input id="legacy-files-input" type="file" multiple accept=".wav,.m4a,.aif,.aiff,.flac,.mp3" hidden />
 
         <div id="folder-list" class="folder-list"></div>
+
+        <!-- Sits with the source list rather than in the header: appearing up there shoved the
+             whole header onto a second line the moment you picked Drums. These two decide what
+             comes out of a break, so they stay out of the Advanced rail. -->
+        <div id="drum-options" class="essentials" hidden>
+          <div class="essentials-row">
+            <label for="drum-bars-select">Chop length</label>
+            <select id="drum-bars-select"></select>
+          </div>
+          <label class="check">
+            <input id="one-shots-checkbox" type="checkbox" />
+            <span>Also extract one-shot hits</span>
+          </label>
+          <p class="essentials-note">Bar length comes from the detected tempo, falling back to a fixed length if none is found.</p>
+        </div>
+
         <div id="results-panel" class="results-panel"></div>
       </main>
 
@@ -319,11 +318,11 @@
     </div>
   </div>
 
-  <!-- Preview runs everything and saves nothing; Export is the only button that
+  <!-- Process does the work and saves nothing; Export is the only button that
        writes. See processBatch() in app.js. -->
   <footer class="actionbar">
-    <button id="preview-btn" class="btn" disabled>Preview</button>
-    <button id="process-btn" class="btn btn--primary" disabled>Export</button>
+    <button id="preview-btn" class="btn btn--primary" disabled>Process</button>
+    <button id="process-btn" class="btn" disabled>Export</button>
     <button id="cancel-btn" class="btn btn--ghost" hidden>Cancel</button>
     <div id="progress-row" class="progress-row" hidden>
       <div class="progress-bar"><div id="progress-bar-fill" class="progress-bar-fill"></div></div>

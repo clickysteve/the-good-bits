@@ -263,7 +263,7 @@ test("classifyHit: buckets low/short as kick, high/short as hat, high/long as cy
   assert.equal(classifyHit({ low: 0, mid: 0, high: 0, durationSec: 0.1 }), "perc");
 });
 
-test("findOneShotWindows: one window per onset, ending before the next onset starts", () => {
+test("findOneShotWindows: a hit may ring past the next onset, but only by the bleed allowance", () => {
   const parts = [];
   for (let i = 0; i < 4; i++) {
     parts.push(tone(0.05, 150, 0.9));
@@ -271,40 +271,93 @@ test("findOneShotWindows: one window per onset, ending before the next onset sta
   }
   const sig = concat(...parts); // hits at ~0, 0.3, 0.6, 0.9
   const onsets = [0, 0.3, 0.6, 0.9];
-  const windows = findOneShotWindows(sig, SR, onsets);
+  const bleedSec = 0.09;
+  const windows = findOneShotWindows(sig, SR, onsets, { bleedSec });
   assert.equal(windows.length, 4);
   for (let i = 0; i < windows.length; i++) {
     const [s, e] = windows[i];
     assert.ok(e > s, "window should have positive length");
-    if (i + 1 < windows.length) assert.ok(e <= onsets[i + 1] + 1e-6, "a hit shouldn't run into the next onset");
+    if (i + 1 < windows.length) {
+      assert.ok(e <= onsets[i + 1] + bleedSec + 1e-6, "a hit shouldn't run more than the bleed allowance into the next");
+    }
   }
 });
 
-test("dedupeHits: keeps the loudest of near-identical hits per label, capped per label", () => {
-  const hits = [
-    { start: 0, label: "kick", low: 0.9, mid: 0.05, high: 0.05, peak: 0.5 },
-    { start: 1, label: "kick", low: 0.89, mid: 0.06, high: 0.05, peak: 0.9 }, // near-duplicate, louder
-    { start: 2, label: "kick", low: 0.05, mid: 0.05, high: 0.9, peak: 0.7 }, // different balance -> distinct kick cluster (mislabeled input, but tests clustering)
-    { start: 3, label: "hat", low: 0.05, mid: 0.05, high: 0.9, peak: 0.3 },
-  ];
-  const kept = dedupeHits(hits, { simThreshold: 0.12, maxPerLabel: 6 });
-  const kicks = kept.filter((h) => h.label === "kick");
-  assert.equal(kicks.length, 2, "the two similar kicks should collapse into one cluster");
-  assert.ok(kicks.some((h) => h.peak === 0.9), "should keep the louder of the near-duplicate pair");
-  assert.equal(kept.filter((h) => h.label === "hat").length, 1);
+test("findOneShotWindows: dense breaks still yield usable hit lengths, not stubs", () => {
+  // Cutting hard at the next onset used to make every hit in a busy break a ~40ms stub.
+  const parts = [];
+  for (let i = 0; i < 8; i++) {
+    parts.push(tone(0.02, 200, 0.9));
+    parts.push(silence(0.05)); // onsets only 70ms apart
+  }
+  const sig = concat(...parts);
+  const onsets = Array.from({ length: 8 }, (_, i) => i * 0.07);
+  const windows = findOneShotWindows(sig, SR, onsets);
+  assert.ok(windows.length >= 6, `expected most hits to survive, got ${windows.length}`);
+  for (const [s, e] of windows) {
+    assert.ok(e - s >= 0.05 - 1e-9, `hit of ${(e - s).toFixed(3)}s is too short to be a usable sample`);
+  }
 });
 
-test("dedupeHits: caps the number kept per label", () => {
-  const hits = Array.from({ length: 10 }, (_, i) => ({
-    start: i,
-    label: "hat",
-    low: 0.01,
-    mid: 0.01,
-    high: 0.9 + i * 0.01, // each slightly different, so each forms its own cluster
-    peak: i,
-  }));
-  const kept = dedupeHits(hits, { simThreshold: 0.001, maxPerLabel: 3 });
-  assert.equal(kept.length, 3);
+test("dedupeHits: collapses repeats of one sound but keeps genuinely different ones", () => {
+  const fp = (v) => {
+    const mean = v.reduce((s, x) => s + x, 0) / v.length;
+    const c = v.map((x) => x - mean);
+    const n = Math.hypot(...c) || 1;
+    return c.map((x) => x / n);
+  };
+  const lowVec = fp([2, 1, 0, -1, -2]); // bass-heavy
+  const highVec = fp([-2, -1, 0, 1, 2]); // bright
+  const hits = [
+    { start: 0, peak: 0.5, fingerprint: lowVec },
+    { start: 1, peak: 0.9, fingerprint: lowVec }, // same sound, louder
+    { start: 2, peak: 0.7, fingerprint: highVec }, // genuinely different sound
+  ];
+  const kept = dedupeHits(hits);
+  assert.equal(kept.length, 2, "two distinct sounds should survive, the repeat should not");
+  assert.ok(
+    kept.some((h) => h.peak === 0.9),
+    "the louder of the two identical hits should be the one kept"
+  );
+  assert.ok(kept.some((h) => h.peak === 0.7), "the different sound should be kept");
+});
+
+test("dedupeHits: labels no longer decide clustering, so a mislabel can't split a sound", () => {
+  // Clustering used to be grouped by the (unreliable) kick/snare/hat label, so the same sound
+  // labelled two different ways could never be recognised as a duplicate.
+  const v = [0.8, 0.2, -0.1, -0.4, -0.5];
+  const n = Math.hypot(...v);
+  const same = v.map((x) => x / n);
+  const hits = [
+    { start: 0, label: "kick", peak: 0.6, fingerprint: same },
+    { start: 1, label: "perc", peak: 0.8, fingerprint: same }, // identical sound, different label
+  ];
+  assert.equal(dedupeHits(hits).length, 1);
+});
+
+test("dedupeHits: drops ghost notes far below the loudest hit", () => {
+  const fp = (a, b) => {
+    const v = [a, b, 0, -a, -b];
+    const n = Math.hypot(...v) || 1;
+    return v.map((x) => x / n);
+  };
+  const hits = [
+    { start: 0, peak: 1.0, fingerprint: fp(1, 0) },
+    { start: 1, peak: 0.01, fingerprint: fp(0, 1) }, // distinct, but essentially inaudible
+  ];
+  const kept = dedupeHits(hits, { minPeakRatio: 0.08 });
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].peak, 1.0);
+});
+
+test("dedupeHits: caps the total number kept", () => {
+  const hits = Array.from({ length: 40 }, (_, i) => {
+    const ang = (i / 40) * Math.PI;
+    const v = [Math.cos(ang), Math.sin(ang), 0, -Math.cos(ang), -Math.sin(ang)];
+    const n = Math.hypot(...v) || 1;
+    return { start: i, peak: 0.5 + i / 100, fingerprint: v.map((x) => x / n) };
+  });
+  assert.equal(dedupeHits(hits, { simThreshold: 0.0001, maxKept: 5 }).length, 5);
 });
 
 test("peakAbs: finds the largest absolute sample in range", () => {
