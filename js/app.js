@@ -13,14 +13,14 @@ import {
   findOneShotWindows,
   dedupeHits,
   peakAbs,
-  onsetStrengthCurve,
+  multiBandOnsetStrengthCurve,
   computeRmsEnvelope,
   pickOnsets,
   computePeaks,
   computePeaksInRange,
 } from "./dsp.js";
 import { wsolaStretchChannels, ratioForTargetTempo } from "./timestretch.js";
-import { OUTPUT_STAGES, DRIVE_TYPES, applyOutputStage, applyDrive, applyCrunch } from "./outputstage.js";
+import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from "./outputstage.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
 import { APP_VERSION } from "./version.js";
@@ -40,6 +40,7 @@ import {
   clearOldOneShotsFSA,
   ZipBatch,
 } from "./io-fs.js";
+import { rememberFolder, listRememberedFolders, forgetFolder, forgetAllFolders } from "./folder-store.js";
 
 // ---------------------------------------------------------------------------
 // State
@@ -47,10 +48,15 @@ import {
 
 let mode = "phrases"; // 'phrases' | 'rhodes' | 'drums'
 let processing = false;
+let previewRunning = false;
+let cancelRequested = false;
 let nextFolderId = 1;
 let looseFileGroupCounter = 0;
 let looseDestinationHandle = null; // cached FSA destination for individually-picked files
 const sourceFolders = []; // {id, name, kind:'fsa'|'legacy', handle?, isLoose?, files:[...]}
+// Folders remembered from a previous session (via folder-store.js/IndexedDB) whose permission
+// hasn't been re-granted yet this session - shown in the folder list with a Reconnect button.
+const pendingReconnectFolders = []; // {name, handle}
 
 const FSA_SUPPORTED = supportsFileSystemAccess();
 const FSA_FILE_PICKER_SUPPORTED = supportsFilePickerFSA();
@@ -206,6 +212,13 @@ const crunchEnableCheckbox = $("#crunch-enable-checkbox");
 const crunchOptions = $("#crunch-options");
 const crunchBitsSlider = $("#crunch-bits-slider");
 const crunchRateSlider = $("#crunch-rate-slider");
+const previewBtn = $("#preview-btn");
+const previewStatus = $("#preview-status");
+const previewAudio = $("#preview-audio");
+const cancelBtn = $("#cancel-btn");
+const progressRow = $("#progress-row");
+const progressBarFill = $("#progress-bar-fill");
+const progressLabel = $("#progress-label");
 
 // ---------------------------------------------------------------------------
 // Logging / progress
@@ -611,19 +624,16 @@ function lofiActive() {
   return outputStageSettings.enabled || driveSettings.enabled || crunchSettings.enabled;
 }
 
-/** Runs the enabled lo-fi stages over a set of channels, in output-stage -> drive -> crunch order. */
+/** Runs the enabled lo-fi stages (current settings) over a set of channels - thin wrapper around
+ * the pure, worker-shareable applyLofiChain in outputstage.js. Used by the main-thread fallback
+ * path and by the Preview feature; the worker calls the pure version directly. */
 function applyLofiChain(channels, sampleRate) {
-  let out = channels;
-  if (outputStageSettings.enabled) {
-    out = applyOutputStage(out, sampleRate, outputStageSettings.mode, outputStageSettings.mixPct, outputStageSettings.intensityPct);
-  }
-  if (driveSettings.enabled) {
-    out = applyDrive(out, driveSettings.type, driveSettings.amountPct);
-  }
-  if (crunchSettings.enabled) {
-    out = applyCrunch(out, { bits: crunchSettings.bits, rateDivide: crunchSettings.rateDivide });
-  }
-  return out;
+  return applyLofiChainPure(channels, sampleRate, { outputStage: outputStageSettings, drive: driveSettings, crunch: crunchSettings });
+}
+
+/** Plain snapshot of the current lo-fi settings, safe to structured-clone into a worker message. */
+function lofiSettingsSnapshot() {
+  return { outputStage: { ...outputStageSettings }, drive: { ...driveSettings }, crunch: { ...crunchSettings } };
 }
 
 // ---------------------------------------------------------------------------
@@ -802,7 +812,7 @@ function applySettings(saved) {
 
 function renderFolderList() {
   folderList.innerHTML = "";
-  if (sourceFolders.length === 0) {
+  if (sourceFolders.length === 0 && pendingReconnectFolders.length === 0) {
     const empty = document.createElement("div");
     empty.className = "folder-list-empty";
     empty.textContent = "Nothing added yet.";
@@ -832,6 +842,7 @@ function renderFolderList() {
     removeBtn.addEventListener("click", () => {
       const idx = sourceFolders.indexOf(folder);
       if (idx >= 0) sourceFolders.splice(idx, 1);
+      if (folder.kind === "fsa" && !folder.isLoose) forgetFolder(folder.name);
       renderFolderList();
       updateProcessButton();
     });
@@ -840,14 +851,87 @@ function renderFolderList() {
     row.appendChild(removeBtn);
     folderList.appendChild(row);
   }
+
+  // Folders remembered from a previous session, waiting on a user-gesture click to re-grant
+  // permission (browsers never persist the permission grant itself, only the handle).
+  for (const pending of pendingReconnectFolders) {
+    const row = document.createElement("div");
+    row.className = "folder-row folder-row--pending";
+
+    const info = document.createElement("div");
+    info.className = "folder-row-info";
+    const nameEl = document.createElement("div");
+    nameEl.className = "folder-row-name";
+    nameEl.textContent = pending.name;
+    const countEl = document.createElement("div");
+    countEl.className = "folder-row-count";
+    countEl.textContent = "Remembered from a previous session - reconnect to use it again";
+    info.appendChild(nameEl);
+    info.appendChild(countEl);
+
+    const actions = document.createElement("div");
+    actions.className = "folder-row-pending-actions";
+    const reconnectBtn = document.createElement("button");
+    reconnectBtn.className = "btn btn--ghost btn--small";
+    reconnectBtn.textContent = "Reconnect";
+    reconnectBtn.addEventListener("click", async () => {
+      reconnectBtn.disabled = true;
+      reconnectBtn.textContent = "Reconnecting…";
+      try {
+        const ok = await ensureReadWritePermission(pending.handle);
+        if (ok) {
+          const idx = pendingReconnectFolders.indexOf(pending);
+          if (idx >= 0) pendingReconnectFolders.splice(idx, 1);
+          if (!folderAlreadyQueued(pending.name)) {
+            const files = await collectAudioFilesFSA(pending.handle);
+            sourceFolders.push({ id: nextFolderId++, name: pending.name, kind: "fsa", handle: pending.handle, files });
+          }
+          renderFolderList();
+          updateProcessButton();
+        } else {
+          reconnectBtn.disabled = false;
+          reconnectBtn.textContent = "Reconnect";
+          log(`Permission for "${pending.name}" was denied - try again, or remove it below.`);
+        }
+      } catch (err) {
+        reconnectBtn.disabled = false;
+        reconnectBtn.textContent = "Reconnect";
+        log(`Couldn't reconnect "${pending.name}": ${err.message || err}`);
+      }
+    });
+    const forgetBtn = document.createElement("button");
+    forgetBtn.className = "btn btn--icon";
+    forgetBtn.textContent = "×";
+    forgetBtn.title = "Forget this folder";
+    forgetBtn.addEventListener("click", () => {
+      const idx = pendingReconnectFolders.indexOf(pending);
+      if (idx >= 0) pendingReconnectFolders.splice(idx, 1);
+      forgetFolder(pending.name);
+      renderFolderList();
+    });
+    actions.appendChild(reconnectBtn);
+    actions.appendChild(forgetBtn);
+
+    row.appendChild(info);
+    row.appendChild(actions);
+    folderList.appendChild(row);
+  }
 }
 
 function updateProcessButton() {
   processBtn.disabled = processing || sourceFolders.length === 0;
+  previewBtn.disabled = processing || previewRunning || sourceFolders.length === 0;
+  cancelBtn.hidden = !processing;
 }
 
 function folderAlreadyQueued(name) {
   return sourceFolders.some((f) => f.kind === "fsa" && !f.isLoose && f.name === name);
+}
+
+/** Drops a name from the "needs reconnect" list, e.g. because it was just added normally instead. */
+function clearPendingReconnect(name) {
+  const idx = pendingReconnectFolders.findIndex((p) => p.name === name);
+  if (idx >= 0) pendingReconnectFolders.splice(idx, 1);
 }
 
 async function addFolderFSA() {
@@ -862,6 +946,8 @@ async function addFolderFSA() {
         if (folderAlreadyQueued(child.name)) continue;
         const files = await collectAudioFilesFSA(child.handle);
         sourceFolders.push({ id: nextFolderId++, name: child.name, kind: "fsa", handle: child.handle, files });
+        rememberFolder(child.name, child.handle);
+        clearPendingReconnect(child.name);
         added++;
       }
       log(`Added ${added} subfolder(s) from "${handle.name}" as separate sources.`);
@@ -878,6 +964,8 @@ async function addFolderFSA() {
   }
   const files = await collectAudioFilesFSA(handle);
   sourceFolders.push({ id: nextFolderId++, name: handle.name, kind: "fsa", handle, files });
+  rememberFolder(handle.name, handle);
+  clearPendingReconnect(handle.name);
   renderFolderList();
   updateProcessButton();
 }
@@ -963,7 +1051,9 @@ addFilesBtn.addEventListener("click", async () => {
 
 clearFoldersBtn.addEventListener("click", () => {
   sourceFolders.length = 0;
+  pendingReconnectFolders.length = 0;
   looseDestinationHandle = null;
+  forgetAllFolders();
   renderFolderList();
   updateProcessButton();
 });
@@ -1000,6 +1090,77 @@ async function decodeFile(file, ext) {
   } catch (err) {
     throw new Error(`this browser could not decode "${file.name}" (${ext}): ${err.message || err}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Heavy-DSP worker: WSOLA stretch + the lo-fi chain + fades + WAV encode for a batch of
+// already-sliced regions, run off the main thread so a big export doesn't freeze the page. Falls
+// back to running the exact same pure functions inline on the main thread if a worker can't be
+// created at all (very old browsers, or the page opened the unsupported file:// way).
+// ---------------------------------------------------------------------------
+
+let heavyDspWorker = null;
+let heavyDspWorkerBroken = false;
+let heavyDspRequestId = 0;
+const heavyDspPending = new Map();
+
+function getHeavyDspWorker() {
+  if (heavyDspWorker || heavyDspWorkerBroken) return heavyDspWorker;
+  try {
+    heavyDspWorker = new Worker(new URL("./heavy-dsp-worker.js", import.meta.url), { type: "module" });
+    heavyDspWorker.addEventListener("message", (ev) => {
+      const { type, requestId } = ev.data || {};
+      const pending = heavyDspPending.get(requestId);
+      if (!pending) return;
+      heavyDspPending.delete(requestId);
+      if (type === "processRegionsResult") pending.resolve(ev.data.results);
+      else pending.reject(new Error(ev.data.message || "worker error"));
+    });
+    heavyDspWorker.addEventListener("error", (ev) => {
+      // A broken worker (failed to load its module, etc.) fails every request that's still
+      // outstanding, then this whole session falls back to the main thread from here on.
+      for (const pending of heavyDspPending.values()) pending.reject(new Error(ev.message || "worker error"));
+      heavyDspPending.clear();
+      heavyDspWorkerBroken = true;
+      heavyDspWorker = null;
+    });
+  } catch (err) {
+    heavyDspWorkerBroken = true;
+    heavyDspWorker = null;
+  }
+  return heavyDspWorker;
+}
+
+/** Runs the worker's processRegions op, or the same logic inline on the main thread as a fallback. */
+async function processRegionsHeavy({ sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, regions }) {
+  const lofi = lofiSettingsSnapshot();
+  const worker = getHeavyDspWorker();
+  if (worker) {
+    try {
+      const transferList = regions.flatMap((r) => r.channels.map((ch) => ch.buffer));
+      return await new Promise((resolve, reject) => {
+        const requestId = ++heavyDspRequestId;
+        heavyDspPending.set(requestId, { resolve, reject });
+        worker.postMessage({ type: "processRegions", requestId, sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, lofi, regions }, transferList);
+      });
+    } catch (err) {
+      console.error("heavy-dsp-worker failed, falling back to the main thread for the rest of this session:", err);
+      heavyDspWorkerBroken = true;
+      heavyDspWorker = null;
+    }
+  }
+
+  // Main-thread fallback - identical logic to heavy-dsp-worker.js's onmessage handler.
+  return regions.map(({ channels }) => {
+    let sliced = channels;
+    if (stretchRatio && stretchRatio !== 1) {
+      sliced = wsolaStretchChannels(sliced, sampleRate, stretchRatio, character);
+    }
+    sliced = applyLofiChainPure(sliced, sampleRate, lofi);
+    applyFades(sliced, fadeInSamples || 0, fadeOutSamples || 0);
+    const blob = encodeWav(sliced, sampleRate, bitDepth);
+    return { blob, seconds: sliced[0].length / sampleRate };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,12 +1232,16 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   const fullStretched = fullStretchRatio !== 1;
   const fullLofi = lofiActive();
   if (fullStretched || fullLofi) {
-    let derivedChannels = fullStretched
-      ? wsolaStretchChannels(channels, buffer.sampleRate, fullStretchRatio, timestretchSettings.character)
-      : channels.map((ch) => Float32Array.from(ch));
-    derivedChannels = applyLofiChain(derivedChannels, buffer.sampleRate);
+    const [{ blob: derivedBlob }] = await processRegionsHeavy({
+      sampleRate: buffer.sampleRate,
+      bitDepth: 24,
+      fadeInSamples: 0,
+      fadeOutSamples: 0,
+      stretchRatio: fullStretchRatio,
+      character: timestretchSettings.character,
+      regions: [{ channels: channels.map((ch) => Float32Array.from(ch)) }],
+    });
     const derivedName = `${taggedStem}${fullStretched ? " stretched" : ""}${fullLofi ? " lofi" : ""}.wav`;
-    const derivedBlob = encodeWav(derivedChannels, buffer.sampleRate, 24);
     await writeOutput(folder, "wav", fileInfo.relativeDir, derivedName, derivedBlob, zipBatch);
     log(`    wrote a full-length ${[fullStretched && "time-stretched", fullLofi && "lo-fi"].filter(Boolean).join(" + ")} copy`);
   }
@@ -1168,11 +1333,10 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
   const stretchRatio = resolveStretchRatio(detectedBpm);
 
   const sortedRegions = [...regions].sort((a, b) => a[0] - b[0]);
-  const chopRows = [];
-  const chopMarkers = [];
-  let made = 0;
+  // Snap boundaries first (cheap, main-thread) so the worker only ever sees the heavy part:
+  // WSOLA stretch, the lo-fi chain, fades, and WAV encoding for each already-sliced region.
+  const regionDefs = [];
   for (const [s, e] of sortedRegions) {
-    made++;
     let startSample = Math.max(0, Math.round(s * buffer.sampleRate));
     let endSample = Math.min(mono.length, Math.round(e * buffer.sampleRate));
     if (zcWindow > 0) {
@@ -1180,19 +1344,30 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
       endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
     }
     if (endSample <= startSample) continue;
+    regionDefs.push({ startSample, endSample, channels: sliceChannels(channels, startSample, endSample) });
+  }
 
-    let sliced = sliceChannels(channels, startSample, endSample);
-    if (stretchRatio !== 1) {
-      sliced = wsolaStretchChannels(sliced, buffer.sampleRate, stretchRatio, timestretchSettings.character);
-    }
-    sliced = applyLofiChain(sliced, buffer.sampleRate);
-    applyFades(sliced, fadeInSamples, fadeOutSamples);
-    const blob = encodeWav(sliced, buffer.sampleRate, exportSettings.bitDepth);
+  const heavyResults =
+    regionDefs.length > 0
+      ? await processRegionsHeavy({
+          sampleRate: buffer.sampleRate,
+          bitDepth: exportSettings.bitDepth,
+          fadeInSamples,
+          fadeOutSamples,
+          stretchRatio,
+          character: timestretchSettings.character,
+          regions: regionDefs,
+        })
+      : [];
 
-    const fileName = buildChopFileName(stem, tag, made);
+  const chopRows = [];
+  const chopMarkers = [];
+  for (let i = 0; i < regionDefs.length; i++) {
+    const { startSample, endSample } = regionDefs[i];
+    const { blob, seconds } = heavyResults[i];
+    const fileName = buildChopFileName(stem, tag, i + 1);
     await writeOutput(folder, "chops", `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`, fileName, blob, zipBatch);
-
-    chopRows.push({ fileName, blob, seconds: sliced[0].length / buffer.sampleRate });
+    chopRows.push({ fileName, blob, seconds });
     chopMarkers.push([startSample / buffer.sampleRate, endSample / buffer.sampleRate]);
   }
   return { chopRows, chopMarkers };
@@ -1245,7 +1420,7 @@ function renderSkippedFileResult(folderSection, fileName, reason) {
 function detectOneShotRegions(mono, sampleRate) {
   const { times, vals } = computeRmsEnvelope(mono, sampleRate, 20, 10);
   if (!vals.length) return [];
-  const diffs = onsetStrengthCurve(vals);
+  const { diffs } = multiBandOnsetStrengthCurve(mono, sampleRate, 20, 10, { times, vals });
   const onsets = pickOnsets(times, diffs, 0.65, 0.08);
   const windows = findOneShotWindows(mono, sampleRate, onsets);
 
@@ -1449,8 +1624,9 @@ function drawWaveform(canvas, peaks, duration, chopMarkers, oneShotMarkers) {
 
 /**
  * Interactive version of the waveform preview: existing chop-boundary handles can be dragged
- * (pointer events, so mouse/touch/pen all work). Returns {canvas, getRegions, destroy}. Adding or
- * removing boundaries isn't supported yet - v1 is deliberately just "nudge what's already there".
+ * (pointer events, so mouse/touch/pen all work), new regions can be inserted with "+ Add region",
+ * and any region can be removed from the chip list under the waveform. Returns {canvas, getRegions,
+ * destroy}.
  */
 function formatEditorTime(t) {
   const m = Math.floor(t / 60);
@@ -1483,15 +1659,23 @@ function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) 
   fitBtn.type = "button";
   fitBtn.className = "btn btn--ghost btn--small";
   fitBtn.textContent = "Fit";
+  const addRegionBtn = document.createElement("button");
+  addRegionBtn.type = "button";
+  addRegionBtn.className = "btn btn--ghost btn--small";
+  addRegionBtn.textContent = "+ Add region";
   const zoomLabel = document.createElement("span");
   zoomLabel.className = "editable-waveform-zoom-label";
-  toolbar.append(zoomOutBtn, zoomInBtn, fitBtn, zoomLabel);
+  toolbar.append(zoomOutBtn, zoomInBtn, fitBtn, addRegionBtn, zoomLabel);
   wrap.appendChild(toolbar);
 
   const canvas = document.createElement("canvas");
   canvas.className = "waveform-canvas waveform-canvas--editable";
   wrap.appendChild(canvas);
   registerThemeRepaint(canvas, () => redraw());
+
+  const regionList = document.createElement("div");
+  regionList.className = "editable-waveform-region-list";
+  wrap.appendChild(regionList);
 
   const regions = initialRegions.map(([s, e]) => ({ s, e }));
   const MIN_GAP_SEC = 0.03;
@@ -1586,6 +1770,57 @@ function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) 
     fitBtn.disabled = zoomOutBtn.disabled;
   }
 
+  /** Rebuilds the row of small "start-end [x]" chips under the canvas from the current `regions`. */
+  function renderRegionList() {
+    regionList.innerHTML = "";
+    regions.forEach((r, idx) => {
+      const chip = document.createElement("span");
+      chip.className = "editable-waveform-region-chip";
+      const label = document.createElement("span");
+      label.textContent = `${idx + 1}: ${formatEditorTime(r.s)} to ${formatEditorTime(r.e)}`;
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.textContent = "×";
+      removeBtn.title = "Remove this region";
+      removeBtn.addEventListener("click", () => removeRegionAt(idx));
+      chip.appendChild(label);
+      chip.appendChild(removeBtn);
+      regionList.appendChild(chip);
+    });
+    if (regions.length === 0) {
+      const empty = document.createElement("span");
+      empty.className = "editable-waveform-region-chip";
+      empty.textContent = "No regions - use “+ Add region” or Cancel";
+      regionList.appendChild(empty);
+    }
+  }
+
+  /** Inserts a new region centered in the current view, snapped to zero-crossings like a dragged handle. */
+  function addRegionAtCenter() {
+    const center = viewStart + viewDuration / 2;
+    const defaultLen = Math.min(Math.max(duration, MIN_GAP_SEC), Math.max(0.05, viewDuration * 0.25));
+    let s = Math.max(0, center - defaultLen / 2);
+    let e = Math.min(duration, center + defaultLen / 2);
+    if (mono) {
+      s = snapToZeroCrossing(s);
+      e = snapToZeroCrossing(e);
+    }
+    if (e - s < MIN_GAP_SEC) e = Math.min(duration, s + MIN_GAP_SEC);
+    if (e - s < MIN_GAP_SEC) s = Math.max(0, e - MIN_GAP_SEC);
+    regions.push({ s, e });
+    regions.sort((a, b) => a.s - b.s);
+    redraw();
+    renderRegionList();
+  }
+
+  function removeRegionAt(idx) {
+    regions.splice(idx, 1);
+    redraw();
+    renderRegionList();
+  }
+
+  addRegionBtn.addEventListener("click", addRegionAtCenter);
+
   function hitTest(clientX) {
     const rect = canvas.getBoundingClientRect();
     if (rect.width === 0) return null;
@@ -1655,6 +1890,7 @@ function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) 
       r[dragging.which] =
         dragging.which === "s" ? Math.max(0, Math.min(r.e - MIN_GAP_SEC, snapped)) : Math.max(r.s + MIN_GAP_SEC, Math.min(duration, snapped));
       redraw();
+      renderRegionList();
     }
     dragging = null;
   }
@@ -1662,6 +1898,7 @@ function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) 
   canvas.addEventListener("pointercancel", endDrag);
 
   redraw();
+  renderRegionList();
   window.addEventListener("resize", redraw);
 
   return {
@@ -1688,9 +1925,9 @@ function enterEditMode(block, state, staticArea, editBtn, kind) {
 
   const hint = document.createElement("p");
   hint.className = "chop-editor-hint";
-  hint.textContent = `Drag the white handles to adjust cut points (they snap to the nearest zero-crossing when you let go), scroll to zoom, drag the waveform to pan. Save re-exports. Adding or removing ${
-    isChops ? "chops" : "one-shots"
-  } isn't supported yet.`;
+  hint.textContent = `Drag the white handles to adjust cut points (they snap to the nearest zero-crossing when you let go), scroll to zoom, drag the waveform to pan. Use “+ Add region” to insert a new ${
+    isChops ? "chop" : "one-shot"
+  }, or the × on a chip below the waveform to remove one. Save re-exports.`;
   editorWrap.appendChild(hint);
 
   const editor = createEditableWaveform({
@@ -1839,11 +2076,108 @@ function escapeHtml(str) {
 }
 
 // ---------------------------------------------------------------------------
+// Preview: audition the current time-stretch/lo-fi settings on a short excerpt of the first
+// queued file, without running a full export or writing any files.
+// ---------------------------------------------------------------------------
+
+let previewObjectUrl = null;
+const PREVIEW_LEN_SEC = 6;
+
+function firstPreviewTarget() {
+  for (const folder of sourceFolders) {
+    if (folder.files.length > 0) return folder.files[0];
+  }
+  return null;
+}
+
+async function runPreview() {
+  const fileInfo = firstPreviewTarget();
+  if (!fileInfo) return;
+
+  previewRunning = true;
+  updateProcessButton();
+  previewStatus.textContent = "Generating preview…";
+  try {
+    const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
+    const { buffer } = await decodeFile(file, fileInfo.ext);
+    const channels = bufferChannels(buffer);
+    const mono = toMono(channels);
+    const duration = mono.length / buffer.sampleRate;
+
+    // Tempo is only needed if "match a target tempo" is the active stretch mode - skip essentia
+    // entirely otherwise so a quick preview stays quick.
+    let detectedBpm = null;
+    if (timestretchSettings.enabled && timestretchSettings.mode === "target-tempo") {
+      const kt = await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: false, tempo: true });
+      detectedBpm = kt.bpm;
+    }
+
+    const previewLen = Math.min(PREVIEW_LEN_SEC, duration);
+    let startSample = duration > previewLen ? Math.round(((duration - previewLen) / 2) * buffer.sampleRate) : 0;
+    let endSample = Math.min(mono.length, startSample + Math.round(previewLen * buffer.sampleRate));
+    const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
+    if (zcWindow > 0) {
+      startSample = findNearestZeroCrossing(mono, startSample, zcWindow);
+      endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
+    }
+    if (endSample <= startSample) endSample = Math.min(mono.length, startSample + 1);
+
+    const stretchRatio = resolveStretchRatio(detectedBpm);
+    const [{ blob, seconds }] = await processRegionsHeavy({
+      sampleRate: buffer.sampleRate,
+      bitDepth: exportSettings.bitDepth,
+      fadeInSamples: Math.round(0.01 * buffer.sampleRate),
+      fadeOutSamples: Math.round(0.01 * buffer.sampleRate),
+      stretchRatio,
+      character: timestretchSettings.character,
+      regions: [{ channels: sliceChannels(channels, startSample, endSample) }],
+    });
+
+    if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+    previewObjectUrl = URL.createObjectURL(blob);
+    previewAudio.src = previewObjectUrl;
+    previewAudio.hidden = false;
+    const appliedBits = [];
+    if (stretchRatio !== 1) appliedBits.push("time-stretch");
+    if (lofiActive()) appliedBits.push("lo-fi");
+    previewStatus.textContent = `Previewing "${fileInfo.name}" - ${seconds.toFixed(1)}s excerpt${
+      appliedBits.length ? ` with ${appliedBits.join(" + ")}` : " (no processing enabled)"
+    }.`;
+    await previewAudio.play().catch(() => {
+      /* autoplay can still be blocked in some contexts - the controls are there regardless */
+    });
+  } catch (err) {
+    previewStatus.textContent = `Couldn't generate a preview: ${err.message || err}`;
+    console.error(err);
+  } finally {
+    previewRunning = false;
+    updateProcessButton();
+  }
+}
+
+previewBtn.addEventListener("click", runPreview);
+
+// ---------------------------------------------------------------------------
 // Batch processing
 // ---------------------------------------------------------------------------
 
+/** Shows/hides and updates the progress bar under Process Batch. total<=0 hides it. */
+function updateProgress(done, total, label) {
+  if (total <= 0) {
+    progressRow.hidden = true;
+    return;
+  }
+  progressRow.hidden = false;
+  const pct = Math.min(100, Math.round((done / total) * 100));
+  progressBarFill.style.width = `${pct}%`;
+  progressLabel.textContent = label || `${done} / ${total} file(s)`;
+}
+
 async function processBatch() {
   processing = true;
+  cancelRequested = false;
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = "Cancel";
   updateProcessButton();
   clearLog();
   resultsPanel.innerHTML = "";
@@ -1852,8 +2186,11 @@ async function processBatch() {
   const zipBatch = FSA_SUPPORTED ? null : new ZipBatch();
   let totalChops = 0;
   let processedFolders = 0;
+  const totalFiles = sourceFolders.reduce((sum, f) => sum + f.files.length, 0);
+  let filesDone = 0;
+  updateProgress(0, totalFiles);
 
-  for (const folder of sourceFolders) {
+  outer: for (const folder of sourceFolders) {
     log(`Folder: ${folder.name}`);
     if (folder.files.length === 0) {
       log("  No source audio found, skipped");
@@ -1871,31 +2208,49 @@ async function processBatch() {
     const folderSection = renderFolderResultSection(folder);
 
     for (const fileInfo of folder.files) {
+      if (cancelRequested) {
+        log("Batch cancelled.");
+        break outer;
+      }
+      updateProgress(filesDone, totalFiles, `${fileInfo.name} (${filesDone + 1}/${totalFiles})`);
       try {
         totalChops += await processOneFile(folder, fileInfo, zipBatch, folderSection);
       } catch (err) {
         log(`  ERROR on ${fileInfo.name}: ${err.message || err} - skipping this file, batch continues`);
         console.error(err);
       }
-      // Yield to the event loop so the log/UI stay responsive during a big batch.
+      filesDone++;
+      updateProgress(filesDone, totalFiles);
+      // Yield to the event loop so the log/UI/progress bar stay responsive during a big batch,
+      // and so a Cancel click actually gets a chance to register between files.
       await new Promise((r) => setTimeout(r, 0));
     }
     processedFolders++;
   }
 
   if (zipBatch) {
-    log("Building ZIP for download…");
+    log(cancelRequested ? "Building ZIP for download (partial - batch was cancelled)…" : "Building ZIP for download…");
     await zipBatch.downloadAs("auto_sample_chopper_output.zip");
     log("ZIP download started.");
   }
 
-  log(`Done. Processed ${processedFolders} folder(s), created ${totalChops} candidate chop(s).`);
+  log(`${cancelRequested ? "Cancelled." : "Done."} Processed ${processedFolders} folder(s), created ${totalChops} candidate chop(s).`);
   processing = false;
+  cancelRequested = false;
   updateProcessButton();
+  progressRow.hidden = true;
 }
 
 processBtn.addEventListener("click", () => {
   if (!processing) processBatch();
+});
+
+cancelBtn.addEventListener("click", () => {
+  if (!processing || cancelRequested) return;
+  cancelRequested = true;
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = "Cancelling…";
+  log("Cancelling after the current file finishes…");
 });
 
 // ---------------------------------------------------------------------------
@@ -1955,6 +2310,40 @@ function init() {
       : "Key & tempo detection unavailable (couldn't load essentia.js) - chopping still works normally.";
     essentiaStatus.className = available ? "essentia-status essentia-status--ok" : "essentia-status essentia-status--warn";
   });
+
+  loadRememberedFolders();
+}
+
+/**
+ * Loads folders remembered from a previous session (IndexedDB, see folder-store.js) and either
+ * auto-adds them (permission was already silently re-granted - queryPermission never prompts) or
+ * lists them as pending a Reconnect click. FSA-only; a no-op fallback browser never has anything
+ * remembered here. Runs after the first render, same pattern as the essentiaAvailable() check
+ * above, so it doesn't hold up the rest of init().
+ */
+async function loadRememberedFolders() {
+  if (!FSA_SUPPORTED) return;
+  const remembered = await listRememberedFolders();
+  for (const { name, handle } of remembered) {
+    if (folderAlreadyQueued(name)) continue;
+    try {
+      const perm = await handle.queryPermission({ mode: "readwrite" });
+      if (perm === "granted") {
+        const files = await collectAudioFilesFSA(handle);
+        sourceFolders.push({ id: nextFolderId++, name, kind: "fsa", handle, files });
+      } else {
+        pendingReconnectFolders.push({ name, handle });
+      }
+    } catch (err) {
+      // The handle references a folder that's gone (moved/deleted) or something else broke -
+      // stop remembering it rather than showing a permanently-broken reconnect row.
+      forgetFolder(name);
+    }
+  }
+  if (remembered.length) {
+    renderFolderList();
+    updateProcessButton();
+  }
 }
 
 init();

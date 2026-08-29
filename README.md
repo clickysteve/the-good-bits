@@ -47,9 +47,11 @@ site on GitHub Pages.
   the nearest zero-crossing when you let go, same as an export), scroll
   or use the zoom buttons to get in close, drag the waveform to pan once
   you're zoomed in, then **Save & re-export** to re-cut just that file
-  with your adjustments. Editing chops and one-shots are independent -
-  saving one never discards the other. This is drag-only for now - adding
-  or removing regions isn't supported yet.
+  with your adjustments. Use **+ Add region** to drop in a new region
+  (centered in the current view, zero-crossing snapped), or the **×** on
+  any chip in the list below the waveform to delete that region entirely.
+  Editing chops and one-shots are independent - saving one never discards
+  the other.
 - **Chop into pieces is itself optional.** Untick **"Chop into pieces"** at
   the top of the Mode panel to skip chopping entirely - key/tempo
   detection, the `wav/` copy, and time-stretch/lo-fi processing all still
@@ -110,6 +112,23 @@ site on GitHub Pages.
   in the results panel - no need to dig through Finder to hear what you got.
 - **A batch that survives one bad file.** If a single file fails to decode
   or analyze, it's logged and skipped; the rest of the batch keeps going.
+- **Preview before you commit to a full export.** The **▶ Preview current
+  settings** button (above Process Batch) decodes just the first queued
+  file, grabs a ~6-second excerpt from the middle, and runs it through
+  whatever time-stretch and/or lo-fi settings are currently enabled so you
+  can audition the sound before processing the whole batch - no files are
+  written to disk for a preview.
+- **Progress and cancel.** Process Batch shows a progress bar as it works
+  through the queue, and a **Cancel** button stops the batch after the file
+  currently in flight finishes (mid-file cancellation isn't possible, but
+  nothing further starts). The heavy per-chop work - time-stretch, the
+  lo-fi chain, and WAV encoding - runs off the main thread in a background
+  worker so the page stays responsive during a large batch.
+- **Folder permissions are remembered.** In Chrome/Edge, folders you've
+  added stick around across page reloads: on your next visit they show up
+  as pending with a **Reconnect** button (browsers require a fresh click to
+  re-grant filesystem permission each session - they never persist the
+  grant itself) or a **×** to forget them for good.
 
 The version number shown next to the title (e.g. `v0.8`) ticks up with each
 meaningful change, so you can tell at a glance whether you're looking at the
@@ -354,26 +373,20 @@ node test/run-e2e-check.mjs   # needs a fixture WAV - see the file's header comm
 
 ## Known limitations / natural next steps
 
-- Analysis runs on the main thread. It yields between files so the page
-  stays responsive, but a very large batch (hundreds of long files) will
-  feel slower than a native app; moving analysis into a Web Worker is the
-  natural next step if that becomes a problem.
+- Detection/analysis (silence and onset finding, key/tempo detection) still
+  runs on the main thread and yields between files so the page stays
+  responsive; only the heavy per-chop work (time-stretch, lo-fi, WAV
+  encoding) has been moved into a Web Worker so far. A very large batch
+  (hundreds of long files) will still feel slower than a native app during
+  the analysis phase.
 - Zero-crossing snapping uses a single reference (the mono mix) so all
   channels of a stereo file cut at the same sample - this keeps channels
   aligned but means the snap isn't independently optimal per channel.
-- Folder permissions (File System Access API) aren't remembered across page
-  reloads - you'll need to re-add folders each session. Persisting handles
-  via IndexedDB is possible but wasn't built in this pass.
-- Drum onset detection (for chop *boundaries*) is still a single
-  full-spectrum energy curve - a multi-band version would likely improve
-  boundary accuracy further on busy breaks.
 - One-shot classification is a simple band-energy/duration heuristic, not a
   trained model - it's a reasonable sort for kick/snare/hat/cymbal-ish
   sounds for grouping repeats, but will mislabel unusual or layered hits;
   that's why it's used internally for dedupe only and never shown in a
   filename. Always worth a quick listen through the `one shots/` folder.
-- The manual editor (chops and one-shots) only lets you drag existing
-  boundaries - adding or removing regions isn't supported yet.
 - Time-stretch and the lo-fi stages are each one setting for the whole
   batch, not per-chop; proper per-chop controls would need the editor
-  built out further first.
+  built out further first (a deliberate choice for now, not a gap).

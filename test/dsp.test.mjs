@@ -12,6 +12,7 @@ import {
   splitLongNaturally,
   phraseRegions,
   onsetStrengthCurve,
+  multiBandOnsetStrengthCurve,
   pickOnsets,
   snapToBeatGrid,
   drumRegions,
@@ -183,6 +184,42 @@ test("onsetStrengthCurve + pickOnsets: detects periodic hits", () => {
   // consecutive onsets should be roughly hitGap apart
   const gaps = onsets.slice(1).map((t, i) => t - onsets[i]);
   for (const g of gaps) assert.ok(Math.abs(g - hitGap) < 0.15, `gap ${g} should be near ${hitGap}`);
+});
+
+test("multiBandOnsetStrengthCurve: times/diffs match the envelope's length", () => {
+  const sig = concat(tone(0.5, 200, 0.8), silence(0.5));
+  const { times, vals } = computeRmsEnvelope(sig, SR, 20, 10);
+  const { times: mbTimes, diffs } = multiBandOnsetStrengthCurve(sig, SR, 20, 10, { times, vals });
+  assert.equal(mbTimes.length, times.length);
+  assert.equal(diffs.length, times.length);
+});
+
+test("multiBandOnsetStrengthCurve: catches a quiet, high-frequency-only hit that a full-spectrum curve misses", () => {
+  const gap = 0.22;
+  const parts = [];
+  for (let i = 0; i < 3; i++) {
+    parts.push(tone(0.05, 100, 0.9)); // loud low-freq "kick"
+    parts.push(silence(gap - 0.05));
+    parts.push(tone(0.05, 8000, 0.1)); // quiet high-freq "shaker" - small in total-energy terms
+    parts.push(silence(gap - 0.05));
+  }
+  const sig = concat(...parts);
+
+  const { times, vals } = computeRmsEnvelope(sig, SR, 20, 10);
+  const singleDiffs = onsetStrengthCurve(vals);
+  const singleOnsets = pickOnsets(times, singleDiffs, 0.65, 0.1);
+
+  const { diffs: multiDiffs } = multiBandOnsetStrengthCurve(sig, SR, 20, 10, { times, vals });
+  const multiOnsets = pickOnsets(times, multiDiffs, 0.65, 0.1);
+
+  assert.ok(
+    multiOnsets.length > singleOnsets.length,
+    `expected multi-band to find more onsets than single-band (kick-only) at the same sensitivity: single=${singleOnsets.length}, multi=${multiOnsets.length}`
+  );
+  // multi-band should catch every one of the 6 hits (3 kicks + 3 shakers); single-band, working
+  // from total energy alone, should catch at most the loud kicks and miss the quiet shakers.
+  assert.equal(multiOnsets.length, 6, `expected all 6 hits found via multi-band, got ${multiOnsets.length}`);
+  assert.ok(singleOnsets.length <= 3, `single-band shouldn't be finding the quiet shakers too, got ${singleOnsets.length}`);
 });
 
 test("snapToBeatGrid: snaps within tolerance, leaves distant points alone", () => {

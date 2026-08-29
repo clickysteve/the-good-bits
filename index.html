@@ -251,7 +251,19 @@
 
   <section class="panel">
     <h2>8. Process</h2>
-    <button id="process-btn" class="btn btn--primary btn--large" disabled>Process Batch</button>
+    <div class="preview-row">
+      <button id="preview-btn" class="btn btn--ghost" disabled>▶ Preview current settings</button>
+      <span id="preview-status" class="hint"></span>
+    </div>
+    <audio id="preview-audio" class="preview-audio" controls hidden></audio>
+    <div class="process-row">
+      <button id="process-btn" class="btn btn--primary btn--large" disabled>Process Batch</button>
+      <button id="cancel-btn" class="btn btn--ghost btn--large" hidden>Cancel</button>
+    </div>
+    <div id="progress-row" class="progress-row" hidden>
+      <div class="progress-bar"><div id="progress-bar-fill" class="progress-bar-fill"></div></div>
+      <span id="progress-label" class="hint"></span>
+    </div>
     <div id="log-panel" class="log-panel"></div>
   </section>
 

@@ -463,6 +463,18 @@ main {
   font-size: 0.85rem;
 }
 
+.folder-row--pending {
+  border-style: dashed;
+  background: transparent;
+}
+
+.folder-row-pending-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: none;
+}
+
 /* buttons */
 
 .btn {
@@ -723,6 +735,63 @@ input[type="text"]:hover {
   color: var(--warn);
 }
 
+/* preview / process / progress */
+
+.preview-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+
+.preview-audio {
+  display: block;
+  height: 32px;
+  width: 100%;
+  max-width: 420px;
+  margin-bottom: 0.9rem;
+}
+
+.preview-audio[hidden] {
+  display: none;
+}
+
+.process-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-top: 0.8rem;
+}
+
+.progress-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent-grad);
+  transition: width 0.15s ease-out;
+}
+
+.progress-row .hint {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* log */
 
 .log-panel {
@@ -909,6 +978,44 @@ input[type="text"]:hover {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
+}
+
+.editable-waveform-region-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.editable-waveform-region-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.3rem 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel-alt, var(--bg-panel));
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.editable-waveform-region-chip button {
+  width: 1.3rem;
+  height: 1.3rem;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+}
+
+.editable-waveform-region-chip button:hover {
+  color: var(--danger, #e2687a);
+  background: color-mix(in srgb, var(--danger, #e2687a) 16%, transparent);
 }
 
 /* confirm dialog */

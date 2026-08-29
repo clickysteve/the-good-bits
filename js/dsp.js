@@ -252,6 +252,38 @@ export function pickOnsets(times, diffs, sensitivity = 0.65, minSpacing = 0.12) 
 }
 
 /**
+ * Multi-band onset-strength curve: splits the signal into low/mid/high bands (same ~150Hz/2000Hz
+ * crossovers as bandEnergies below), computes a short-time RMS envelope and log-energy-jump onset
+ * curve per band, then sums them after normalizing each band's curve by its own typical jump size
+ * (its 82nd-percentile value, same statistic pickOnsets uses for its threshold). A single
+ * full-spectrum curve tends to under-react to a hit whose energy is concentrated in one band - a
+ * sub-heavy kick, a hats-only shaker - because its jump in *total* energy is smaller than a
+ * broadband snare's, even though the hit is just as clear-cut within its own band. The
+ * full-spectrum curve is folded in too (also normalized the same way) so broadband hits aren't
+ * diluted relative to narrowband ones. Pass an already-computed `fullEnvelope` ({times, vals} from
+ * computeRmsEnvelope with the same winMs/hopMs) to skip recomputing it.
+ */
+export function multiBandOnsetStrengthCurve(mono, sampleRate, winMs = 20, hopMs = 10, fullEnvelope = null) {
+  const low = onePoleLowpass(mono, 150, sampleRate);
+  const aboveLow = onePoleHighpass(mono, 150, sampleRate);
+  const mid = onePoleLowpass(aboveLow, 2000, sampleRate);
+  const high = onePoleHighpass(aboveLow, 2000, sampleRate);
+
+  const { times, vals: fullVals } = fullEnvelope || computeRmsEnvelope(mono, sampleRate, winMs, hopMs);
+  const bandVals = [low, mid, high].map((signal) => computeRmsEnvelope(signal, sampleRate, winMs, hopMs).vals);
+  const bandCurves = [...bandVals, fullVals].map((vals) => onsetStrengthCurve(vals));
+
+  const combined = new Array(times.length).fill(0);
+  for (const diffs of bandCurves) {
+    const norm = Math.max(1e-6, percentile(diffs, 0.82));
+    for (let i = 0; i < combined.length; i++) {
+      combined[i] += (diffs[i] || 0) / norm;
+    }
+  }
+  return { times, diffs: combined };
+}
+
+/**
  * Snap a candidate cut time to the nearest beat-grid line for a given tempo,
  * so that resulting chop lengths are exact whole numbers of beats and loop
  * cleanly. gridStart is the time of beat 1 (usually the first strong onset).
@@ -277,7 +309,7 @@ export function drumRegions(mono, sampleRate, p, bpm = null) {
   const { times, vals } = computeRmsEnvelope(mono, sampleRate, 20, 10);
   if (!vals.length) return { regions: [[0, duration]], onsets: [] };
 
-  const diffs = onsetStrengthCurve(vals);
+  const { diffs } = multiBandOnsetStrengthCurve(mono, sampleRate, 20, 10, { times, vals });
   const onsets = pickOnsets(times, diffs, p.onsetSensitivity, 0.12);
   const gridStart = bpm && onsets.length ? onsets[0] : 0;
   const tolerance = bpm ? (60 / bpm) * 0.5 : 0;

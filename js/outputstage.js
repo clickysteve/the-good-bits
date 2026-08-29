@@ -549,6 +549,27 @@ export function applyDrive(channels, driveKey, amountPct = 0) {
 // reduction (SP-1200-style "drop-sample" grit, per the plugin's Interp enum).
 // -----------------------------------------------------------------------------
 
+/**
+ * Runs the full lo-fi chain - output-stage character, then drive, then crunch - each stage a
+ * no-op unless its `enabled` flag is set. `settings` is a plain, structured-cloneable object
+ * ({outputStage, drive, crunch}, each matching the shape of the app's *Settings objects), so this
+ * same function runs identically on the main thread (app.js) and inside heavy-dsp-worker.js.
+ */
+export function applyLofiChain(channels, sampleRate, settings = {}) {
+  let out = channels;
+  const { outputStage, drive, crunch } = settings;
+  if (outputStage && outputStage.enabled) {
+    out = applyOutputStage(out, sampleRate, outputStage.mode, outputStage.mixPct, outputStage.intensityPct);
+  }
+  if (drive && drive.enabled) {
+    out = applyDrive(out, drive.type, drive.amountPct);
+  }
+  if (crunch && crunch.enabled) {
+    out = applyCrunch(out, { bits: crunch.bits, rateDivide: crunch.rateDivide });
+  }
+  return out;
+}
+
 /** bits: 1-16 (16 = no reduction). rateDivide: 1-32 (1 = no reduction). Both are no-ops at their max. */
 export function applyCrunch(channels, { bits = 16, rateDivide = 1 } = {}) {
   const bitsClamped = Math.max(1, Math.min(16, Math.round(bits ?? 16)));
