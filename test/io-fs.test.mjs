@@ -64,6 +64,18 @@ test("collectAudioFilesLegacy: excludes wav/ and chops/ segments even when split
   assert.equal(sessionA.files[0].name, "take1.wav");
 });
 
+test("collectAudioFilesLegacy: excludes the 'clean copy' output segments too, not just chops/one shots", () => {
+  const files = [
+    mockFile("Parent/chops clean/take1/01.wav", "01.wav"),
+    mockFile("Parent/one shots clean/take1/01.wav", "01.wav"),
+    mockFile("Parent/take1.wav", "take1.wav"),
+  ];
+  const groups = collectAudioFilesLegacy(files, { splitSubfolders: false });
+  const parent = groups.find((g) => g.rootName === "Parent");
+  assert.equal(parent.files.length, 1);
+  assert.equal(parent.files[0].name, "take1.wav");
+});
+
 test("collectAudioFilesLegacy: returns [] for an empty FileList", () => {
   assert.deepEqual(collectAudioFilesLegacy([], { splitSubfolders: false }), []);
 });

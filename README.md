@@ -17,11 +17,25 @@ site on GitHub Pages.
   Terminal, Console) swap the whole page's look on the fly, restyling the
   actual controls rather than just recoloring them: Classic is the default,
   Terminal turns buttons and checkboxes into bracketed `[ ]` ASCII-style
-  text on a scanlined CRT-green screen, and Console turns them into chunky
-  red/blue hardware buttons and toggle switches on a beige-grey chassis
-  with rack ears down each side, after a classic rack sampler. Purely
-  cosmetic (nothing about detection or export changes), and your choice is
-  remembered in this browser.
+  text on a scanlined CRT-green screen, and Console goes full rack-hardware:
+  chunky red/blue buttons and toggle switches, rivets in every panel corner,
+  a lit LED next to each panel's label and on the selected mode card, an
+  engraved-plate title with an LCD-style version readout, knob-style dial
+  sliders, and a segmented LED meter for the progress bar - on a beige-grey
+  chassis with rack ears down each side once the window's wide enough for
+  them. Purely cosmetic (nothing about detection or export changes), and
+  your choice is remembered in this browser.
+- **Simple and Advanced modes.** The Simple/Advanced toggle under the title
+  controls how much of the page you see, not what's stored: Simple shows
+  just Mode, Source, and Process, and dropping a folder or file onto it
+  starts processing immediately with whatever settings are already saved
+  (or sensible defaults on a first visit). Advanced reveals everything -
+  output naming, detection parameters, time-stretch, lo-fi character,
+  processing scope - grouped into two stages, **Stage 1 · Chop/Extract**
+  and **Stage 2 · Stretch/Lo-fi**, so the "cut it up" decisions and the
+  "make it sound different" decisions read as separate concerns even
+  though one Process Batch click still runs both together. Switching
+  modes never resets a setting you've configured in Advanced.
 - **Auto or manual detection settings.** Auto mode (on by default) just uses
   sensible defaults per mode, so you don't have to make any decisions to get
   started - flip it off if you want to hand-tune silence sensitivity, phrase
@@ -41,17 +55,19 @@ site on GitHub Pages.
   panel with its chop boundaries and any one-shot hits marked, so you can
   see at a glance how the auto-detection carved it up before you go
   digging through the audio players.
-- **Manual chop and one-shot editing.** Click **Edit chops** or
-  **Edit one-shots** on any processed file to open its waveform for
+- **Manual chop and one-shot editing, with audition.** Click **Edit chops**
+  or **Edit one-shots** on any processed file to open its waveform for
   editing: drag the start/end handles to adjust cut points (they snap to
   the nearest zero-crossing when you let go, same as an export), scroll
   or use the zoom buttons to get in close, drag the waveform to pan once
   you're zoomed in, then **Save & re-export** to re-cut just that file
-  with your adjustments. Use **+ Add region** to drop in a new region
-  (centered in the current view, zero-crossing snapped), or the **×** on
-  any chip in the list below the waveform to delete that region entirely.
-  Editing chops and one-shots are independent - saving one never discards
-  the other.
+  with your adjustments. Every region chip below the waveform has a **▶**
+  button that plays that region back instantly from memory, so you can
+  check a boundary sounds right before committing to a re-export. Use
+  **+ Add region** to drop in a new region (centered in the current view,
+  zero-crossing snapped), or the **×** on a chip to delete that region
+  entirely. Editing chops and one-shots are independent - saving one
+  never discards the other.
 - **Chop into pieces is itself optional.** Untick **"Chop into pieces"** at
   the top of the Mode panel to skip chopping entirely - key/tempo
   detection, the `wav/` copy, and time-stretch/lo-fi processing all still
@@ -61,19 +77,18 @@ site on GitHub Pages.
   use any one, any two, or all three together.
 - **Optional time-stretch.** Stretch chops on export while preserving
   pitch, either by matching every file to one target tempo (handy for
-  normalizing a batch to a single BPM) or by a fixed stretch ratio applied
-  to everything. Five "character" presets trade off cleanliness for
-  vibe: Clean is a transparent stretch, Vintage adds the grainy warble of
-  a 90s hardware sampler, Glitch pushes that further into metallic,
-  low-bit territory, Warped uses short choppy grains for a wobbly,
-  broken-pitch feel, and Crushed keeps smooth grains but bit-crushes
-  harder than Glitch. Applies to the main chops, and also produces a
-  separate processed copy of the full source track in `wav/` (see
-  **Lo-fi character** below for how that file gets named when both
+  normalizing a batch to a single BPM, up to 300 BPM) or by a fixed
+  stretch ratio applied to everything. Five "character" presets trade off
+  cleanliness for vibe: Clean is a transparent stretch, Vintage adds the
+  grainy warble of a 90s hardware sampler, Glitch pushes that further into
+  metallic, low-bit territory, Warped uses short choppy grains for a
+  wobbly, broken-pitch feel, and Crushed keeps smooth grains but
+  bit-crushes harder than Glitch. Applies to the main chops, and also
+  produces a separate processed copy of the full source track in `wav/`
+  (see **Lo-fi character** below for how that file gets named when both
   time-stretch and lo-fi processing are on) - handy for dropping the
-  whole recording into a sampler at the target tempo. One-shots are left
-  unstretched, and a file with no confident tempo detected exports
-  unstretched in target-tempo mode.
+  whole recording into a sampler at the target tempo. A file with no
+  confident tempo detected exports unstretched in target-tempo mode.
 - **Optional lo-fi character.** Three independent, stackable stages
   (applied in this order): an **output-stage character** modeled on
   tape/vinyl/radio/broadcast-chain coloration (Cassette, Reel-to-Reel,
@@ -81,12 +96,24 @@ site on GitHub Pages.
   Bus - each with its own Mix and Intensity), a **drive** saturation
   stage (Tape/Tube/Diode/Fuzz, with an amount knob), and a **crunch**
   bitcrusher (bit depth + sample-rate divide). Same export scope as
-  time-stretch: applies to the main chops and to the full-track `wav/`
-  copy, not to one-shots. The output-stage character presets are inspired
-  by the output-stage designs in [Loop Saboteur](https://github.com/clickysteve/Loop-Saboteur),
-  the author's own open-source glitch/chop plugin - ported here as
-  offline, whole-buffer processing rather than a real-time audio-thread
-  effect.
+  time-stretch, controlled by **Processing scope** below. The output-stage
+  character presets are inspired by the output-stage designs in
+  [Loop Saboteur](https://github.com/clickysteve/Loop-Saboteur), the
+  author's own open-source glitch/chop plugin - ported here as offline,
+  whole-buffer processing rather than a real-time audio-thread effect.
+- **Processing scope, for one-shots and clean copies.** Time-stretch and
+  lo-fi are off for one-shots by default - they stay untouched, clean drum
+  hits - but **"Also apply to one-shots"** runs the same chain over them
+  too. Separately, **"Keep an unprocessed copy alongside the processed
+  one"** writes both a raw and a processed version of every chop (and
+  one-shot, if that toggle is also on) whenever any processing is active,
+  landing the raw copies in sibling `chops clean/` / `one shots clean/`
+  folders with file names matching their processed counterparts.
+- **Typable values, not just sliders.** Every range control (fade length,
+  zero-crossing window, target BPM, stretch ratio, output-stage mix and
+  intensity, drive amount, crunch bits and rate) has a number field next
+  to it - drag the slider or type an exact value, either one updates the
+  other.
 - **One-shot hit extraction (drums, optional).** Pulls individual
   kick/snare/hat/cymbal-type hits out of a break into their own
   `one shots/` folder, deduplicated so a loop's repeated hits don't all
@@ -103,11 +130,19 @@ site on GitHub Pages.
   update as you type.
 - **Click-free boundaries.** Every cut point is snapped to the nearest
   zero-crossing and gets a short fade in/out, so chops don't pop at the edges.
-- **Folders or individual files.** Add whole folders, or pick loose files
-  directly - both feed the same pipeline.
-- **Optional per-subfolder batching.** Point it at one parent folder full of
-  session subfolders and have each subfolder processed as its own
-  independent source (own `wav/`, own `chops/`), instead of one flat batch.
+- **Folders or individual files, by button or drag-and-drop.** Click
+  **+ Add Source Folder** / **+ Add Individual Files**, or just drag a
+  folder or audio files from your file manager and drop them anywhere in
+  the Source panel - both routes feed the same pipeline. In Chrome/Edge a
+  dropped folder gets full read/write access like a folder added by
+  button; in Safari/Firefox (no File System Access API) a drop still
+  works, falling back to the same ZIP-on-export behavior as any other
+  source added there.
+- **Optional per-subfolder batching.** Point it at one parent folder full
+  of session subfolders and tick **"Split into one batch per subfolder"**
+  *before* adding it, to have each subfolder processed as its own
+  independent source (own `wav/`, own `chops/`), instead of one flat
+  batch.
 - **In-browser audition.** Every generated chop gets an inline audio player
   in the results panel - no need to dig through Finder to hear what you got.
 - **A batch that survives one bad file.** If a single file fails to decode
@@ -160,14 +195,29 @@ Then open the URL it prints (typically `http://localhost:8000`).
 
 ## Using it
 
+The **Simple / Advanced** toggle under the title decides how much of the
+page you see - it doesn't change what's saved. In **Simple**, all you get
+is Mode, Source, and Process: pick a mode, then drop a folder or file
+straight onto the page (or use the **+ Add** buttons) and it starts
+processing immediately with whatever's already saved, or sensible
+defaults on a first visit. Switch to **Advanced** for everything else:
+output naming, detection parameters, time-stretch, lo-fi character, and
+processing scope, laid out as two stages - **Stage 1 · Chop/Extract**
+(Mode, Source, naming, detection, export settings) and **Stage 2 ·
+Stretch/Lo-fi** (time-stretch, lo-fi character, processing scope) - as a
+way of keeping "how it gets cut up" and "how it gets made to sound
+different" visually separate, even though one **Process Batch** click
+still runs both.
+
 Choose a mode, then either **Add Source Folder** (repeatable, to build a
-multi-folder batch) or **Add Individual Files** (pick one or more loose
-audio files). Auto mode is on by default, so you can go straight to
-**Process Batch** - untick it if you want to adjust the detection
-parameters first.
+multi-folder batch), **Add Individual Files** (pick one or more loose
+audio files), or drag a folder or audio files from your file manager and
+drop them anywhere in the Source panel. Auto mode is on by default, so you
+can go straight to **Process Batch** - untick it if you want to adjust the
+detection parameters first.
 
 If a folder you add contains several session subfolders rather than audio
-files directly, tick **"Treat each subfolder as its own source"** before
+files directly, tick **"Split into one batch per subfolder"** before
 adding it, and each qualifying subfolder becomes its own independent batch
 entry with its own `wav/`/`chops/` output, instead of everything being
 flattened into one.
@@ -197,18 +247,22 @@ Once a file has processed, its result card shows an **Edit chops** and/or
 **Edit one-shots** button (whichever produced results) - click one to
 open that set of boundaries on the waveform: drag a handle to move a cut
 point (it snaps to the nearest zero-crossing when released), scroll or
-use the Zoom in/out/Fit buttons to work at finer detail, and drag the
-waveform itself to pan around once zoomed in. **Save & re-export** re-cuts
-just that file's chops or one-shots with your edits, without touching the
-other set. The optional **Time-stretch** panel (section 6) and **Lo-fi
-character** panel (section 7) both apply to every export in the batch,
-not per-file: turn time-stretch on, pick a mode (match a target tempo, or
-a fixed ratio) and a character, and it's baked into every chop as it's
+use the Zoom in/out/Fit buttons to work at finer detail, drag the
+waveform itself to pan around once zoomed in, and hit a region chip's
+**▶** to hear it before you commit. **Save & re-export** re-cuts just
+that file's chops or one-shots with your edits, without touching the
+other set. The optional **Time-stretch** and **Lo-fi character** panels
+(Advanced mode, Stage 2) both apply to every export in the batch, not
+per-file: turn time-stretch on, pick a mode (match a target tempo, or a
+fixed ratio) and a character, and it's baked into every chop as it's
 exported - including a manual re-export from the editor - plus a
 full-length processed copy of each source file. The lo-fi stages
 (output-stage character, drive, crunch) stack the same way and share that
 full-length copy: when time-stretch and lo-fi are both on, you get one
-combined `<name> stretched lofi.wav`, not two separate files.
+combined `<name> stretched lofi.wav`, not two separate files. **Processing
+scope**, right below, decides whether that chain also touches one-shots,
+and whether a raw unprocessed copy gets written alongside the processed
+one.
 
 ## Deploying to GitHub Pages
 
@@ -249,8 +303,18 @@ Source Folder/
             01.wav
             02.wav
             ...
+    chops clean/                        <- only when "Keep an unprocessed copy" is on and
+        <source file name> C#m 120bpm/     processing is actually active; same file names as
+            01.wav                         chops/, but the raw pre-stretch/lo-fi audio
+            02.wav
+            ...
     one shots/                          <- only when the drums one-shot option is on
         <source file name> C#m 120bpm/
+            01.wav
+            02.wav
+            ...
+    one shots clean/                    <- only when one-shots are also in Processing scope
+        <source file name> C#m 120bpm/     and "Keep an unprocessed copy" is on
             01.wav
             02.wav
             ...

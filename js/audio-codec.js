@@ -2,8 +2,8 @@
 //
 // Manual WAV and AIFF readers/writers, operating directly on ArrayBuffer /
 // DataView. WAV and AIFF are both just headers around raw PCM, so decoding
-// them by hand is straightforward and — unlike the browser's built-in
-// decodeAudioData — gives byte-exact, dependable results across every
+// them by hand is straightforward and - unlike the browser's built-in
+// decodeAudioData - gives byte-exact, dependable results across every
 // browser, at the source file's original sample rate and bit depth, with
 // no implicit resampling. Compressed formats (MP3/M4A/FLAC) still go
 // through decodeAudioData in app.js; this file only has to know PCM.

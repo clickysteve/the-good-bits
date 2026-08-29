@@ -4,11 +4,11 @@
 // https://github.com/MTG/essentia.js) for key and tempo detection. Everything
 // here degrades gracefully: if the CDN is unreachable or the WASM module
 // fails to load, key/tempo detection is simply reported unavailable and the
-// rest of the app (chopping itself) keeps working — key/tempo are enrichment,
+// rest of the app (chopping itself) keeps working - key/tempo are enrichment,
 // not a dependency of the core pipeline.
 //
 // Note on licensing: essentia.js is distributed under AGPL-3.0. That's a
-// network-copyleft license — if you deploy this app publicly (e.g. GitHub
+// network-copyleft license - if you deploy this app publicly (e.g. GitHub
 // Pages) its corresponding source must be available to anyone who uses it
 // over the network. A public GitHub Pages repo already satisfies that, but
 // it's worth knowing if you ever want to keep this app or a fork of it

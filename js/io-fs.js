@@ -31,7 +31,7 @@ function extOf(name) {
 
 function isExcludedSegment(name) {
   const n = name.toLowerCase();
-  return n === "wav" || n === "chops" || n === "one shots";
+  return n === "wav" || n === "chops" || n === "one shots" || n === "chops clean" || n === "one shots clean";
 }
 
 // ---------------------------------------------------------------------------
@@ -141,11 +141,15 @@ export async function writeFileFSA(sourceDirHandle, subdirName, relDir, fileName
   await writable.close();
 }
 
-/** Delete any previously-generated NN.wav files in a chops destination directory (idempotent re-runs). */
-export async function clearOldChopsFSA(sourceDirHandle, relDir, stem) {
+/**
+ * Delete any previously-generated NN.wav files in a <rootName>/relDir/stem destination directory
+ * (idempotent re-runs). Shared by chops, one-shots, and their "clean" (unprocessed-copy) siblings -
+ * all four use the same plain sequential-number naming.
+ */
+export async function clearOldNumberedFilesFSA(sourceDirHandle, rootName, relDir, stem) {
   try {
-    const chopsRoot = await sourceDirHandle.getDirectoryHandle("chops", { create: true });
-    const destDir = await getNestedDirHandle(chopsRoot, relDir ? `${relDir}/${stem}` : stem, true);
+    const root = await sourceDirHandle.getDirectoryHandle(rootName, { create: true });
+    const destDir = await getNestedDirHandle(root, relDir ? `${relDir}/${stem}` : stem, true);
     for await (const [name, handle] of destDir.entries()) {
       if (handle.kind === "file" && /^\d+\.wav$/i.test(name)) {
         try {
@@ -160,23 +164,14 @@ export async function clearOldChopsFSA(sourceDirHandle, relDir, stem) {
   }
 }
 
-/** Delete any previously-generated <label>_NN.wav one-shots in a destination directory (idempotent re-runs). */
+/** Delete any previously-generated NN.wav files in a chops destination directory (idempotent re-runs). */
+export async function clearOldChopsFSA(sourceDirHandle, relDir, stem) {
+  return clearOldNumberedFilesFSA(sourceDirHandle, "chops", relDir, stem);
+}
+
+/** Delete any previously-generated NN.wav one-shots in a destination directory (idempotent re-runs). */
 export async function clearOldOneShotsFSA(sourceDirHandle, relDir, stem) {
-  try {
-    const root = await sourceDirHandle.getDirectoryHandle("one shots", { create: true });
-    const destDir = await getNestedDirHandle(root, relDir ? `${relDir}/${stem}` : stem, true);
-    for await (const [name, handle] of destDir.entries()) {
-      if (handle.kind === "file" && /^[a-z]+_\d+\.wav$/i.test(name)) {
-        try {
-          await destDir.removeEntry(name);
-        } catch (_) {
-          /* ignore */
-        }
-      }
-    }
-  } catch (_) {
-    /* destination didn't exist yet - nothing to clear */
-  }
+  return clearOldNumberedFilesFSA(sourceDirHandle, "one shots", relDir, stem);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +184,7 @@ export async function clearOldOneShotsFSA(sourceDirHandle, relDir, stem) {
  * folder name in their webkitRelativePath.
  *
  * With splitSubfolders:true, files are grouped by their immediate
- * subfolder instead of all being lumped under the picked folder — each
+ * subfolder instead of all being lumped under the picked folder - each
  * subfolder becomes its own source group. Files sitting directly in the
  * picked folder (no subfolder) stay grouped under the picked folder's own
  * name.
@@ -238,6 +233,84 @@ export function collectIndividualFilesLegacy(fileList, groupName) {
     rootName: groupName,
     files: files.map((f) => ({ relativeDir: "", name: f.name, ext: extOf(f.name), legacyFile: f })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Drag-and-drop (read-only fallback path, used when the File System Access API - or its
+// DataTransferItem.getAsFileSystemHandle() drop variant - isn't available: Safari, Firefox).
+// Walks the older webkitGetAsEntry() entry tree instead, so it works everywhere drag-and-drop
+// itself does, at the cost of only ever producing a ZIP-fallback (read-only) source, same as the
+// hidden <input webkitdirectory> path. See app.js's drop handler for the FSA-capable branch,
+// which uses real DataTransferItem.getAsFileSystemHandle() directory/file handles instead of this.
+// ---------------------------------------------------------------------------
+
+function readEntries(dirEntry) {
+  const reader = dirEntry.createReader();
+  return new Promise((resolve, reject) => {
+    const all = [];
+    const readBatch = () =>
+      reader.readEntries((batch) => {
+        if (batch.length === 0) {
+          resolve(all);
+          return;
+        }
+        all.push(...batch);
+        readBatch();
+      }, reject);
+    readBatch();
+  });
+}
+
+function readEntryFile(fileEntry) {
+  return new Promise((resolve, reject) => fileEntry.file(resolve, reject));
+}
+
+/** Recursively walks a dropped FileSystemDirectoryEntry into a flat list of
+ * {relativeDir, name, ext, legacyFile} descriptors - the same shape collectAudioFilesLegacy
+ * produces, without depending on webkitRelativePath (drag-and-drop File objects don't reliably
+ * carry that the way an <input webkitdirectory> selection does). */
+async function walkDroppedDirEntry(dirEntry, relativeDir, out) {
+  for (const entry of await readEntries(dirEntry)) {
+    if (entry.isDirectory) {
+      if (isExcludedSegment(entry.name)) continue;
+      await walkDroppedDirEntry(entry, relativeDir ? `${relativeDir}/${entry.name}` : entry.name, out);
+    } else if (entry.isFile) {
+      const ext = extOf(entry.name);
+      if (!AUDIO_EXTS.has(ext)) continue;
+      out.push({ relativeDir, name: entry.name, ext, legacyFile: await readEntryFile(entry) });
+    }
+  }
+}
+
+/**
+ * Reads one dropped top-level folder (a FileSystemDirectoryEntry from webkitGetAsEntry()) into
+ * {rootName, files} group(s) - normally one, or one per immediate subfolder with
+ * splitSubfolders:true, mirroring collectAudioFilesLegacy's own splitSubfolders option.
+ */
+export async function collectDroppedFolderLegacy(dirEntry, { splitSubfolders = false } = {}) {
+  const flat = [];
+  await walkDroppedDirEntry(dirEntry, "", flat);
+  const sortKey = (f) => `${f.relativeDir}/${f.name}`;
+
+  if (!splitSubfolders) {
+    flat.sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+    return [{ rootName: dirEntry.name, files: flat }];
+  }
+
+  const groups = new Map();
+  for (const f of flat) {
+    const [first, ...rest] = f.relativeDir ? f.relativeDir.split("/") : [""];
+    const groupName = first ? `${dirEntry.name}/${first}` : dirEntry.name;
+    if (!groups.has(groupName)) groups.set(groupName, []);
+    groups.get(groupName).push({ ...f, relativeDir: first ? rest.join("/") : "" });
+  }
+  const out = [];
+  for (const [rootName, groupFiles] of groups) {
+    groupFiles.sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+    out.push({ rootName, files: groupFiles });
+  }
+  out.sort((a, b) => a.rootName.localeCompare(b.rootName));
+  return out;
 }
 
 // ---------------------------------------------------------------------------

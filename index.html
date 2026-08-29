@@ -29,7 +29,7 @@
 <header class="page-header">
   <div class="header-top-row">
     <p class="eyebrow">✦ automatic sample chopper</p>
-    <div class="theme-switcher" role="group" aria-label="Interface style">
+    <div id="theme-switcher" class="theme-switcher" role="group" aria-label="Interface style">
       <button type="button" class="theme-switcher-btn" data-theme-choice="classic">Classic</button>
       <button type="button" class="theme-switcher-btn" data-theme-choice="terminal">Terminal</button>
       <button type="button" class="theme-switcher-btn" data-theme-choice="console">Console</button>
@@ -37,11 +37,20 @@
   </div>
   <h1>The Good Bits <span id="version-badge" class="version-badge"></span></h1>
   <p class="subtitle">Finds candidate musical phrases and loop-ready drum breaks in long source recordings - a fast first-pass editor, not a final chopper. All processing happens locally in your browser; nothing is uploaded anywhere.</p>
+  <div class="ui-mode-row">
+    <div id="ui-mode-switcher" class="theme-switcher" role="group" aria-label="Interface complexity">
+      <button type="button" class="theme-switcher-btn" data-ui-mode-choice="simple">Simple</button>
+      <button type="button" class="theme-switcher-btn" data-ui-mode-choice="advanced">Advanced</button>
+    </div>
+    <p id="ui-mode-hint" class="ui-mode-hint"></p>
+  </div>
 </header>
 
 <main>
+  <div class="stage-group">
+  <h2 class="stage-title"><span class="stage-title-index">Stage 1</span> Chop / Extract</h2>
   <section class="panel">
-    <h2>1. Mode</h2>
+    <h2 class="step-heading">Mode</h2>
     <div class="mode-cards">
       <div class="mode-card mode-card--active" data-mode="phrases">
         <span class="mode-card-icon" aria-hidden="true">🎷</span>
@@ -80,33 +89,42 @@
     </div>
   </section>
 
-  <section class="panel">
-    <h2>2. Source folders &amp; files</h2>
+  <section class="panel" id="folder-drop-zone">
+    <h2 class="step-heading">Source folders &amp; files</h2>
     <p id="output-banner" class="banner"></p>
     <div class="folder-controls">
       <button id="add-folder-btn" class="btn btn--primary">+ Add Source Folder</button>
       <button id="add-files-btn" class="btn btn--primary">+ Add Individual Files</button>
       <button id="clear-folders-btn" class="btn btn--ghost">Clear All</button>
     </div>
+    <p class="drop-hint">...or drag a folder or audio files anywhere in this box to add them.</p>
     <label class="checkbox-label">
       <input id="split-subfolders-checkbox" type="checkbox" />
-      Treat each subfolder as its own source (instead of one flat batch)
+      Split into one batch per subfolder
+      <span class="hint">Only matters when the folder you're about to add contains several session subfolders rather than audio files directly. Tick this <strong>before</strong> adding that folder, and each subfolder becomes its own independent source with its own <code>wav/</code> and <code>chops/</code> output, instead of everything being flattened into one batch.</span>
     </label>
     <input id="legacy-folder-input" type="file" webkitdirectory directory multiple hidden />
     <input id="legacy-files-input" type="file" multiple accept=".wav,.m4a,.aif,.aiff,.flac,.mp3" hidden />
     <div id="folder-list" class="folder-list"></div>
   </section>
 
-  <section class="panel">
-    <h2>3. Output naming</h2>
+  <section class="panel advanced-only">
+    <h2 class="step-heading">Output naming</h2>
+    <p class="section-intro">Controls the names used inside each source's <code>chops/</code> output - the original source file is never renamed.</p>
+
+    <h3 class="naming-subhead">File names</h3>
     <div class="naming-grid">
       <div class="export-row naming-pattern-row">
-        <label for="naming-pattern-input">Chop file name pattern</label>
+        <label for="naming-pattern-input">Pattern</label>
         <input id="naming-pattern-input" type="text" spellcheck="false" autocomplete="off" value="{number}" />
-        <span class="hint">Type your own using <code>{name}</code>, <code>{tag}</code> and <code>{number}</code> anywhere in the pattern. A number is always added even if you leave <code>{number}</code> out, so chops never overwrite each other.</span>
+        <span class="hint">Build your own using <code>{name}</code>, <code>{tag}</code> and <code>{number}</code> in any order. A number is always included even if you leave <code>{number}</code> out, so chops never overwrite each other.</span>
       </div>
+    </div>
+
+    <h3 class="naming-subhead">Folder name</h3>
+    <div class="naming-grid">
       <div class="export-row">
-        <label for="naming-separator-select">Key/tempo tag separator</label>
+        <label for="naming-separator-select">Separator inside the key/tempo tag</label>
         <select id="naming-separator-select">
           <option value=" ">Space - Cm 120bpm</option>
           <option value="_">Underscore - Cm_120bpm</option>
@@ -114,16 +132,18 @@
         </select>
       </div>
       <div class="export-row export-row--checkbox">
-        <label><input id="naming-folder-tag-checkbox" type="checkbox" checked /> Tag the chops folder name with detected key/tempo</label>
+        <label><input id="naming-folder-tag-checkbox" type="checkbox" checked /> Add the detected key/tempo tag to the folder name</label>
       </div>
     </div>
+
+    <p class="naming-preview-label">Example, for a source file <code>drum_take.wav</code> detected as C minor / 120 BPM:</p>
     <p id="naming-preview" class="naming-preview" aria-live="polite"></p>
     <p class="naming-note">Key/tempo tags are always plain text: no brackets or commas, since some samplers limit both name length and punctuation.</p>
   </section>
 
-  <section class="panel" id="detection-params-panel">
+  <section class="panel advanced-only" id="detection-params-panel">
     <div class="params-panel-header">
-      <h2>4. Detection parameters</h2>
+      <h2 class="step-heading">Detection parameters</h2>
       <label class="auto-params-label">
         <input id="auto-params-checkbox" type="checkbox" checked />
         Auto (recommended settings)
@@ -132,8 +152,8 @@
     <div id="params-panel" class="params-panel"></div>
   </section>
 
-  <section class="panel">
-    <h2>5. Export &amp; analysis</h2>
+  <section class="panel advanced-only">
+    <h2 class="step-heading">Export &amp; analysis</h2>
     <div class="export-grid">
       <div class="export-row">
         <label for="bit-depth-select">Export bit depth</label>
@@ -143,12 +163,20 @@
         </select>
       </div>
       <div class="export-row">
-        <label for="fade-ms-slider">Fade in/out at chop edges <span id="fade-ms-value">5ms</span></label>
-        <input id="fade-ms-slider" type="range" min="0" max="30" step="1" value="5" />
+        <label for="fade-ms-slider">Fade in/out at chop edges</label>
+        <div class="slider-row">
+          <input id="fade-ms-slider" type="range" min="0" max="30" step="1" value="5" />
+          <input id="fade-ms-value" type="number" class="slider-number" min="0" max="30" step="1" value="5" />
+          <span class="slider-unit">ms</span>
+        </div>
       </div>
       <div class="export-row">
-        <label for="zc-ms-slider">Zero-crossing search window <span id="zc-ms-value">15ms</span></label>
-        <input id="zc-ms-slider" type="range" min="0" max="40" step="1" value="15" />
+        <label for="zc-ms-slider">Zero-crossing search window</label>
+        <div class="slider-row">
+          <input id="zc-ms-slider" type="range" min="0" max="40" step="1" value="15" />
+          <input id="zc-ms-value" type="number" class="slider-number" min="0" max="40" step="1" value="15" />
+          <span class="slider-unit">ms</span>
+        </div>
       </div>
       <div class="export-row export-row--checkbox">
         <label><input id="detect-key-checkbox" type="checkbox" checked /> Detect musical key</label>
@@ -159,9 +187,12 @@
     </div>
     <p id="essentia-status" class="essentia-status">Loading key &amp; tempo detection…</p>
   </section>
+  </div>
 
+  <div class="stage-group advanced-only">
+  <h2 class="stage-title"><span class="stage-title-index">Stage 2</span> Stretch / Lo-fi</h2>
   <section class="panel">
-    <h2>6. Time-stretch <span class="section-badge">optional</span></h2>
+    <h2 class="step-heading">Time-stretch <span class="section-badge">optional</span></h2>
     <label class="checkbox-label">
       <input id="timestretch-enable-checkbox" type="checkbox" />
       Time-stretch chops on export (pitch is preserved)
@@ -175,12 +206,20 @@
         </select>
       </div>
       <div class="export-row" id="timestretch-target-row">
-        <label for="timestretch-target-bpm-input">Target tempo <span id="timestretch-target-bpm-value">120 BPM</span></label>
-        <input id="timestretch-target-bpm-input" type="range" min="40" max="220" step="1" value="120" />
+        <label for="timestretch-target-bpm-input">Target tempo</label>
+        <div class="slider-row">
+          <input id="timestretch-target-bpm-input" type="range" min="40" max="300" step="1" value="120" />
+          <input id="timestretch-target-bpm-value" type="number" class="slider-number" min="40" max="300" step="1" value="120" />
+          <span class="slider-unit">BPM</span>
+        </div>
       </div>
       <div class="export-row" id="timestretch-ratio-row" hidden>
-        <label for="timestretch-ratio-input">Stretch amount <span id="timestretch-ratio-value">100%</span></label>
-        <input id="timestretch-ratio-input" type="range" min="25" max="400" step="1" value="100" />
+        <label for="timestretch-ratio-input">Stretch amount</label>
+        <div class="slider-row">
+          <input id="timestretch-ratio-input" type="range" min="25" max="400" step="1" value="100" />
+          <input id="timestretch-ratio-value" type="number" class="slider-number" min="25" max="400" step="1" value="100" />
+          <span class="slider-unit">%</span>
+        </div>
       </div>
       <div class="export-row">
         <label for="timestretch-character-select">Character</label>
@@ -193,11 +232,11 @@
         </select>
       </div>
     </div>
-    <p class="naming-note">Applies to the main chops and the wav/ copy of the original - one-shots are untouched. In "Match a target tempo" mode, a file with no confident tempo detected exports unstretched.</p>
+    <p class="naming-note">Always applies to the main chops and the wav/ copy of the original. One-shots are untouched unless "Also apply to one-shots" is turned on below, under Processing scope. In "Match a target tempo" mode, a file with no confident tempo detected exports unstretched.</p>
   </section>
 
   <section class="panel">
-    <h2>7. Lo-fi character <span class="section-badge">optional</span></h2>
+    <h2 class="step-heading">Lo-fi character <span class="section-badge">optional</span></h2>
     <label class="checkbox-label">
       <input id="outputstage-enable-checkbox" type="checkbox" />
       Apply an output-stage character to exported chops
@@ -208,12 +247,20 @@
         <select id="outputstage-mode-select"></select>
       </div>
       <div class="export-row">
-        <label for="outputstage-mix-slider">Mix <span id="outputstage-mix-value">100%</span></label>
-        <input id="outputstage-mix-slider" type="range" min="0" max="100" step="1" value="100" />
+        <label for="outputstage-mix-slider">Mix</label>
+        <div class="slider-row">
+          <input id="outputstage-mix-slider" type="range" min="0" max="100" step="1" value="100" />
+          <input id="outputstage-mix-value" type="number" class="slider-number" min="0" max="100" step="1" value="100" />
+          <span class="slider-unit">%</span>
+        </div>
       </div>
       <div class="export-row">
-        <label for="outputstage-intensity-slider">Intensity <span id="outputstage-intensity-value">50%</span></label>
-        <input id="outputstage-intensity-slider" type="range" min="0" max="100" step="1" value="50" />
+        <label for="outputstage-intensity-slider">Intensity</label>
+        <div class="slider-row">
+          <input id="outputstage-intensity-slider" type="range" min="0" max="100" step="1" value="50" />
+          <input id="outputstage-intensity-value" type="number" class="slider-number" min="0" max="100" step="1" value="50" />
+          <span class="slider-unit">%</span>
+        </div>
       </div>
     </div>
 
@@ -227,8 +274,12 @@
         <select id="drive-type-select"></select>
       </div>
       <div class="export-row">
-        <label for="drive-amount-slider">Amount <span id="drive-amount-value">40%</span></label>
-        <input id="drive-amount-slider" type="range" min="0" max="100" step="1" value="40" />
+        <label for="drive-amount-slider">Amount</label>
+        <div class="slider-row">
+          <input id="drive-amount-slider" type="range" min="0" max="100" step="1" value="40" />
+          <input id="drive-amount-value" type="number" class="slider-number" min="0" max="100" step="1" value="40" />
+          <span class="slider-unit">%</span>
+        </div>
       </div>
     </div>
 
@@ -238,19 +289,43 @@
     </label>
     <div id="crunch-options" class="naming-grid" hidden>
       <div class="export-row">
-        <label for="crunch-bits-slider">Bit depth <span id="crunch-bits-value">8-bit</span></label>
-        <input id="crunch-bits-slider" type="range" min="1" max="16" step="1" value="8" />
+        <label for="crunch-bits-slider">Bit depth</label>
+        <div class="slider-row">
+          <input id="crunch-bits-slider" type="range" min="1" max="16" step="1" value="8" />
+          <input id="crunch-bits-value" type="number" class="slider-number" min="1" max="16" step="1" value="8" />
+          <span class="slider-unit">-bit</span>
+        </div>
       </div>
       <div class="export-row">
-        <label for="crunch-rate-slider">Sample-rate divide <span id="crunch-rate-value">1x</span></label>
-        <input id="crunch-rate-slider" type="range" min="1" max="32" step="1" value="1" />
+        <label for="crunch-rate-slider">Sample-rate divide</label>
+        <div class="slider-row">
+          <input id="crunch-rate-slider" type="range" min="1" max="32" step="1" value="1" />
+          <input id="crunch-rate-value" type="number" class="slider-number" min="1" max="32" step="1" value="1" />
+          <span class="slider-unit">x</span>
+        </div>
       </div>
     </div>
-    <p class="naming-note">Applies to the main chops and the wav/ copy of the original, same scope as time-stretch - one-shots are untouched. Processing order is output-stage character, then drive, then crunch.</p>
+    <p class="naming-note">Same scope as time-stretch above - always applies to the main chops and the wav/ copy of the original, and to one-shots only if "Also apply to one-shots" is on below, under Processing scope. Processing order is output-stage character, then drive, then crunch.</p>
   </section>
 
   <section class="panel">
-    <h2>8. Process</h2>
+    <h2 class="step-heading">Processing scope <span class="section-badge">optional</span></h2>
+    <p class="section-intro">Controls what the time-stretch and lo-fi settings above actually touch. Only matters once one of those is turned on - otherwise there's nothing to scope.</p>
+    <label class="checkbox-label">
+      <input id="oneshot-processing-checkbox" type="checkbox" />
+      Also apply to one-shots
+      <span class="hint">Off by default - one-shots stay untouched, clean drum hits. Turn this on to run the same time-stretch/lo-fi chain over them too.</span>
+    </label>
+    <label class="checkbox-label">
+      <input id="keep-clean-copy-checkbox" type="checkbox" />
+      Keep an unprocessed copy alongside the processed one
+      <span class="hint">Writes both a raw and a processed version of every chop (and one-shot, if the toggle above is on) - roughly doubles file count and export time whenever any processing is active. Raw copies land in sibling <code>chops clean/</code> / <code>one shots clean/</code> folders with matching file names.</span>
+    </label>
+  </section>
+  </div>
+
+  <section class="panel">
+    <h2 class="step-heading">Process</h2>
     <div class="preview-row">
       <button id="preview-btn" class="btn btn--ghost" disabled>▶ Preview current settings</button>
       <span id="preview-status" class="hint"></span>

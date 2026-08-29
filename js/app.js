@@ -35,9 +35,11 @@ import {
   discoverImmediateSourceChildren,
   collectAudioFilesLegacy,
   collectIndividualFilesLegacy,
+  collectDroppedFolderLegacy,
   writeFileFSA,
   clearOldChopsFSA,
   clearOldOneShotsFSA,
+  clearOldNumberedFilesFSA,
   ZipBatch,
 } from "./io-fs.js";
 import { rememberFolder, listRememberedFolders, forgetFolder, forgetAllFolders } from "./folder-store.js";
@@ -115,6 +117,11 @@ const outputStageSettings = { enabled: false, mode: "cassette", mixPct: 100, int
 const driveSettings = { enabled: false, type: "tape", amountPct: 40 };
 const crunchSettings = { enabled: false, bits: 8, rateDivide: 1 };
 
+// Processing scope, shared by time-stretch and the lo-fi chain above. Off by default so existing
+// behavior (one-shots always raw, only one copy of everything) doesn't change until opted into.
+let applyProcessingToOneShots = false; // also run the stretch/lo-fi chain on one-shots, not just chops
+let keepUnprocessedCopy = false; // additionally write a raw, unprocessed copy of anything processed
+
 const SETTINGS_STORAGE_KEY = "good-bits-settings-v1";
 const THEME_STORAGE_KEY = "good-bits-theme-v1";
 const THEMES = ["classic", "terminal", "console"];
@@ -176,12 +183,16 @@ const logPanel = $("#log-panel");
 const resultsPanel = $("#results-panel");
 const bitDepthSelect = $("#bit-depth-select");
 const fadeMsSlider = $("#fade-ms-slider");
+const fadeMsNumber = $("#fade-ms-value");
 const zcMsSlider = $("#zc-ms-slider");
+const zcMsNumber = $("#zc-ms-value");
 const detectKeyCheckbox = $("#detect-key-checkbox");
 const detectTempoCheckbox = $("#detect-tempo-checkbox");
 const essentiaStatus = $("#essentia-status");
 const versionBadge = $("#version-badge");
-const themeSwitcherBtns = document.querySelectorAll(".theme-switcher-btn");
+const themeSwitcherBtns = document.querySelectorAll("#theme-switcher .theme-switcher-btn");
+const uiModeSwitcherBtns = document.querySelectorAll("#ui-mode-switcher .theme-switcher-btn");
+const uiModeHint = $("#ui-mode-hint");
 const drumOptions = $("#drum-options");
 const drumBarsSelect = $("#drum-bars-select");
 const oneShotsCheckbox = $("#one-shots-checkbox");
@@ -194,8 +205,10 @@ const timestretchOptions = $("#timestretch-options");
 const timestretchModeSelect = $("#timestretch-mode-select");
 const timestretchTargetRow = $("#timestretch-target-row");
 const timestretchTargetBpmInput = $("#timestretch-target-bpm-input");
+const timestretchTargetBpmNumber = $("#timestretch-target-bpm-value");
 const timestretchRatioRow = $("#timestretch-ratio-row");
 const timestretchRatioInput = $("#timestretch-ratio-input");
+const timestretchRatioNumber = $("#timestretch-ratio-value");
 const timestretchCharacterSelect = $("#timestretch-character-select");
 const chopEnabledCheckbox = $("#chop-enabled-checkbox");
 const detectionParamsPanel = $("#detection-params-panel");
@@ -203,15 +216,22 @@ const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
 const outputstageOptions = $("#outputstage-options");
 const outputstageModeSelect = $("#outputstage-mode-select");
 const outputstageMixSlider = $("#outputstage-mix-slider");
+const outputstageMixNumber = $("#outputstage-mix-value");
 const outputstageIntensitySlider = $("#outputstage-intensity-slider");
+const outputstageIntensityNumber = $("#outputstage-intensity-value");
 const driveEnableCheckbox = $("#drive-enable-checkbox");
 const driveOptions = $("#drive-options");
 const driveTypeSelect = $("#drive-type-select");
 const driveAmountSlider = $("#drive-amount-slider");
+const driveAmountNumber = $("#drive-amount-value");
 const crunchEnableCheckbox = $("#crunch-enable-checkbox");
 const crunchOptions = $("#crunch-options");
 const crunchBitsSlider = $("#crunch-bits-slider");
+const crunchBitsNumber = $("#crunch-bits-value");
 const crunchRateSlider = $("#crunch-rate-slider");
+const crunchRateNumber = $("#crunch-rate-value");
+const oneshotProcessingCheckbox = $("#oneshot-processing-checkbox");
+const keepCleanCopyCheckbox = $("#keep-clean-copy-checkbox");
 const previewBtn = $("#preview-btn");
 const previewStatus = $("#preview-status");
 const previewAudio = $("#preview-audio");
@@ -504,6 +524,31 @@ function updateNamingPreview() {
   namingPreviewEl.textContent = `${folderName}/  ->  ${sampleNames.join(", ")}`;
 }
 
+/**
+ * Pairs a <input type="range"> with a same-scale <input type="number"> so a setting is always
+ * both draggable AND typable - dragging live-updates the number as you go, typing a value commits
+ * (on blur or Enter, i.e. a "change" event) clamped to the slider's min/max and rounded to its
+ * step, and either path calls the same onValue(value) so each setting only needs one update
+ * function regardless of which control the user actually used.
+ */
+function bindSliderNumber(slider, number, onValue) {
+  const min = Number(slider.min);
+  const max = Number(slider.max);
+  const step = Number(slider.step) || 1;
+  slider.addEventListener("input", () => {
+    number.value = slider.value;
+    onValue(Number(slider.value));
+  });
+  number.addEventListener("change", () => {
+    let v = Number(number.value);
+    if (!Number.isFinite(v)) v = Number(slider.value);
+    v = Math.min(max, Math.max(min, Math.round(v / step) * step));
+    number.value = String(v);
+    slider.value = String(v);
+    onValue(v);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Time-stretch
 // ---------------------------------------------------------------------------
@@ -523,14 +568,12 @@ timestretchModeSelect.addEventListener("change", () => {
   updateTimestretchModeVisibility();
   saveSettings();
 });
-timestretchTargetBpmInput.addEventListener("input", () => {
-  timestretchSettings.targetBpm = parseInt(timestretchTargetBpmInput.value, 10);
-  $("#timestretch-target-bpm-value").textContent = `${timestretchTargetBpmInput.value} BPM`;
+bindSliderNumber(timestretchTargetBpmInput, timestretchTargetBpmNumber, (v) => {
+  timestretchSettings.targetBpm = v;
   saveSettings();
 });
-timestretchRatioInput.addEventListener("input", () => {
-  timestretchSettings.ratio = parseInt(timestretchRatioInput.value, 10) / 100;
-  $("#timestretch-ratio-value").textContent = `${timestretchRatioInput.value}%`;
+bindSliderNumber(timestretchRatioInput, timestretchRatioNumber, (v) => {
+  timestretchSettings.ratio = v / 100;
   saveSettings();
 });
 timestretchCharacterSelect.addEventListener("change", () => {
@@ -577,14 +620,12 @@ outputstageModeSelect.addEventListener("change", () => {
   outputStageSettings.mode = outputstageModeSelect.value;
   saveSettings();
 });
-outputstageMixSlider.addEventListener("input", () => {
-  outputStageSettings.mixPct = parseInt(outputstageMixSlider.value, 10);
-  $("#outputstage-mix-value").textContent = `${outputstageMixSlider.value}%`;
+bindSliderNumber(outputstageMixSlider, outputstageMixNumber, (v) => {
+  outputStageSettings.mixPct = v;
   saveSettings();
 });
-outputstageIntensitySlider.addEventListener("input", () => {
-  outputStageSettings.intensityPct = parseInt(outputstageIntensitySlider.value, 10);
-  $("#outputstage-intensity-value").textContent = `${outputstageIntensitySlider.value}%`;
+bindSliderNumber(outputstageIntensitySlider, outputstageIntensityNumber, (v) => {
+  outputStageSettings.intensityPct = v;
   saveSettings();
 });
 
@@ -597,9 +638,8 @@ driveTypeSelect.addEventListener("change", () => {
   driveSettings.type = driveTypeSelect.value;
   saveSettings();
 });
-driveAmountSlider.addEventListener("input", () => {
-  driveSettings.amountPct = parseInt(driveAmountSlider.value, 10);
-  $("#drive-amount-value").textContent = `${driveAmountSlider.value}%`;
+bindSliderNumber(driveAmountSlider, driveAmountNumber, (v) => {
+  driveSettings.amountPct = v;
   saveSettings();
 });
 
@@ -608,14 +648,20 @@ crunchEnableCheckbox.addEventListener("change", () => {
   crunchOptions.hidden = !crunchSettings.enabled;
   saveSettings();
 });
-crunchBitsSlider.addEventListener("input", () => {
-  crunchSettings.bits = parseInt(crunchBitsSlider.value, 10);
-  $("#crunch-bits-value").textContent = `${crunchBitsSlider.value}-bit`;
+bindSliderNumber(crunchBitsSlider, crunchBitsNumber, (v) => {
+  crunchSettings.bits = v;
   saveSettings();
 });
-crunchRateSlider.addEventListener("input", () => {
-  crunchSettings.rateDivide = parseInt(crunchRateSlider.value, 10);
-  $("#crunch-rate-value").textContent = `${crunchRateSlider.value}x`;
+bindSliderNumber(crunchRateSlider, crunchRateNumber, (v) => {
+  crunchSettings.rateDivide = v;
+  saveSettings();
+});
+oneshotProcessingCheckbox.addEventListener("change", () => {
+  applyProcessingToOneShots = oneshotProcessingCheckbox.checked;
+  saveSettings();
+});
+keepCleanCopyCheckbox.addEventListener("change", () => {
+  keepUnprocessedCopy = keepCleanCopyCheckbox.checked;
   saveSettings();
 });
 
@@ -657,6 +703,8 @@ function saveSettings() {
         outputStage: outputStageSettings,
         drive: driveSettings,
         crunch: crunchSettings,
+        applyProcessingToOneShots,
+        keepUnprocessedCopy,
         splitSubfolders: splitSubfoldersCheckbox.checked,
       })
     );
@@ -714,6 +762,48 @@ themeSwitcherBtns.forEach((btn) => {
   btn.addEventListener("click", () => applyTheme(btn.dataset.themeChoice));
 });
 
+// ---------------------------------------------------------------------------
+// Simple / Advanced mode - a view-only toggle (Simple hides everything except Mode, Source,
+// Process and Results via the .advanced-only CSS class), not a separate settings profile: the
+// underlying settings (naming, detection params, time-stretch, lo-fi, ...) keep whatever they
+// were, Simple mode just stops showing the knobs for them. Persisted the same way as the theme.
+// ---------------------------------------------------------------------------
+
+const UI_MODE_STORAGE_KEY = "good-bits-ui-mode-v1";
+const UI_MODES = ["simple", "advanced"];
+const UI_MODE_HINTS = {
+  simple: "Drop a folder or file below and it processes immediately with sensible defaults - switch to Advanced for full control over naming, detection, time-stretch and lo-fi.",
+  advanced: "Every option is available below: output naming, detection parameters, time-stretch and lo-fi processing.",
+};
+
+function applyUiMode(uiMode, { persist = true } = {}) {
+  const safeMode = UI_MODES.includes(uiMode) ? uiMode : "simple";
+  document.documentElement.setAttribute("data-ui-mode", safeMode);
+  uiModeSwitcherBtns.forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.uiModeChoice === safeMode);
+  });
+  uiModeHint.textContent = UI_MODE_HINTS[safeMode];
+  if (persist) {
+    try {
+      localStorage.setItem(UI_MODE_STORAGE_KEY, safeMode);
+    } catch (_) {
+      /* best-effort only */
+    }
+  }
+}
+
+function loadUiMode() {
+  try {
+    return localStorage.getItem(UI_MODE_STORAGE_KEY) || "simple";
+  } catch (_) {
+    return "simple";
+  }
+}
+
+uiModeSwitcherBtns.forEach((btn) => {
+  btn.addEventListener("click", () => applyUiMode(btn.dataset.uiModeChoice));
+});
+
 /** Apply a saved settings blob to state + the DOM controls, before the first render. */
 function applySettings(saved) {
   if (!saved) return;
@@ -751,10 +841,8 @@ function applySettings(saved) {
   if (saved.exportSettings) {
     Object.assign(exportSettings, saved.exportSettings);
     bitDepthSelect.value = String(exportSettings.bitDepth);
-    fadeMsSlider.value = String(exportSettings.fadeMs);
-    $("#fade-ms-value").textContent = `${exportSettings.fadeMs}ms`;
-    zcMsSlider.value = String(exportSettings.zcSearchMs);
-    $("#zc-ms-value").textContent = `${exportSettings.zcSearchMs}ms`;
+    fadeMsSlider.value = fadeMsNumber.value = String(exportSettings.fadeMs);
+    zcMsSlider.value = zcMsNumber.value = String(exportSettings.zcSearchMs);
   }
   if (saved.detectSettings) {
     Object.assign(detectSettings, saved.detectSettings);
@@ -769,10 +857,8 @@ function applySettings(saved) {
     timestretchEnableCheckbox.checked = timestretchSettings.enabled;
     timestretchOptions.hidden = !timestretchSettings.enabled;
     timestretchModeSelect.value = timestretchSettings.mode;
-    timestretchTargetBpmInput.value = String(timestretchSettings.targetBpm);
-    $("#timestretch-target-bpm-value").textContent = `${timestretchSettings.targetBpm} BPM`;
-    timestretchRatioInput.value = String(Math.round(timestretchSettings.ratio * 100));
-    $("#timestretch-ratio-value").textContent = `${Math.round(timestretchSettings.ratio * 100)}%`;
+    timestretchTargetBpmInput.value = timestretchTargetBpmNumber.value = String(timestretchSettings.targetBpm);
+    timestretchRatioInput.value = timestretchRatioNumber.value = String(Math.round(timestretchSettings.ratio * 100));
     timestretchCharacterSelect.value = timestretchSettings.character;
     updateTimestretchModeVisibility();
   }
@@ -781,27 +867,30 @@ function applySettings(saved) {
     outputstageEnableCheckbox.checked = outputStageSettings.enabled;
     outputstageOptions.hidden = !outputStageSettings.enabled;
     outputstageModeSelect.value = outputStageSettings.mode;
-    outputstageMixSlider.value = String(outputStageSettings.mixPct);
-    $("#outputstage-mix-value").textContent = `${outputStageSettings.mixPct}%`;
-    outputstageIntensitySlider.value = String(outputStageSettings.intensityPct);
-    $("#outputstage-intensity-value").textContent = `${outputStageSettings.intensityPct}%`;
+    outputstageMixSlider.value = outputstageMixNumber.value = String(outputStageSettings.mixPct);
+    outputstageIntensitySlider.value = outputstageIntensityNumber.value = String(outputStageSettings.intensityPct);
   }
   if (saved.drive) {
     Object.assign(driveSettings, saved.drive);
     driveEnableCheckbox.checked = driveSettings.enabled;
     driveOptions.hidden = !driveSettings.enabled;
     driveTypeSelect.value = driveSettings.type;
-    driveAmountSlider.value = String(driveSettings.amountPct);
-    $("#drive-amount-value").textContent = `${driveSettings.amountPct}%`;
+    driveAmountSlider.value = driveAmountNumber.value = String(driveSettings.amountPct);
   }
   if (saved.crunch) {
     Object.assign(crunchSettings, saved.crunch);
     crunchEnableCheckbox.checked = crunchSettings.enabled;
     crunchOptions.hidden = !crunchSettings.enabled;
-    crunchBitsSlider.value = String(crunchSettings.bits);
-    $("#crunch-bits-value").textContent = `${crunchSettings.bits}-bit`;
-    crunchRateSlider.value = String(crunchSettings.rateDivide);
-    $("#crunch-rate-value").textContent = `${crunchSettings.rateDivide}x`;
+    crunchBitsSlider.value = crunchBitsNumber.value = String(crunchSettings.bits);
+    crunchRateSlider.value = crunchRateNumber.value = String(crunchSettings.rateDivide);
+  }
+  if (typeof saved.applyProcessingToOneShots === "boolean") {
+    applyProcessingToOneShots = saved.applyProcessingToOneShots;
+    oneshotProcessingCheckbox.checked = applyProcessingToOneShots;
+  }
+  if (typeof saved.keepUnprocessedCopy === "boolean") {
+    keepUnprocessedCopy = saved.keepUnprocessedCopy;
+    keepCleanCopyCheckbox.checked = keepUnprocessedCopy;
   }
   updateDrumOptionsVisibility();
 }
@@ -934,9 +1023,19 @@ function clearPendingReconnect(name) {
   if (idx >= 0) pendingReconnectFolders.splice(idx, 1);
 }
 
-async function addFolderFSA() {
-  const handle = await pickFolderFSA();
+/** providedHandle: when set (a folder dropped via drag-and-drop), skip the picker and use this
+ * handle directly, but first make sure it actually has readwrite permission - a handle obtained
+ * from a drop starts read-only in some browsers, unlike one from showDirectoryPicker(). */
+async function addFolderFSA(providedHandle) {
+  const handle = providedHandle || (await pickFolderFSA());
   if (!handle) return;
+  if (providedHandle) {
+    const ok = await ensureReadWritePermission(handle);
+    if (!ok) {
+      log(`Permission to write to "${handle.name}" was denied.`);
+      return;
+    }
+  }
 
   if (splitSubfoldersCheckbox.checked) {
     const children = await discoverImmediateSourceChildren(handle);
@@ -984,8 +1083,10 @@ legacyFolderInput.addEventListener("change", () => {
   updateProcessButton();
 });
 
-async function addIndividualFilesFSA() {
-  const handles = await pickFilesFSA();
+/** providedHandles: when set (files dropped via drag-and-drop), skip the picker and use these
+ * file handles directly - a dropped file's read permission is already implied by the drop itself. */
+async function addIndividualFilesFSA(providedHandles) {
+  const handles = providedHandles || (await pickFilesFSA());
   if (handles.length === 0) return;
 
   if (!looseDestinationHandle) {
@@ -1046,6 +1147,94 @@ addFilesBtn.addEventListener("click", async () => {
   } catch (err) {
     log(`Could not open the file picker: ${err.message || err}`);
     console.error(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Drag-and-drop: drop a folder or files anywhere on "2. Source folders & files" to add them,
+// same effect as clicking "+ Add Source Folder" / "+ Add Individual Files". Two paths depending
+// on what the browser can hand back from the drop itself: DataTransferItem.getAsFileSystemHandle()
+// (Chrome/Edge) gives real read-write-capable handles, so a dropped folder gets written straight
+// back into like any other FSA folder; everywhere else falls back to the older
+// webkitGetAsEntry() entry-walk, which only ever produces a ZIP-fallback (read-only) source - see
+// collectDroppedFolderLegacy in io-fs.js.
+// ---------------------------------------------------------------------------
+
+const folderDropZone = $("#folder-drop-zone");
+
+["dragenter", "dragover"].forEach((evtName) => {
+  folderDropZone.addEventListener(evtName, (ev) => {
+    if (!ev.dataTransfer || !Array.from(ev.dataTransfer.types || []).includes("Files")) return;
+    ev.preventDefault();
+    folderDropZone.classList.add("is-dragover");
+  });
+});
+["dragleave", "dragend"].forEach((evtName) => {
+  folderDropZone.addEventListener(evtName, (ev) => {
+    if (evtName === "dragleave" && ev.relatedTarget && folderDropZone.contains(ev.relatedTarget)) return;
+    folderDropZone.classList.remove("is-dragover");
+  });
+});
+
+folderDropZone.addEventListener("drop", async (ev) => {
+  if (!ev.dataTransfer) return;
+  ev.preventDefault();
+  folderDropZone.classList.remove("is-dragover");
+
+  const items = ev.dataTransfer.items;
+  if (!items || items.length === 0) return;
+
+  // Handles/entries must be grabbed synchronously from the live DataTransferItemList, before any
+  // await - it can be invalidated once the event handler yields.
+  const fsaHandlePromises = [];
+  const legacyEntries = [];
+  let anyFsaCapableItem = false;
+  for (const item of items) {
+    if (item.kind !== "file") continue;
+    if (FSA_SUPPORTED && typeof item.getAsFileSystemHandle === "function") {
+      anyFsaCapableItem = true;
+      fsaHandlePromises.push(item.getAsFileSystemHandle());
+    } else if (typeof item.webkitGetAsEntry === "function") {
+      const entry = item.webkitGetAsEntry();
+      if (entry) legacyEntries.push(entry);
+    }
+  }
+
+  try {
+    if (anyFsaCapableItem) {
+      const handles = (await Promise.all(fsaHandlePromises)).filter(Boolean);
+      for (const dir of handles.filter((h) => h.kind === "directory")) {
+        await addFolderFSA(dir);
+      }
+      const fileHandles = handles.filter((h) => h.kind === "file");
+      if (fileHandles.length > 0) await addIndividualFilesFSA(fileHandles);
+    } else if (legacyEntries.length > 0) {
+      for (const dirEntry of legacyEntries.filter((e) => e.isDirectory)) {
+        const groups = await collectDroppedFolderLegacy(dirEntry, { splitSubfolders: splitSubfoldersCheckbox.checked });
+        for (const g of groups) {
+          sourceFolders.push({ id: nextFolderId++, name: g.rootName, kind: "legacy", files: g.files });
+        }
+      }
+      const fileEntries = legacyEntries.filter((e) => e.isFile);
+      if (fileEntries.length > 0) {
+        const files = await Promise.all(fileEntries.map((e) => new Promise((resolve, reject) => e.file(resolve, reject))));
+        looseFileGroupCounter++;
+        const group = collectIndividualFilesLegacy(files, `Individual files ${looseFileGroupCounter}`);
+        sourceFolders.push({ id: nextFolderId++, name: group.rootName, kind: "legacy", isLoose: true, files: group.files });
+      }
+      renderFolderList();
+      updateProcessButton();
+    }
+  } catch (err) {
+    log(`Couldn't add the dropped item(s): ${err.message || err}`);
+    console.error(err);
+    return;
+  }
+
+  // Simple mode's whole pitch is "drop it and it's done" - a drop (as opposed to the Add
+  // buttons) commits to running right away, using whatever's currently in the batch queue.
+  if (document.documentElement.getAttribute("data-ui-mode") === "simple" && !processing && sourceFolders.length > 0) {
+    processBatch();
   }
 });
 
@@ -1288,7 +1477,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     log(`    created ${chopRows.length} chop(s)`);
 
     if (mode === "drums" && extractOneShots) {
-      const extracted = await extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, buffer.sampleRate, zipBatch);
+      const extracted = await extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, buffer.sampleRate, zipBatch, kt.bpm);
       oneShotRows = extracted.rows;
       oneShotMarkers = extracted.markers;
       log(`    extracted ${oneShotRows.length} one-shot hit(s)`);
@@ -1323,19 +1512,26 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
  * auto-detected pass and by the manual chop editor's "Save & re-export".
  */
 async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, detectedBpm }) {
-  if (folder.kind === "fsa") {
-    await clearOldChopsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
-  }
-
+  const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
   const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
   const fadeOutSamples = fadeInSamples;
   const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
   const stretchRatio = resolveStretchRatio(detectedBpm);
+  const processingActive = stretchRatio !== 1 || lofiActive();
+  const wantCleanCopy = keepUnprocessedCopy && processingActive;
+
+  if (folder.kind === "fsa") {
+    await clearOldChopsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
+    // Cleared unconditionally (same idempotent-rerun logic as above) so a "chops clean/" left
+    // behind from a previous run with the toggle on doesn't linger once it's turned off.
+    await clearOldNumberedFilesFSA(folder.handle, "chops clean", fileInfo.relativeDir, taggedStem);
+  }
 
   const sortedRegions = [...regions].sort((a, b) => a[0] - b[0]);
   // Snap boundaries first (cheap, main-thread) so the worker only ever sees the heavy part:
   // WSOLA stretch, the lo-fi chain, fades, and WAV encoding for each already-sliced region.
   const regionDefs = [];
+  const cleanBlobs = wantCleanCopy ? [] : null;
   for (const [s, e] of sortedRegions) {
     let startSample = Math.max(0, Math.round(s * buffer.sampleRate));
     let endSample = Math.min(mono.length, Math.round(e * buffer.sampleRate));
@@ -1344,7 +1540,15 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
       endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
     }
     if (endSample <= startSample) continue;
+    // sliceChannels always allocates fresh buffers, so slicing the same region twice (once for
+    // the worker, which may transfer/detach its copy, once for the untouched "clean" copy here)
+    // never lets the two alias each other.
     regionDefs.push({ startSample, endSample, channels: sliceChannels(channels, startSample, endSample) });
+    if (wantCleanCopy) {
+      const rawSliced = sliceChannels(channels, startSample, endSample);
+      applyFades(rawSliced, fadeInSamples, fadeOutSamples);
+      cleanBlobs.push(encodeWav(rawSliced, buffer.sampleRate, exportSettings.bitDepth));
+    }
   }
 
   const heavyResults =
@@ -1366,7 +1570,10 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
     const { startSample, endSample } = regionDefs[i];
     const { blob, seconds } = heavyResults[i];
     const fileName = buildChopFileName(stem, tag, i + 1);
-    await writeOutput(folder, "chops", `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`, fileName, blob, zipBatch);
+    await writeOutput(folder, "chops", relPath, fileName, blob, zipBatch);
+    if (wantCleanCopy) {
+      await writeOutput(folder, "chops clean", relPath, fileName, cleanBlobs[i], zipBatch);
+    }
     chopRows.push({ fileName, blob, seconds });
     chopMarkers.push([startSample / buffer.sampleRate, endSample / buffer.sampleRate]);
   }
@@ -1444,11 +1651,19 @@ function detectOneShotRegions(mono, sampleRate) {
  * rough sort, not something reliable enough to bake into a filename. Shared by the initial
  * auto-detected pass and by the manual one-shot editor's "Save & re-export".
  */
-async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch }) {
+async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch, detectedBpm }) {
   if (regions.length === 0) return { rows: [], markers: [] };
+
+  const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
+  // One-shots are raw by default (untouched hits for a sampler) - the stretch/lo-fi chain only
+  // touches them when the "also apply to one-shots" scope toggle is on.
+  const stretchRatio = applyProcessingToOneShots ? resolveStretchRatio(detectedBpm) : 1;
+  const processingActive = applyProcessingToOneShots && (stretchRatio !== 1 || lofiActive());
+  const wantCleanCopy = keepUnprocessedCopy && processingActive;
 
   if (folder.kind === "fsa") {
     await clearOldOneShotsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
+    await clearOldNumberedFilesFSA(folder.handle, "one shots clean", fileInfo.relativeDir, taggedStem);
   }
 
   const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * sampleRate);
@@ -1456,7 +1671,9 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
   const sortedRegions = [...regions].sort((a, b) => a[0] - b[0]);
   const rows = [];
   const markers = [];
-  let made = 0;
+  const regionDefs = [];
+  const cleanBlobs = wantCleanCopy ? [] : null;
+
   for (const [s, e] of sortedRegions) {
     let startSample = Math.max(0, Math.round(s * sampleRate));
     let endSample = Math.min(mono.length, Math.round(e * sampleRate));
@@ -1465,35 +1682,59 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
       endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
     }
     if (endSample <= startSample) continue;
-    made++;
+    regionDefs.push({ startSample, endSample, channels: sliceChannels(channels, startSample, endSample) });
+    if (wantCleanCopy) {
+      const rawSliced = sliceChannels(channels, startSample, endSample);
+      applyFades(rawSliced, 0, fadeOutSamples);
+      cleanBlobs.push(encodeWav(rawSliced, sampleRate, exportSettings.bitDepth));
+    }
+  }
 
-    const sliced = sliceChannels(channels, startSample, endSample);
-    applyFades(sliced, 0, fadeOutSamples);
-    const blob = encodeWav(sliced, sampleRate, exportSettings.bitDepth);
-    const fileName = `${String(made).padStart(2, "0")}.wav`;
-    await writeOutput(
-      folder,
-      "one shots",
-      `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`,
-      fileName,
-      blob,
-      zipBatch
-    );
-    rows.push({ fileName, blob, seconds: (endSample - startSample) / sampleRate });
+  let heavyResults;
+  if (applyProcessingToOneShots && regionDefs.length > 0) {
+    heavyResults = await processRegionsHeavy({
+      sampleRate,
+      bitDepth: exportSettings.bitDepth,
+      fadeInSamples: 0,
+      fadeOutSamples,
+      stretchRatio,
+      character: timestretchSettings.character,
+      regions: regionDefs,
+    });
+  } else {
+    // Not processing one-shots this run: skip the worker round-trip and just fade+encode each
+    // slice directly - regionDefs' channels were never transferred anywhere, so they're safe to
+    // mutate here.
+    heavyResults = regionDefs.map(({ channels: regionChannels, startSample, endSample }) => {
+      applyFades(regionChannels, 0, fadeOutSamples);
+      const blob = encodeWav(regionChannels, sampleRate, exportSettings.bitDepth);
+      return { blob, seconds: (endSample - startSample) / sampleRate };
+    });
+  }
+
+  for (let i = 0; i < regionDefs.length; i++) {
+    const { startSample, endSample } = regionDefs[i];
+    const { blob, seconds } = heavyResults[i];
+    const fileName = `${String(i + 1).padStart(2, "0")}.wav`;
+    await writeOutput(folder, "one shots", relPath, fileName, blob, zipBatch);
+    if (wantCleanCopy) {
+      await writeOutput(folder, "one shots clean", relPath, fileName, cleanBlobs[i], zipBatch);
+    }
+    rows.push({ fileName, blob, seconds });
     markers.push([startSample / sampleRate, endSample / sampleRate]);
   }
   return { rows, markers };
 }
 
 /** Finds, dedupes and writes one-shot hits for a drum-mode source file's initial auto pass. Returns {rows, markers}. */
-async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, sampleRate, zipBatch) {
+async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, sampleRate, zipBatch, detectedBpm) {
   const regions = detectOneShotRegions(mono, sampleRate);
-  return writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch });
+  return writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch, detectedBpm });
 }
 
 /** Re-decodes a source file and re-exports its one-shots from a manually-edited region list. */
 async function reExportOneShots(editContext, editedRegions) {
-  const { folder, fileInfo, taggedStem } = editContext;
+  const { folder, fileInfo, taggedStem, detectedBpm } = editContext;
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
@@ -1509,6 +1750,7 @@ async function reExportOneShots(editContext, editedRegions) {
     mono,
     sampleRate: buffer.sampleRate,
     zipBatch,
+    detectedBpm,
   });
 
   if (zipBatch) {
@@ -1770,12 +2012,61 @@ function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) 
     fitBtn.disabled = zoomOutBtn.disabled;
   }
 
+  // Lazily-created shared AudioContext for auditioning a region's current edited boundaries
+  // straight from the in-memory mono downmix - no re-export/file-write needed, so it stays in
+  // sync with drags/adds/removes as you make them. Mono only (this editor never has the full
+  // stereo buffer around), which is plenty for judging a cut point.
+  let audioCtx = null;
+  let currentSource = null;
+
+  function stopPreview() {
+    if (currentSource) {
+      try {
+        currentSource.stop();
+      } catch (_) {
+        /* already stopped */
+      }
+      currentSource = null;
+    }
+  }
+
+  function playRegionPreview(r, playBtn) {
+    if (!mono || !sampleRate) return;
+    stopPreview();
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    } catch (_) {
+      return; // no Web Audio support - button silently does nothing rather than throwing
+    }
+    const startSample = Math.max(0, Math.round(r.s * sampleRate));
+    const endSample = Math.min(mono.length, Math.round(r.e * sampleRate));
+    if (endSample <= startSample) return;
+    const buffer = audioCtx.createBuffer(1, endSample - startSample, sampleRate);
+    buffer.getChannelData(0).set(mono.subarray(startSample, endSample));
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtx.destination);
+    playBtn.classList.add("is-playing");
+    source.onended = () => {
+      playBtn.classList.remove("is-playing");
+      if (currentSource === source) currentSource = null;
+    };
+    source.start();
+    currentSource = source;
+  }
+
   /** Rebuilds the row of small "start-end [x]" chips under the canvas from the current `regions`. */
   function renderRegionList() {
     regionList.innerHTML = "";
     regions.forEach((r, idx) => {
       const chip = document.createElement("span");
       chip.className = "editable-waveform-region-chip";
+      const playBtn = document.createElement("button");
+      playBtn.type = "button";
+      playBtn.className = "editable-waveform-region-play";
+      playBtn.textContent = "▶";
+      playBtn.title = "Preview this region";
+      playBtn.addEventListener("click", () => playRegionPreview(r, playBtn));
       const label = document.createElement("span");
       label.textContent = `${idx + 1}: ${formatEditorTime(r.s)} to ${formatEditorTime(r.e)}`;
       const removeBtn = document.createElement("button");
@@ -1783,6 +2074,7 @@ function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) 
       removeBtn.textContent = "×";
       removeBtn.title = "Remove this region";
       removeBtn.addEventListener("click", () => removeRegionAt(idx));
+      chip.appendChild(playBtn);
       chip.appendChild(label);
       chip.appendChild(removeBtn);
       regionList.appendChild(chip);
@@ -1904,7 +2196,10 @@ function createEditableWaveform({ mono, sampleRate, duration, initialRegions }) 
   return {
     el: wrap,
     getRegions: () => regions.map((r) => [r.s, r.e]),
-    destroy: () => window.removeEventListener("resize", redraw),
+    destroy: () => {
+      stopPreview();
+      window.removeEventListener("resize", redraw);
+    },
   };
 }
 
@@ -2261,14 +2556,12 @@ bitDepthSelect.addEventListener("change", () => {
   exportSettings.bitDepth = parseInt(bitDepthSelect.value, 10);
   saveSettings();
 });
-fadeMsSlider.addEventListener("input", () => {
-  exportSettings.fadeMs = parseFloat(fadeMsSlider.value);
-  $("#fade-ms-value").textContent = `${fadeMsSlider.value}ms`;
+bindSliderNumber(fadeMsSlider, fadeMsNumber, (v) => {
+  exportSettings.fadeMs = v;
   saveSettings();
 });
-zcMsSlider.addEventListener("input", () => {
-  exportSettings.zcSearchMs = parseFloat(zcMsSlider.value);
-  $("#zc-ms-value").textContent = `${zcMsSlider.value}ms`;
+bindSliderNumber(zcMsSlider, zcMsNumber, (v) => {
+  exportSettings.zcSearchMs = v;
   saveSettings();
 });
 detectKeyCheckbox.addEventListener("change", () => {
@@ -2288,6 +2581,7 @@ splitSubfoldersCheckbox.addEventListener("change", saveSettings);
 function init() {
   versionBadge.textContent = `v${APP_VERSION}`;
   applyTheme(loadTheme(), { persist: false });
+  applyUiMode(loadUiMode(), { persist: false });
   applySettings(loadSettings());
   updateNamingPreview(); // outside applySettings so it also runs for first-time visitors with nothing saved yet
 
