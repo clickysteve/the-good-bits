@@ -123,8 +123,6 @@ let applyProcessingToOneShots = false; // also run the stretch/lo-fi chain on on
 let keepUnprocessedCopy = false; // additionally write a raw, unprocessed copy of anything processed
 
 const SETTINGS_STORAGE_KEY = "good-bits-settings-v1";
-const THEME_STORAGE_KEY = "good-bits-theme-v1";
-const THEMES = ["classic", "terminal", "console"];
 
 // Reset at the start of every batch; "continue"/"skip" once the user checks "remember for
 // this batch" in the no-tempo-detected confirm dialog, so they aren't asked file after file.
@@ -190,9 +188,7 @@ const detectKeyCheckbox = $("#detect-key-checkbox");
 const detectTempoCheckbox = $("#detect-tempo-checkbox");
 const essentiaStatus = $("#essentia-status");
 const versionBadge = $("#version-badge");
-const themeSwitcherBtns = document.querySelectorAll("#theme-switcher .theme-switcher-btn");
-const uiModeSwitcherBtns = document.querySelectorAll("#ui-mode-switcher .theme-switcher-btn");
-const uiModeHint = $("#ui-mode-hint");
+const uiModeSwitcherBtns = document.querySelectorAll("#ui-mode-switcher .seg-btn");
 const drumOptions = $("#drum-options");
 const drumBarsSelect = $("#drum-bars-select");
 const oneShotsCheckbox = $("#one-shots-checkbox");
@@ -723,58 +719,16 @@ function loadSettings() {
 }
 
 // ---------------------------------------------------------------------------
-// UI theme switcher (Classic / Terminal / Console) - a cosmetic skin only,
-// swaps CSS custom properties via [data-theme] on <html>. Canvas-drawn
-// waveforms read their colors from those same properties (see themeColor()
-// and registerThemeRepaint() below), so switching themes recolors already-
-// rendered results too, not just future ones.
-// ---------------------------------------------------------------------------
-
-function applyTheme(theme, { persist = true } = {}) {
-  const safeTheme = THEMES.includes(theme) ? theme : "classic";
-  if (safeTheme === "classic") {
-    document.documentElement.removeAttribute("data-theme");
-  } else {
-    document.documentElement.setAttribute("data-theme", safeTheme);
-  }
-  themeSwitcherBtns.forEach((btn) => {
-    btn.classList.toggle("is-active", btn.dataset.themeChoice === safeTheme);
-  });
-  if (persist) {
-    try {
-      localStorage.setItem(THEME_STORAGE_KEY, safeTheme);
-    } catch (_) {
-      /* best-effort only */
-    }
-  }
-  repaintForTheme();
-}
-
-function loadTheme() {
-  try {
-    return localStorage.getItem(THEME_STORAGE_KEY) || "classic";
-  } catch (_) {
-    return "classic";
-  }
-}
-
-themeSwitcherBtns.forEach((btn) => {
-  btn.addEventListener("click", () => applyTheme(btn.dataset.themeChoice));
-});
-
-// ---------------------------------------------------------------------------
-// Simple / Advanced mode - a view-only toggle (Simple hides everything except Mode, Source,
-// Process and Results via the .advanced-only CSS class), not a separate settings profile: the
-// underlying settings (naming, detection params, time-stretch, lo-fi, ...) keep whatever they
-// were, Simple mode just stops showing the knobs for them. Persisted the same way as the theme.
+// Simple / Advanced density - one layout, two densities. Both share the entire DOM: Simple
+// unmounts the .advanced-only control modules and renders each file as a full card, Advanced
+// mounts the modules and collapses those same cards into table rows. It is a view setting, not
+// a settings profile - everything configured in Advanced keeps its value in Simple, the knobs
+// just stop being shown. Canvas-drawn waveforms don't reflow for free when the row geometry
+// changes, so registered canvases are repainted after every switch.
 // ---------------------------------------------------------------------------
 
 const UI_MODE_STORAGE_KEY = "good-bits-ui-mode-v1";
 const UI_MODES = ["simple", "advanced"];
-const UI_MODE_HINTS = {
-  simple: "Drop a folder or file below and it processes immediately with sensible defaults - switch to Advanced for full control over naming, detection, time-stretch and lo-fi.",
-  advanced: "Every option is available below: output naming, detection parameters, time-stretch and lo-fi processing.",
-};
 
 function applyUiMode(uiMode, { persist = true } = {}) {
   const safeMode = UI_MODES.includes(uiMode) ? uiMode : "simple";
@@ -782,7 +736,6 @@ function applyUiMode(uiMode, { persist = true } = {}) {
   uiModeSwitcherBtns.forEach((btn) => {
     btn.classList.toggle("is-active", btn.dataset.uiModeChoice === safeMode);
   });
-  uiModeHint.textContent = UI_MODE_HINTS[safeMode];
   if (persist) {
     try {
       localStorage.setItem(UI_MODE_STORAGE_KEY, safeMode);
@@ -790,6 +743,9 @@ function applyUiMode(uiMode, { persist = true } = {}) {
       /* best-effort only */
     }
   }
+  // Row geometry differs between the two densities, so anything canvas-drawn needs redrawing
+  // at its new width. Deferred a frame so layout has settled before we measure.
+  requestAnimationFrame(repaintForTheme);
 }
 
 function loadUiMode() {
@@ -1794,15 +1750,16 @@ function renderChopList(chopRows) {
   return list;
 }
 
-/** Reads a CSS custom property's current value (theme-dependent), falling back if unset. */
+/** Reads a CSS custom property's current value, falling back if unset. */
 function themeColor(varName, fallback) {
   const v = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
   return v || fallback;
 }
 
-// Waveforms are canvas-drawn, so switching themes doesn't recolor them for free the way CSS-styled
-// elements do - each drawn canvas registers a small repaint closure here, and applyTheme() replays
-// them all. Entries for canvases no longer in the document are dropped the next time it runs.
+// Waveforms are canvas-drawn, so they don't reflow or recolor for free the way CSS-styled elements
+// do - each drawn canvas registers a small repaint closure here, and applyUiMode() replays them all
+// after a density switch changes their width. Entries for canvases no longer in the document are
+// dropped the next time it runs.
 const themeRepaints = [];
 function registerThemeRepaint(canvas, run) {
   themeRepaints.push({ canvas, run });
@@ -2580,7 +2537,6 @@ splitSubfoldersCheckbox.addEventListener("change", saveSettings);
 
 function init() {
   versionBadge.textContent = `v${APP_VERSION}`;
-  applyTheme(loadTheme(), { persist: false });
   applyUiMode(loadUiMode(), { persist: false });
   applySettings(loadSettings());
   updateNamingPreview(); // outside applySettings so it also runs for first-time visitors with nothing saved yet

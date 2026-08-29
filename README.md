@@ -13,29 +13,35 @@ site on GitHub Pages.
 
 ## Features
 
-- **A choice of interface styles.** The three buttons top-right (Classic,
-  Terminal, Console) swap the whole page's look on the fly, restyling the
-  actual controls rather than just recoloring them: Classic is the default,
-  Terminal turns buttons and checkboxes into bracketed `[ ]` ASCII-style
-  text on a scanlined CRT-green screen, and Console goes full rack-hardware:
-  chunky red/blue buttons and toggle switches, rivets in every panel corner,
-  a lit LED next to each panel's label and on the selected mode card, an
-  engraved-plate title with an LCD-style version readout, knob-style dial
-  sliders, and a segmented LED meter for the progress bar - on a beige-grey
-  chassis with rack ears down each side once the window's wide enough for
-  them. Purely cosmetic (nothing about detection or export changes), and
-  your choice is remembered in this browser.
-- **Simple and Advanced modes.** The Simple/Advanced toggle under the title
-  controls how much of the page you see, not what's stored: Simple shows
-  just Mode, Source, and Process, and dropping a folder or file onto it
-  starts processing immediately with whatever settings are already saved
-  (or sensible defaults on a first visit). Advanced reveals everything -
-  output naming, detection parameters, time-stretch, lo-fi character,
-  processing scope - grouped into two stages, **Stage 1 · Chop/Extract**
-  and **Stage 2 · Stretch/Lo-fi**, so the "cut it up" decisions and the
-  "make it sound different" decisions read as separate concerns even
-  though one Process Batch click still runs both together. Switching
-  modes never resets a setting you've configured in Advanced.
+- **One screen, two densities.** The window is fixed: source material and
+  density along the top, every setting in a strip below that, your audio in
+  the middle, and Process pinned to the bottom. Only the middle scrolls, so
+  the controls and the Process button never scroll away from the waveforms
+  you're judging. The **Simple / Advanced** toggle changes how dense that
+  screen is, not what it can do:
+  - **Simple** hides the settings strip entirely, leaving the mode picker, a
+    full-height drop zone and your results as large cards. Drop a folder or
+    file and it starts processing immediately with whatever's saved, or
+    sensible defaults on a first visit.
+  - **Advanced** mounts the settings strip (naming, detection, export,
+    time-stretch, lo-fi, scope) and compresses those same result cards into
+    dense rows with chops laid out in columns, so a forty-file batch stays
+    scannable.
+
+  It is a view setting, not a settings profile: anything configured in
+  Advanced keeps its value in Simple, the knobs just stop being shown, and
+  the choice is remembered in this browser. Chop length and one-shot
+  extraction sit outside the toggle, in a strip that appears whenever Drums
+  is selected, because they decide what actually comes out of a break.
+- **One palette, checked by the test suite.** There used to be three
+  interface themes. Two of them shipped body text below the readable
+  minimum without anyone noticing (Console's panel labels measured 2.55:1,
+  and even the default theme's were 3.34:1, against a 4.5:1 floor), because
+  maintaining three parallel skins meant none of them got audited. They're
+  gone, replaced by a single dark palette with a signal-red accent, and
+  `test/contrast.test.mjs` now fails the build if any text role drops under
+  4.5:1 against the surface it sits on. Note the accent buttons use
+  near-black labels rather than white: white on that red is only 3.32:1.
 - **Auto or manual detection settings.** Auto mode (on by default) just uses
   sensible defaults per mode, so you don't have to make any decisions to get
   started - flip it off if you want to hand-tune silence sensitivity, phrase
@@ -195,26 +201,23 @@ Then open the URL it prints (typically `http://localhost:8000`).
 
 ## Using it
 
-The **Simple / Advanced** toggle under the title decides how much of the
-page you see - it doesn't change what's saved. In **Simple**, all you get
-is Mode, Source, and Process: pick a mode, then drop a folder or file
-straight onto the page (or use the **+ Add** buttons) and it starts
-processing immediately with whatever's already saved, or sensible
-defaults on a first visit. Switch to **Advanced** for everything else:
-output naming, detection parameters, time-stretch, lo-fi character, and
-processing scope, laid out as two stages - **Stage 1 · Chop/Extract**
-(Mode, Source, naming, detection, export settings) and **Stage 2 ·
-Stretch/Lo-fi** (time-stretch, lo-fi character, processing scope) - as a
-way of keeping "how it gets cut up" and "how it gets made to sound
-different" visually separate, even though one **Process Batch** click
-still runs both.
+The **Simple / Advanced** toggle top-right decides how dense the screen is,
+not what the app can do. In **Simple** you get the mode picker, a
+full-height drop zone and your results: pick a mode, drop a folder or file
+anywhere on the page (or use **Add folder** / **Add files**) and it starts
+processing immediately with whatever's already saved, or sensible defaults
+on a first visit. Switch to **Advanced** and a settings strip appears
+below the header holding everything else - naming, detection parameters,
+export, time-stretch, lo-fi character and processing scope - while the
+result cards below compress into dense rows. Nothing you set in Advanced
+is lost when you go back to Simple.
 
-Choose a mode, then either **Add Source Folder** (repeatable, to build a
-multi-folder batch), **Add Individual Files** (pick one or more loose
-audio files), or drag a folder or audio files from your file manager and
-drop them anywhere in the Source panel. Auto mode is on by default, so you
-can go straight to **Process Batch** - untick it if you want to adjust the
-detection parameters first.
+Choose a mode, then either **Add folder** (repeatable, to build a
+multi-folder batch), **Add files** (pick one or more loose audio files),
+or drag a folder or audio files from your file manager and drop them
+anywhere on the page. Auto detection is on by default, so you can go
+straight to **Process Batch** - untick **Auto** in the Detection module if
+you want to adjust the parameters first.
 
 If a folder you add contains several session subfolders rather than audio
 files directly, tick **"Split into one batch per subfolder"** before
@@ -251,8 +254,8 @@ use the Zoom in/out/Fit buttons to work at finer detail, drag the
 waveform itself to pan around once zoomed in, and hit a region chip's
 **▶** to hear it before you commit. **Save & re-export** re-cuts just
 that file's chops or one-shots with your edits, without touching the
-other set. The optional **Time-stretch** and **Lo-fi character** panels
-(Advanced mode, Stage 2) both apply to every export in the batch, not
+other set. The optional **Time-stretch** and **Lo-fi character** modules
+(in the Advanced settings strip) both apply to every export in the batch, not
 per-file: turn time-stretch on, pick a mode (match a target tempo, or a
 fixed ratio) and a character, and it's baked into every chop as it's
 exported - including a manual re-export from the editor - plus a
@@ -413,13 +416,23 @@ repo's own (MIT) license.
 
 The core detection algorithms, the WAV/AIFF codec, and the folder/file
 grouping logic are pure functions with no browser dependencies, so they're
-unit-tested with plain Node:
+unit-tested with plain Node. `contrast.test.mjs` is the odd one out: it
+parses the palette straight out of `css/style.css` and asserts every text
+role against the surface it actually sits on, so a re-tint that drops a
+label under 4.5:1 fails here rather than shipping.
+
+```
+node --test test/*.test.mjs
+```
+
+or individually:
 
 ```
 node test/dsp.test.mjs
 node test/io-fs.test.mjs
 node test/timestretch.test.mjs
 node test/outputstage.test.mjs
+node test/contrast.test.mjs
 ```
 
 There are also a few optional browser-integration tests that exercise the
