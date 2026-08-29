@@ -208,40 +208,37 @@ code {
 
 /* ---------- control modules (Advanced only) ---------- */
 
-/* A grid, not CSS columns: multi-column under a max-height adds further
-   columns sideways instead of scrolling, which silently pushes modules off
-   the right edge. align-items:start (and no height on .mod) is what keeps
-   short modules from stretching to their row's tallest sibling. */
+/* Rail and workspace sit side by side and fill what's left between the header
+   and the action bar; each scrolls independently. */
+.body { flex: 1; min-height: 0; display: flex; }
+
+.workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+
+/* The settings rail.
+   This was a multi-column strip across the top, and it was wrong twice over: it
+   ate half the window height on a laptop, and a grid of variable-height modules
+   left ragged gaps while squeezing every slider into a ~230px column. A single
+   full-height column fixes both - sliders get real width, sections stack at
+   their natural height, and the stage keeps the whole window. */
 .controls {
   flex: none;
-  max-height: 50vh;
+  width: 288px;
   overflow-y: auto;
   overflow-x: hidden;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(238px, 1fr));
-  align-items: start;
   background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
 }
 
 .mod {
-  padding: 11px 14px 13px;
+  padding: 13px 16px 15px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
   min-width: 0;
   border-bottom: 1px solid var(--border-soft);
-  border-right: 1px solid var(--border-soft);
 }
 
-/* Inside the module strip a field puts its label beside its control rather
-   than above it. Stacked labels were costing ~20px per field and pushing the
-   whole strip past its height cap, which is what forced it to scroll. */
-.mod .field { flex-direction: row; align-items: center; gap: 9px; }
-.mod .field > label { flex: 0 0 92px; font-size: 11.5px; line-height: 1.3; }
-.mod .field > select,
-.mod .field > input[type="text"],
-.mod .field > .slider-row { flex: 1 1 auto; min-width: 0; }
+.mod:last-child { border-bottom: none; }
 
 .mod-h {
   font-family: var(--font-mono);
@@ -693,8 +690,8 @@ input[type="range"]::-moz-range-thumb {
 
 .actionbar-status:empty { display: none; }
 
-.preview-audio { height: 30px; max-width: 260px; flex: none; }
-.preview-audio[hidden] { display: none; }
+.result-oneshot-toggle { gap: 6px; align-items: center; cursor: pointer; }
+.result-oneshot-toggle input { margin: 0; }
 
 .progress-row { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 120px; }
 .progress-row[hidden] { display: none; }
@@ -804,10 +801,11 @@ input[type="range"]::-moz-range-thumb {
    whole page reverts to normal document flow and scrolls as one.
    =========================================================================== */
 
-@media (max-width: 780px) {
+@media (max-width: 900px) {
   .app { height: auto; min-height: 100vh; }
+  .body { flex-direction: column; }
   .stage { overflow: visible; }
-  .controls { max-height: none; overflow: visible; grid-template-columns: 1fr; }
+  .controls { width: auto; overflow: visible; border-right: none; border-bottom: 1px solid var(--border); }
   .topbar { height: auto; flex-wrap: wrap; padding: 10px 12px; gap: 10px; }
   .log-panel { height: 100px; }
   .actionbar { position: sticky; bottom: 0; }

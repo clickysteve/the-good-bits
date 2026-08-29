@@ -13,26 +13,39 @@ site on GitHub Pages.
 
 ## Features
 
+- **Preview before anything is written.** **Preview** runs the entire batch
+  and saves nothing: you get every waveform with its cut points marked, every
+  chop and one-shot with a player to audition, and the region editor to drag
+  boundaries around. **Export** is the only button that touches your disk.
+  So the loop is: drop a file, hit Export if you trust it, or hit Preview
+  first, adjust what you don't like, and Export when it looks right. Export
+  reuses the analysis Preview already did, so the second pass skips key,
+  tempo and onset detection entirely.
+- **Fix it before you commit to it.** In a preview, **Edit chops** or
+  **Edit one-shots** opens the waveform, and **Apply** updates that file's
+  chops in place without writing anything. Each file also gets an **export
+  one-shots** tickbox, so when the hit extraction returns junk on one
+  particular break you can drop just that file's one-shots and keep the rest
+  of the batch.
 - **One screen, two densities.** The window is fixed: source material and
-  density along the top, every setting in a strip below that, your audio in
-  the middle, and Process pinned to the bottom. Only the middle scrolls, so
-  the controls and the Process button never scroll away from the waveforms
-  you're judging. The **Simple / Advanced** toggle changes how dense that
-  screen is, not what it can do:
-  - **Simple** hides the settings strip entirely, leaving the mode picker, a
-    full-height drop zone and your results as large cards. Drop a folder or
-    file and it starts processing immediately with whatever's saved, or
-    sensible defaults on a first visit.
-  - **Advanced** mounts the settings strip (naming, detection, export,
-    time-stretch, lo-fi, scope) and compresses those same result cards into
-    dense rows with chops laid out in columns, so a forty-file batch stays
-    scannable.
+  density along the top, your audio in the middle, and Preview/Export pinned
+  to the bottom. Only the middle scrolls, so the controls and the buttons
+  never scroll away from the waveforms you're judging. The **Simple /
+  Advanced** toggle changes how dense that screen is:
+  - **Simple** is a clean pass. No settings rail, a full-height drop zone,
+    results as large cards, and output that is always the original tempo with
+    no colouration, whatever is configured in Advanced.
+  - **Advanced** adds a full-height settings rail down the left (naming,
+    detection, export, time-stretch, lo-fi, scope) and compresses those same
+    result cards into dense rows with chops laid out in columns, so a
+    forty-file batch stays scannable.
 
-  It is a view setting, not a settings profile: anything configured in
-  Advanced keeps its value in Simple, the knobs just stop being shown, and
-  the choice is remembered in this browser. Chop length and one-shot
-  extraction sit outside the toggle, in a strip that appears whenever Drums
-  is selected, because they decide what actually comes out of a break.
+  Simple deliberately bypasses the whole effects chain rather than resetting
+  it: a lo-fi setup you can no longer see shouldn't silently keep colouring
+  your output, but it also shouldn't be thrown away. Switch back to Advanced
+  and it is exactly as you left it. Chop length and one-shot extraction sit
+  outside the toggle, in a strip that appears whenever Drums is selected,
+  because they decide what actually comes out of a break.
 - **One palette, checked by the test suite.** There used to be three
   interface themes. Two of them shipped body text below the readable
   minimum without anyone noticing (Console's panel labels measured 2.55:1,
@@ -66,10 +79,10 @@ site on GitHub Pages.
   editing: drag the start/end handles to adjust cut points (they snap to
   the nearest zero-crossing when you let go, same as an export), scroll
   or use the zoom buttons to get in close, drag the waveform to pan once
-  you're zoomed in, then **Save & re-export** to re-cut just that file
-  with your adjustments. Every region chip below the waveform has a **▶**
+  you're zoomed in, then **Apply** to update that file with your
+  adjustments. Every region chip below the waveform has a **▶**
   button that plays that region back instantly from memory, so you can
-  check a boundary sounds right before committing to a re-export. Use
+  check a boundary sounds right before committing to it. Use
   **+ Add region** to drop in a new region (centered in the current view,
   zero-crossing snapped), or the **×** on a chip to delete that region
   entirely. Editing chops and one-shots are independent - saving one
@@ -153,14 +166,8 @@ site on GitHub Pages.
   in the results panel - no need to dig through Finder to hear what you got.
 - **A batch that survives one bad file.** If a single file fails to decode
   or analyze, it's logged and skipped; the rest of the batch keeps going.
-- **Preview before you commit to a full export.** The **▶ Preview current
-  settings** button (above Process Batch) decodes just the first queued
-  file, grabs a ~6-second excerpt from the middle, and runs it through
-  whatever time-stretch and/or lo-fi settings are currently enabled so you
-  can audition the sound before processing the whole batch - no files are
-  written to disk for a preview.
-- **Progress and cancel.** Process Batch shows a progress bar as it works
-  through the queue, and a **Cancel** button stops the batch after the file
+- **Progress and cancel.** Both Preview and Export show a progress bar as
+  they work through the queue, and a **Cancel** button stops after the file
   currently in flight finishes (mid-file cancellation isn't possible, but
   nothing further starts). The heavy per-chop work - time-stretch, the
   lo-fi chain, and WAV encoding - runs off the main thread in a background
@@ -201,23 +208,33 @@ Then open the URL it prints (typically `http://localhost:8000`).
 
 ## Using it
 
-The **Simple / Advanced** toggle top-right decides how dense the screen is,
-not what the app can do. In **Simple** you get the mode picker, a
-full-height drop zone and your results: pick a mode, drop a folder or file
-anywhere on the page (or use **Add folder** / **Add files**) and it starts
-processing immediately with whatever's already saved, or sensible defaults
-on a first visit. Switch to **Advanced** and a settings strip appears
-below the header holding everything else - naming, detection parameters,
-export, time-stretch, lo-fi character and processing scope - while the
-result cards below compress into dense rows. Nothing you set in Advanced
-is lost when you go back to Simple.
-
 Choose a mode, then either **Add folder** (repeatable, to build a
 multi-folder batch), **Add files** (pick one or more loose audio files),
 or drag a folder or audio files from your file manager and drop them
-anywhere on the page. Auto detection is on by default, so you can go
-straight to **Process Batch** - untick **Auto** in the Detection module if
-you want to adjust the parameters first.
+anywhere on the page.
+
+From there it's two buttons:
+
+- **Export** cuts the batch and writes it. If you trust the detection, this
+  is the whole workflow.
+- **Preview** does the same work and saves nothing. You get every waveform
+  with its cuts marked, a player for every chop and one-shot, and the region
+  editor. Drag boundaries, hit **Apply** to update that file, untick **export
+  one-shots** on any file whose hits came out badly, then hit **Export** when
+  you're happy. Export reuses what Preview already worked out, so it doesn't
+  redetect.
+
+Preview and Export both respect the current density. **Simple** is always a
+clean pass: original tempo, no colouration, whatever Advanced is set to.
+**Advanced** adds a settings rail down the left with everything else -
+naming, detection parameters, export, time-stretch, lo-fi character and
+processing scope - and compresses the result cards into dense rows. Nothing
+you set in Advanced is lost when you go back to Simple; it just stops being
+applied while you're there.
+
+Auto detection is on by default, so you can go straight to Export - untick
+**Auto** in the Detection section of the rail if you want to adjust the
+parameters first.
 
 If a folder you add contains several session subfolders rather than audio
 files directly, tick **"Split into one batch per subfolder"** before
@@ -252,10 +269,11 @@ open that set of boundaries on the waveform: drag a handle to move a cut
 point (it snaps to the nearest zero-crossing when released), scroll or
 use the Zoom in/out/Fit buttons to work at finer detail, drag the
 waveform itself to pan around once zoomed in, and hit a region chip's
-**▶** to hear it before you commit. **Save & re-export** re-cuts just
-that file's chops or one-shots with your edits, without touching the
-other set. The optional **Time-stretch** and **Lo-fi character** modules
-(in the Advanced settings strip) both apply to every export in the batch, not
+**▶** to hear it before you commit. **Apply** updates just that file's
+chops or one-shots with your edits, without touching the other set and
+without writing anything: Export is still what saves. The optional
+**Time-stretch** and **Lo-fi character** sections
+(in the Advanced rail) both apply to every export in the batch, not
 per-file: turn time-stretch on, pick a mode (match a target tempo, or a
 fixed ratio) and a character, and it's baked into every chop as it's
 exported - including a manual re-export from the editor - plus a

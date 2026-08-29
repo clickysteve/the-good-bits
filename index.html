@@ -70,8 +70,11 @@
     <p class="essentials-note">Bar length comes from the detected tempo, falling back to a fixed length if none is found.</p>
   </div>
 
-  <!-- Every remaining setting. Mounted only in Advanced; scrolls on its own so
-       the file list below never gets pushed off screen. -->
+  <div class="body">
+
+  <!-- Every remaining setting. Mounted only in Advanced, as a full-height rail down the side:
+       a single column means sliders get real width and sections stack at their natural height,
+       instead of the ragged multi-column strip that squeezed both. -->
   <div class="controls advanced-only">
 
     <section class="mod">
@@ -286,37 +289,41 @@
       <p class="mod-note">Raw copies go to <code>chops clean/</code> and <code>one shots clean/</code>. Roughly doubles export time.</p>
     </section>
 
-  </div>
-
-  <!-- The stage: your audio. Scrolls; everything above and below stays put. -->
-  <main class="stage" id="folder-drop-zone">
-    <p id="output-banner" class="banner"></p>
-
-    <div class="dropzone">
-      <div class="dropzone-copy">
-        <strong>Drop audio anywhere to add it</strong>
-        <span>folders and loose files both work</span>
-      </div>
-      <div class="dropzone-actions">
-        <button id="add-folder-btn" class="btn btn--primary">Add folder</button>
-        <button id="add-files-btn" class="btn">Add files</button>
-        <button id="clear-folders-btn" class="btn btn--ghost">Clear</button>
-      </div>
     </div>
 
-    <input id="legacy-folder-input" type="file" webkitdirectory directory multiple hidden />
-    <input id="legacy-files-input" type="file" multiple accept=".wav,.m4a,.aif,.aiff,.flac,.mp3" hidden />
+    <!-- The stage: your audio. Scrolls; the rail, header and action bar stay put. -->
+    <div class="workspace">
+      <main class="stage" id="folder-drop-zone">
+        <p id="output-banner" class="banner"></p>
 
-    <div id="folder-list" class="folder-list"></div>
-    <div id="results-panel" class="results-panel"></div>
-  </main>
+        <div class="dropzone">
+          <div class="dropzone-copy">
+            <strong>Drop audio anywhere to add it</strong>
+            <span>folders and loose files both work</span>
+          </div>
+          <div class="dropzone-actions">
+            <button id="add-folder-btn" class="btn btn--primary">Add folder</button>
+            <button id="add-files-btn" class="btn">Add files</button>
+            <button id="clear-folders-btn" class="btn btn--ghost">Clear</button>
+          </div>
+        </div>
 
-  <div id="log-panel" class="log-panel"></div>
+        <input id="legacy-folder-input" type="file" webkitdirectory directory multiple hidden />
+        <input id="legacy-files-input" type="file" multiple accept=".wav,.m4a,.aif,.aiff,.flac,.mp3" hidden />
 
+        <div id="folder-list" class="folder-list"></div>
+        <div id="results-panel" class="results-panel"></div>
+      </main>
+
+      <div id="log-panel" class="log-panel"></div>
+    </div>
+  </div>
+
+  <!-- Preview runs everything and saves nothing; Export is the only button that
+       writes. See processBatch() in app.js. -->
   <footer class="actionbar">
-    <audio id="preview-audio" class="preview-audio" controls hidden></audio>
-    <button id="preview-btn" class="btn btn--ghost" disabled>▶ Preview</button>
-    <button id="process-btn" class="btn btn--primary" disabled>Process Batch</button>
+    <button id="preview-btn" class="btn" disabled>Preview</button>
+    <button id="process-btn" class="btn btn--primary" disabled>Export</button>
     <button id="cancel-btn" class="btn btn--ghost" hidden>Cancel</button>
     <div id="progress-row" class="progress-row" hidden>
       <div class="progress-bar"><div id="progress-bar-fill" class="progress-bar-fill"></div></div>

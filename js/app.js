@@ -50,7 +50,54 @@ import { rememberFolder, listRememberedFolders, forgetFolder, forgetAllFolders }
 
 let mode = "phrases"; // 'phrases' | 'rhodes' | 'drums'
 let processing = false;
-let previewRunning = false;
+
+// Preview and Export are the same run with one difference: whether writeOutput() is allowed to
+// touch the disk. See writeOutput().
+let dryRun = false;
+
+/**
+ * What Preview worked out, so Export doesn't have to work it out again.
+ *
+ * Keyed per source file, holding the detected key/tempo and the chop and one-shot regions. Export
+ * still re-decodes the audio (cheap next to essentia, and holding every decoded buffer would blow
+ * up memory on a large batch) but skips key/tempo and onset detection entirely when the entry is
+ * still valid. The editor writes edited regions straight back in here, which is how an adjustment
+ * made during a preview survives through to the export.
+ */
+const analysisCache = new Map();
+
+function analysisKey(folder, fileInfo) {
+  return `${folder.id}::${fileInfo.relativeDir || ""}/${fileInfo.name}`;
+}
+
+/**
+ * Everything that would change what detection produces. Stored alongside each cache entry; when it
+ * no longer matches, the entry is stale and detection reruns. Deliberately does NOT include
+ * time-stretch, lo-fi or naming: those change how a chop is rendered or named, not where it is cut,
+ * so tweaking them and re-exporting can safely reuse the detected regions.
+ */
+function detectionSignature() {
+  return JSON.stringify({
+    mode,
+    drumBars,
+    chopIntoPieces,
+    extractOneShots,
+    detect: detectSettings,
+    params: activeParams()[mode],
+    zcSearchMs: exportSettings.zcSearchMs,
+  });
+}
+
+function cachedAnalysis(folder, fileInfo) {
+  const entry = analysisCache.get(analysisKey(folder, fileInfo));
+  if (!entry) return null;
+  return entry.signature === detectionSignature() ? entry : null;
+}
+
+/** Drops everything Preview worked out - the queue or a detection setting changed under it. */
+function invalidateAnalysis() {
+  analysisCache.clear();
+}
 let cancelRequested = false;
 let nextFolderId = 1;
 let looseFileGroupCounter = 0;
@@ -230,7 +277,6 @@ const oneshotProcessingCheckbox = $("#oneshot-processing-checkbox");
 const keepCleanCopyCheckbox = $("#keep-clean-copy-checkbox");
 const previewBtn = $("#preview-btn");
 const previewStatus = $("#preview-status");
-const previewAudio = $("#preview-audio");
 const cancelBtn = $("#cancel-btn");
 const progressRow = $("#progress-row");
 const progressBarFill = $("#progress-bar-fill");
@@ -577,8 +623,22 @@ timestretchCharacterSelect.addEventListener("change", () => {
   saveSettings();
 });
 
+/**
+ * Simple is a clean pass, always: original tempo, no output character, nothing coloured.
+ *
+ * It would be surprising for a density toggle to silently keep applying a lo-fi chain you
+ * configured in Advanced and can no longer see. So rather than resetting those settings (which
+ * would lose them), Simple bypasses the whole effects chain and Advanced restores it. Every
+ * effects decision funnels through here: stretch ratio, lo-fi enablement, and the settings
+ * snapshot handed to the worker.
+ */
+function effectsEnabled() {
+  return document.documentElement.getAttribute("data-ui-mode") === "advanced";
+}
+
 /** ratio to pass to wsolaStretchChannels for this file, or 1 (no-op) if stretching doesn't apply. */
 function resolveStretchRatio(detectedBpm) {
+  if (!effectsEnabled()) return 1;
   if (!timestretchSettings.enabled) return 1;
   if (timestretchSettings.mode === "fixed-ratio") return timestretchSettings.ratio;
   return detectedBpm ? ratioForTargetTempo(detectedBpm, timestretchSettings.targetBpm) : 1;
@@ -661,21 +721,33 @@ keepCleanCopyCheckbox.addEventListener("change", () => {
   saveSettings();
 });
 
-/** true if any lo-fi stage is switched on. */
+/** true if any lo-fi stage is switched on, and effects apply at all (see effectsEnabled). */
 function lofiActive() {
+  if (!effectsEnabled()) return false;
   return outputStageSettings.enabled || driveSettings.enabled || crunchSettings.enabled;
+}
+
+/**
+ * Plain snapshot of the current lo-fi settings, safe to structured-clone into a worker message.
+ * Forced to all-off when effects are bypassed - the worker only sees this snapshot, so gating
+ * lofiActive() alone would still let a stale "enabled" flag colour the audio in Simple.
+ */
+function lofiSettingsSnapshot() {
+  if (!effectsEnabled()) {
+    return {
+      outputStage: { ...outputStageSettings, enabled: false },
+      drive: { ...driveSettings, enabled: false },
+      crunch: { ...crunchSettings, enabled: false },
+    };
+  }
+  return { outputStage: { ...outputStageSettings }, drive: { ...driveSettings }, crunch: { ...crunchSettings } };
 }
 
 /** Runs the enabled lo-fi stages (current settings) over a set of channels - thin wrapper around
  * the pure, worker-shareable applyLofiChain in outputstage.js. Used by the main-thread fallback
- * path and by the Preview feature; the worker calls the pure version directly. */
+ * path; the worker calls the pure version directly with the same snapshot. */
 function applyLofiChain(channels, sampleRate) {
-  return applyLofiChainPure(channels, sampleRate, { outputStage: outputStageSettings, drive: driveSettings, crunch: crunchSettings });
-}
-
-/** Plain snapshot of the current lo-fi settings, safe to structured-clone into a worker message. */
-function lofiSettingsSnapshot() {
-  return { outputStage: { ...outputStageSettings }, drive: { ...driveSettings }, crunch: { ...crunchSettings } };
+  return applyLofiChainPure(channels, sampleRate, lofiSettingsSnapshot());
 }
 
 // ---------------------------------------------------------------------------
@@ -856,6 +928,7 @@ function applySettings(saved) {
 // ---------------------------------------------------------------------------
 
 function renderFolderList() {
+  invalidateAnalysis();
   folderList.innerHTML = "";
   if (sourceFolders.length === 0 && pendingReconnectFolders.length === 0) {
     const empty = document.createElement("div");
@@ -965,7 +1038,7 @@ function renderFolderList() {
 
 function updateProcessButton() {
   processBtn.disabled = processing || sourceFolders.length === 0;
-  previewBtn.disabled = processing || previewRunning || sourceFolders.length === 0;
+  previewBtn.disabled = processing || sourceFolders.length === 0;
   cancelBtn.hidden = !processing;
 }
 
@@ -1321,6 +1394,11 @@ function sliceChannels(channels, startSample, endSample) {
 }
 
 async function writeOutput(folder, subdir, relDir, fileName, blob, zipBatch) {
+  // Preview runs the entire pipeline and skips exactly one thing: this. Every blob is still
+  // produced, so the results panel gets real audio to audition and real waveforms to edit -
+  // nothing reaches the disk until Export. This is the only place the app writes audio, which
+  // is what makes the dry run trustworthy rather than a best-effort imitation.
+  if (dryRun) return;
   if (folder.kind === "fsa") {
     await writeFileFSA(folder.handle, subdir, relDir, fileName, blob);
   } else {
@@ -1342,9 +1420,13 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   // shares the same tag. That's why the tag goes on the containing folder
   // (and the wav/ copy's filename) by default rather than being repeated on
   // every numbered chop - see the "Output naming" panel for the options.
+  // A valid cache entry means Preview already ran essentia over this file and nothing that would
+  // move a cut point has changed since, so Export reuses that work instead of repeating it.
+  const cached = cachedAnalysis(folder, fileInfo);
   const wantKey = detectSettings.key;
   const wantTempo = detectSettings.tempo;
-  const kt = await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: wantKey, tempo: wantTempo });
+  const kt = cached ? cached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: wantKey, tempo: wantTempo });
+  if (cached) log(`    reusing the analysis from your preview`);
   const tag = buildKeyTempoTag(kt, namingSettings.separator);
   const taggedStem = buildTaggedStem(stem, tag);
 
@@ -1397,10 +1479,16 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   let oneShotRows = [];
   let oneShotMarkers = [];
 
+  let chopRegions = null;
+  let oneShotRegions = null;
+
   if (chopIntoPieces) {
     const modeParams = activeParams();
     let regions;
-    if (mode === "drums") {
+    if (cached && cached.chopRegions) {
+      // Includes any adjustment made in the editor during the preview.
+      regions = cached.chopRegions;
+    } else if (mode === "drums") {
       const barsSec = barsToSeconds(drumBars, kt.bpm);
       const drumParams = { ...modeParams.drums };
       if (barsSec) {
@@ -1413,6 +1501,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     } else {
       regions = phraseRegions(mono, buffer.sampleRate, modeParams[mode]).regions;
     }
+    chopRegions = regions;
 
     log(`    key: ${keyText} | tempo: ${bpmText} | ${regions.length} candidate phrase(s)`);
 
@@ -1432,15 +1521,43 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
 
     log(`    created ${chopRows.length} chop(s)`);
 
-    if (mode === "drums" && extractOneShots) {
-      const extracted = await extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, buffer.sampleRate, zipBatch, kt.bpm);
+    // A file's one-shots can be dropped individually from the preview, for when the extraction
+    // found nothing worth keeping on that particular break.
+    const includeOneShots = !cached || cached.includeOneShots !== false;
+    if (mode === "drums" && extractOneShots && includeOneShots) {
+      oneShotRegions = (cached && cached.oneShotRegions) || detectOneShotRegions(mono, buffer.sampleRate);
+      const extracted = await writeOneShotRegions({
+        folder,
+        fileInfo,
+        taggedStem,
+        regions: oneShotRegions,
+        channels,
+        mono,
+        sampleRate: buffer.sampleRate,
+        zipBatch,
+        detectedBpm: kt.bpm,
+      });
       oneShotRows = extracted.rows;
       oneShotMarkers = extracted.markers;
       log(`    extracted ${oneShotRows.length} one-shot hit(s)`);
+    } else if (mode === "drums" && extractOneShots) {
+      log(`    one-shots excluded for this file`);
     }
   } else {
     log(`    key: ${keyText} | tempo: ${bpmText} | chop into pieces is off - whole file processed`);
   }
+
+  // Remember what this run worked out, so a following Export skips detection and so the editor
+  // has somewhere to put an adjustment that Export will then honour.
+  const key = analysisKey(folder, fileInfo);
+  const previous = analysisCache.get(key);
+  analysisCache.set(key, {
+    signature: detectionSignature(),
+    kt,
+    chopRegions,
+    oneShotRegions: oneShotRegions || (previous && previous.oneShotRegions) || null,
+    includeOneShots: previous ? previous.includeOneShots !== false : true,
+  });
 
   const state = {
     fileName: fileInfo.name,
@@ -1456,6 +1573,8 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     mono,
     sampleRate: buffer.sampleRate,
     editContext,
+    analysisKey: key,
+    hasOneShots: mode === "drums" && extractOneShots,
   };
   const block = renderFileResult(state);
   folderResultsEl.appendChild(block);
@@ -1476,7 +1595,8 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
   const processingActive = stretchRatio !== 1 || lofiActive();
   const wantCleanCopy = keepUnprocessedCopy && processingActive;
 
-  if (folder.kind === "fsa") {
+  // Deleting the previous run's chops is a write too, so a preview must not do it either.
+  if (folder.kind === "fsa" && !dryRun) {
     await clearOldChopsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
     // Cleared unconditionally (same idempotent-rerun logic as above) so a "chops clean/" left
     // behind from a previous run with the toggle on doesn't linger once it's turned off.
@@ -1543,7 +1663,7 @@ async function reExportSingleFile(editContext, editedRegions) {
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
   const mono = toMono(channels);
-  const zipBatch = folder.kind === "fsa" ? null : new ZipBatch();
+  const zipBatch = folder.kind === "fsa" || dryRun ? null : new ZipBatch();
 
   const { chopRows, chopMarkers } = await exportChopsForRegions({
     folder,
@@ -1617,7 +1737,7 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
   const processingActive = applyProcessingToOneShots && (stretchRatio !== 1 || lofiActive());
   const wantCleanCopy = keepUnprocessedCopy && processingActive;
 
-  if (folder.kind === "fsa") {
+  if (folder.kind === "fsa" && !dryRun) {
     await clearOldOneShotsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
     await clearOldNumberedFilesFSA(folder.handle, "one shots clean", fileInfo.relativeDir, taggedStem);
   }
@@ -1682,11 +1802,6 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
   return { rows, markers };
 }
 
-/** Finds, dedupes and writes one-shot hits for a drum-mode source file's initial auto pass. Returns {rows, markers}. */
-async function extractAndWriteOneShots(folder, fileInfo, taggedStem, mono, channels, sampleRate, zipBatch, detectedBpm) {
-  const regions = detectOneShotRegions(mono, sampleRate);
-  return writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch, detectedBpm });
-}
 
 /** Re-decodes a source file and re-exports its one-shots from a manually-edited region list. */
 async function reExportOneShots(editContext, editedRegions) {
@@ -1695,7 +1810,7 @@ async function reExportOneShots(editContext, editedRegions) {
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
   const mono = toMono(channels);
-  const zipBatch = folder.kind === "fsa" ? null : new ZipBatch();
+  const zipBatch = folder.kind === "fsa" || dryRun ? null : new ZipBatch();
 
   const { rows, markers } = await writeOneShotRegions({
     folder,
@@ -2197,7 +2312,7 @@ function enterEditMode(block, state, staticArea, editBtn, kind) {
   cancelBtn.textContent = "Cancel";
   const saveBtn = document.createElement("button");
   saveBtn.className = "btn btn--primary";
-  saveBtn.textContent = "Save & re-export";
+  saveBtn.textContent = "Apply";
   actions.appendChild(cancelBtn);
   actions.appendChild(saveBtn);
   editorWrap.appendChild(actions);
@@ -2212,31 +2327,43 @@ function enterEditMode(block, state, staticArea, editBtn, kind) {
   }
 
   cancelBtn.addEventListener("click", exit);
+
+  // Apply regenerates this file's players and waveform from the edited boundaries and records the
+  // new regions against the file, so a later Export cuts where you said. It deliberately writes
+  // nothing: an edit made while reviewing shouldn't put files on disk behind your back, which is
+  // what the old "Save & re-export" did.
   saveBtn.addEventListener("click", async () => {
     saveBtn.disabled = true;
     cancelBtn.disabled = true;
-    saveBtn.textContent = "Re-exporting…";
+    saveBtn.textContent = "Applying…";
+    const wasDryRun = dryRun;
+    dryRun = true;
     try {
       const regions = editor.getRegions();
+      const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
       if (isChops) {
         const result = await reExportSingleFile(state.editContext, regions);
         state.chopRows = result.chopRows;
         state.chopMarkers = result.chopMarkers;
-        log(`  ${state.editContext.fileInfo.name}: re-exported ${result.chopRows.length} chop(s) with edited boundaries`);
+        if (entry) entry.chopRegions = regions;
+        log(`  ${state.editContext.fileInfo.name}: ${result.chopRows.length} chop(s) updated. Hit Export to save them.`);
       } else {
         const result = await reExportOneShots(state.editContext, regions);
         state.oneShotRows = result.rows;
         state.oneShotMarkers = result.markers;
-        log(`  ${state.editContext.fileInfo.name}: re-exported ${result.rows.length} one-shot(s) with edited boundaries`);
+        if (entry) entry.oneShotRegions = regions;
+        log(`  ${state.editContext.fileInfo.name}: ${result.rows.length} one-shot(s) updated. Hit Export to save them.`);
       }
       const newBlock = renderFileResult(state);
       block.replaceWith(newBlock);
     } catch (err) {
-      log(`  ERROR re-exporting ${state.editContext.fileInfo.name}: ${err.message || err}`);
+      log(`  ERROR updating ${state.editContext.fileInfo.name}: ${err.message || err}`);
       console.error(err);
       saveBtn.disabled = false;
       cancelBtn.disabled = false;
-      saveBtn.textContent = "Save & re-export";
+      saveBtn.textContent = "Apply";
+    } finally {
+      dryRun = wasDryRun;
     }
   });
 }
@@ -2286,6 +2413,28 @@ function renderFileResult(state) {
     editOneShotsBtn.textContent = "Edit one-shots";
     actionsGroup.appendChild(editOneShotsBtn);
   }
+  // Per-file opt-out: one-shot extraction is a heuristic, and on some breaks it just returns junk.
+  // Rather than making that an all-or-nothing batch setting, each file can drop its own.
+  if (state.hasOneShots && state.analysisKey) {
+    const entry = analysisCache.get(state.analysisKey);
+    const incLabel = document.createElement("label");
+    incLabel.className = "check check--inline result-oneshot-toggle";
+    incLabel.title = "Untick to leave this file's one-shots out of the export";
+    const incBox = document.createElement("input");
+    incBox.type = "checkbox";
+    incBox.checked = !entry || entry.includeOneShots !== false;
+    const incText = document.createElement("span");
+    incText.textContent = "export one-shots";
+    incLabel.appendChild(incBox);
+    incLabel.appendChild(incText);
+    incBox.addEventListener("change", () => {
+      const e = analysisCache.get(state.analysisKey);
+      if (e) e.includeOneShots = incBox.checked;
+      log(`  ${state.fileName}: one-shots ${incBox.checked ? "will be" : "will NOT be"} exported`);
+    });
+    actionsGroup.appendChild(incLabel);
+  }
+
   if (actionsGroup.childElementCount) header.appendChild(actionsGroup);
   block.appendChild(header);
 
@@ -2328,86 +2477,15 @@ function escapeHtml(str) {
 }
 
 // ---------------------------------------------------------------------------
-// Preview: audition the current time-stretch/lo-fi settings on a short excerpt of the first
-// queued file, without running a full export or writing any files.
+// Preview
+//
+// Preview used to audition six seconds of the first file through the stretch/lo-fi chain, which
+// answered a question nobody was asking: the useful thing to see before committing is where the
+// cuts landed. It now runs the real batch with writing switched off, so you get every waveform,
+// every chop and one-shot with a player, and the region editor - and then decide whether to
+// Export. Reviewing chops only after they had already been written to disk was backwards.
 // ---------------------------------------------------------------------------
 
-let previewObjectUrl = null;
-const PREVIEW_LEN_SEC = 6;
-
-function firstPreviewTarget() {
-  for (const folder of sourceFolders) {
-    if (folder.files.length > 0) return folder.files[0];
-  }
-  return null;
-}
-
-async function runPreview() {
-  const fileInfo = firstPreviewTarget();
-  if (!fileInfo) return;
-
-  previewRunning = true;
-  updateProcessButton();
-  previewStatus.textContent = "Generating preview…";
-  try {
-    const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
-    const { buffer } = await decodeFile(file, fileInfo.ext);
-    const channels = bufferChannels(buffer);
-    const mono = toMono(channels);
-    const duration = mono.length / buffer.sampleRate;
-
-    // Tempo is only needed if "match a target tempo" is the active stretch mode - skip essentia
-    // entirely otherwise so a quick preview stays quick.
-    let detectedBpm = null;
-    if (timestretchSettings.enabled && timestretchSettings.mode === "target-tempo") {
-      const kt = await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: false, tempo: true });
-      detectedBpm = kt.bpm;
-    }
-
-    const previewLen = Math.min(PREVIEW_LEN_SEC, duration);
-    let startSample = duration > previewLen ? Math.round(((duration - previewLen) / 2) * buffer.sampleRate) : 0;
-    let endSample = Math.min(mono.length, startSample + Math.round(previewLen * buffer.sampleRate));
-    const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
-    if (zcWindow > 0) {
-      startSample = findNearestZeroCrossing(mono, startSample, zcWindow);
-      endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
-    }
-    if (endSample <= startSample) endSample = Math.min(mono.length, startSample + 1);
-
-    const stretchRatio = resolveStretchRatio(detectedBpm);
-    const [{ blob, seconds }] = await processRegionsHeavy({
-      sampleRate: buffer.sampleRate,
-      bitDepth: exportSettings.bitDepth,
-      fadeInSamples: Math.round(0.01 * buffer.sampleRate),
-      fadeOutSamples: Math.round(0.01 * buffer.sampleRate),
-      stretchRatio,
-      character: timestretchSettings.character,
-      regions: [{ channels: sliceChannels(channels, startSample, endSample) }],
-    });
-
-    if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
-    previewObjectUrl = URL.createObjectURL(blob);
-    previewAudio.src = previewObjectUrl;
-    previewAudio.hidden = false;
-    const appliedBits = [];
-    if (stretchRatio !== 1) appliedBits.push("time-stretch");
-    if (lofiActive()) appliedBits.push("lo-fi");
-    previewStatus.textContent = `Previewing "${fileInfo.name}" - ${seconds.toFixed(1)}s excerpt${
-      appliedBits.length ? ` with ${appliedBits.join(" + ")}` : " (no processing enabled)"
-    }.`;
-    await previewAudio.play().catch(() => {
-      /* autoplay can still be blocked in some contexts - the controls are there regardless */
-    });
-  } catch (err) {
-    previewStatus.textContent = `Couldn't generate a preview: ${err.message || err}`;
-    console.error(err);
-  } finally {
-    previewRunning = false;
-    updateProcessButton();
-  }
-}
-
-previewBtn.addEventListener("click", runPreview);
 
 // ---------------------------------------------------------------------------
 // Batch processing
@@ -2425,8 +2503,10 @@ function updateProgress(done, total, label) {
   progressLabel.textContent = label || `${done} / ${total} file(s)`;
 }
 
-async function processBatch() {
+/** Runs the batch. `write: false` is Preview - identical work, nothing saved. */
+async function processBatch({ write = true } = {}) {
   processing = true;
+  dryRun = !write;
   cancelRequested = false;
   cancelBtn.disabled = false;
   cancelBtn.textContent = "Cancel";
@@ -2434,8 +2514,9 @@ async function processBatch() {
   clearLog();
   resultsPanel.innerHTML = "";
   drumTempoSkipPolicy = null;
+  log(write ? "Exporting…" : "Previewing. Nothing is saved until you hit Export.");
 
-  const zipBatch = FSA_SUPPORTED ? null : new ZipBatch();
+  const zipBatch = FSA_SUPPORTED || dryRun ? null : new ZipBatch();
   let totalChops = 0;
   let processedFolders = 0;
   const totalFiles = sourceFolders.reduce((sum, f) => sum + f.files.length, 0);
@@ -2449,7 +2530,9 @@ async function processBatch() {
       continue;
     }
 
-    if (folder.kind === "fsa") {
+    // Only ask for write access when we're actually going to write - a preview shouldn't put a
+    // permission prompt in front of someone who just wants to see where the cuts landed.
+    if (folder.kind === "fsa" && !dryRun) {
       const ok = await ensureReadWritePermission(folder.handle);
       if (!ok) {
         log("  Permission to write to this folder was denied, skipped");
@@ -2486,15 +2569,27 @@ async function processBatch() {
     log("ZIP download started.");
   }
 
-  log(`${cancelRequested ? "Cancelled." : "Done."} Processed ${processedFolders} folder(s), created ${totalChops} candidate chop(s).`);
+  if (dryRun) {
+    log(
+      `${cancelRequested ? "Preview cancelled." : "Preview ready."} ${totalChops} chop(s) from ${processedFolders} folder(s). ` +
+        `Adjust anything you want, then hit Export to save.`
+    );
+  } else {
+    log(`${cancelRequested ? "Cancelled." : "Done."} Exported ${totalChops} chop(s) from ${processedFolders} folder(s).`);
+  }
   processing = false;
+  dryRun = false;
   cancelRequested = false;
   updateProcessButton();
   progressRow.hidden = true;
 }
 
 processBtn.addEventListener("click", () => {
-  if (!processing) processBatch();
+  if (!processing) processBatch({ write: true });
+});
+
+previewBtn.addEventListener("click", () => {
+  if (!processing) processBatch({ write: false });
 });
 
 cancelBtn.addEventListener("click", () => {
