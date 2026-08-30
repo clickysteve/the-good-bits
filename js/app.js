@@ -35,6 +35,7 @@ import { sanitizeSourceBpm, resolveEffectiveTempo, formatBpmText } from "./tempo
 import { APP_VERSION } from "./version.js";
 import { createEditableWaveform } from "./editor-waveform.js";
 import { resolveRegions, replaceRegions, resolveSelection } from "./chop-regions.js";
+import { regionsEqual, ensureHistory, commitHistory, canUndo, canRedo, undoHistory, redoHistory } from "./edit-history.js";
 import {
   isIncluded,
   normalizeIncludedFiles,
@@ -2283,6 +2284,11 @@ async function ensureStretchSourceAnalyzed(folder, fileInfo) {
     oneShotRegions: (existing && existing.oneShotRegions) || null,
     oneShotRegionsBaseline: (existing && existing.oneShotRegionsBaseline) || null,
     includeOneShots: existing ? existing.includeOneShots !== false : true,
+    // Undo/Redo history rides along untouched here too - this wholesale .set() runs whenever the
+    // Stretch workspace (re-)analyzes a file that shares this same analysisKey, and switching tasks
+    // must not silently erase edit history sitting from a CHOP session on the same source.
+    chopHistory: (existing && existing.chopHistory) || null,
+    oneShotHistory: (existing && existing.oneShotHistory) || null,
     stretchOriginal: { mono, channels, sampleRate: buffer.sampleRate, duration: mono.length / buffer.sampleRate, bpmText, keyText },
     stretchProcessed: (existing && existing.stretchProcessed) || null,
   });
@@ -2522,6 +2528,13 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     // is what actually re-validates this against the current region count.
     chopSelectedIndex: previous ? previous.chopSelectedIndex : null,
     oneShotSelectedIndex: previous ? previous.oneShotSelectedIndex : null,
+    // Undo/Redo history for this file's manual edits. Process must never clear this (a normal run
+    // that reuses cached regions via resolveRegions() above hasn't changed anything a user would
+    // expect to Undo away) or add to it (this isn't itself an edit) - it only ever rides forward
+    // untouched, exactly like chopSelectedIndex above. Only mountEditor()'s onChange, and the
+    // explicit Re-chop/Clear/Revert actions in renderFileResult, ever call commitHistory().
+    chopHistory: previous ? previous.chopHistory : null,
+    oneShotHistory: previous ? previous.oneShotHistory : null,
     // Only ever freshly computed for the STRETCH task (see above) - a CHOP/BOTH run for this same
     // file doesn't touch either of these, same fallback pattern as oneShotRegions above. Without the
     // fallback, switching to CHOP/BOTH and hitting Process would silently wipe out whatever the
@@ -3292,6 +3305,64 @@ function renderFileResult(state) {
     exportSelectedBtn.disabled = editing !== "chops" || !editor || editor.getSelected() == null || !isExportIncluded(editContext.fileInfo);
   }
 
+  // ---- Undo/Redo --------------------------------------------------------------------------
+  //
+  // The stack itself (js/edit-history.js) lives on the analysisCache entry, keyed by which set it's
+  // for - chopHistory/oneShotHistory - not on `editor` or `state`, both of which get torn down and
+  // rebuilt on every Process rerun and every chops/one-shots toggle (mountEditor()). Keying it there
+  // is what makes history per-file (analysisCache is keyed by analysisKey, one entry per source file)
+  // and lets it survive a rerender untouched.
+
+  function historyFieldFor(setName) {
+    return setName === "chops" ? "chopHistory" : "oneShotHistory";
+  }
+
+  /** Records one completed edit against `setName`'s stack, skipping it entirely if nothing actually
+   * changed (a drag released back at its own start point, a Revert/Re-chop that was already a no-op)
+   * - those aren't edits, so they shouldn't cost the user an Undo press. `baselineRegions`/
+   * `baselineSelected` are only ever consumed the very first time this file/set gets a history at
+   * all (see ensureHistory() in edit-history.js); every call after that already has a current entry
+   * to build on. */
+  function recordHistoryCommit(entry, setName, baselineRegions, baselineSelected, newRegions, newSelected) {
+    if (!entry) return;
+    const field = historyFieldFor(setName);
+    if (regionsEqual(entry[setName === "chops" ? "chopRegions" : "oneShotRegions"], newRegions)) return;
+    const history = ensureHistory(entry[field], baselineRegions, baselineSelected);
+    entry[field] = commitHistory(history, newRegions, newSelected);
+  }
+
+  /** Pushes the current Undo/Redo availability for whichever set is currently mounted into the
+   * editor's toolbar buttons. */
+  function refreshHistoryButtons() {
+    if (!editor) return;
+    const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+    const hist = entry ? entry[historyFieldFor(editing)] : null;
+    editor.setHistoryState(canUndo(hist), canRedo(hist));
+  }
+
+  /** Restores a history snapshot (from Undo or Redo) as the new canonical state for whichever set is
+   * currently mounted - analysisCache, `state`, the live waveform and the selection all move together,
+   * same as every other region-mutating action here. */
+  function applyHistorySnapshot(entry, snapshot) {
+    const regions = snapshot.regions.map((r) => [...r]);
+    const restoredSelected = resolveSelection(snapshot.selected, regions.length);
+    if (editing === "chops") {
+      entry.chopRegions = regions;
+      entry.chopSelectedIndex = restoredSelected;
+      state.chopMarkers = regions;
+    } else {
+      entry.oneShotRegions = regions;
+      entry.oneShotSelectedIndex = restoredSelected;
+      state.oneShotMarkers = regions;
+    }
+    if (editor) {
+      editor.setRegions(regions); // fires onSelect(null) first, then we restore the real selection below
+      if (restoredSelected != null) editor.select(restoredSelected);
+    }
+    updateExportSelectedState();
+    refreshHistoryButtons();
+  }
+
   function renderLists() {
     staticArea.innerHTML = "";
     chopListEl = null;
@@ -3319,6 +3390,15 @@ function renderFileResult(state) {
     rechopRow.hidden = editing !== "chops";
     applyRow.hidden = !editing;
     if (!editing) return;
+    // Captured once, at mount: the state that existed before any edit made through THIS editor
+    // instance. Only ever consumed if this file/set has no history yet at all (see
+    // recordHistoryCommit -> ensureHistory), in which case it's exactly the pre-first-edit baseline
+    // Undo needs to land on - reading it fresh off analysisCache inside onChange instead would risk
+    // picking up a selection index onSelect had already advanced to for the SAME commit (onSelect
+    // fires before onChange for e.g. Add/Delete/double-click, all of which change selection and
+    // regions in one user action).
+    const historyBaselineRegions = (editing === "chops" ? state.chopMarkers : state.oneShotMarkers) || [];
+    const historyBaselineSelected = editing === "chops" ? state.chopSelectedIndex : state.oneShotSelectedIndex;
     editor = createEditableWaveform({
       mono: state.mono,
       sampleRate: state.sampleRate,
@@ -3329,10 +3409,14 @@ function renderFileResult(state) {
       color: themeColor,
       // The canonical region state lives in analysisCache, and it's updated the moment a slice
       // changes - not on some later "Apply" click. This is what makes Export always cut where the
-      // waveform currently shows, whether or not "Update previews" was ever clicked.
+      // waveform currently shows, whether or not "Update previews" was ever clicked. Every commit
+      // that reaches here - a finished drag, an Add, a Delete, a double-click add/split - is already
+      // exactly one onChange call, so it's also exactly one history entry.
       onChange: () => {
         const regions = editor.getRegions();
+        const newSelected = editor.getSelected();
         const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+        recordHistoryCommit(entry, editing, historyBaselineRegions, historyBaselineSelected, regions, newSelected);
         if (editing === "chops") {
           if (entry) entry.chopRegions = regions;
           state.chopMarkers = regions;
@@ -3340,10 +3424,12 @@ function renderFileResult(state) {
           if (entry) entry.oneShotRegions = regions;
           state.oneShotMarkers = regions;
         }
+        refreshHistoryButtons();
       },
       onSelect: (idx) => {
         // Persisted so a normal Process (which tears down and rebuilds this whole card, editor
-        // included) can restore it below rather than silently leaving nothing selected.
+        // included) can restore it below rather than silently leaving nothing selected. Selecting a
+        // slice is never itself a history event - only onChange (above) commits one.
         const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
         if (editing === "chops") {
           state.chopSelectedIndex = idx;
@@ -3355,6 +3441,24 @@ function renderFileResult(state) {
         highlightRow(idx);
         updateExportSelectedState();
       },
+      onUndo: () => {
+        const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+        if (!entry) return;
+        const result = undoHistory(entry[historyFieldFor(editing)]);
+        if (!result) return;
+        entry[historyFieldFor(editing)] = result.history;
+        applyHistorySnapshot(entry, result.snapshot);
+        log(`  ${state.fileName}: undid the last ${editing === "chops" ? "chop" : "one-shot"} edit.`);
+      },
+      onRedo: () => {
+        const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+        if (!entry) return;
+        const result = redoHistory(entry[historyFieldFor(editing)]);
+        if (!result) return;
+        entry[historyFieldFor(editing)] = result.history;
+        applyHistorySnapshot(entry, result.snapshot);
+        log(`  ${state.fileName}: redid the ${editing === "chops" ? "chop" : "one-shot"} edit.`);
+      },
     });
     editorHost.appendChild(editor.el);
     registerThemeRepaint(editor.el, () => editor && editor.redraw());
@@ -3362,6 +3466,7 @@ function renderFileResult(state) {
     const restored = resolveSelection(previousSelection, editor.getRegions().length);
     if (restored != null) editor.select(restored);
     updateExportSelectedState();
+    refreshHistoryButtons();
   }
 
   /**
@@ -3374,6 +3479,10 @@ function renderFileResult(state) {
     const { regions: cloned, baseline } = replaceRegions(newRegions);
     const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
     if (entry) {
+      // One history step for the whole Re-chop/Clear, however many boundaries it actually touches -
+      // recorded against whatever was live a moment ago (which may itself be a pile of manual edits;
+      // that's the whole point of Undo being able to bring all of it back in one press).
+      recordHistoryCommit(entry, "chops", entry.chopRegions, entry.chopSelectedIndex, cloned, null);
       entry.chopRegions = cloned.map((r) => [...r]);
       entry.chopRegionsBaseline = baseline;
     }
@@ -3382,6 +3491,7 @@ function renderFileResult(state) {
       editor.setRegions(cloned); // fires onSelect(null), which clears the persisted selection too
       updateExportSelectedState();
     }
+    refreshHistoryButtons();
   }
 
   revertBtn.addEventListener("click", () => {
@@ -3389,16 +3499,19 @@ function renderFileResult(state) {
     if (!entry) return;
     if (editing === "chops") {
       const baseline = (entry.chopRegionsBaseline || []).map((r) => [...r]);
+      recordHistoryCommit(entry, "chops", entry.chopRegions, entry.chopSelectedIndex, baseline, null);
       entry.chopRegions = baseline.map((r) => [...r]);
       state.chopMarkers = baseline;
       if (editor) editor.setRegions(baseline);
     } else {
       const baseline = (entry.oneShotRegionsBaseline || []).map((r) => [...r]);
+      recordHistoryCommit(entry, "oneshots", entry.oneShotRegions, entry.oneShotSelectedIndex, baseline, null);
       entry.oneShotRegions = baseline.map((r) => [...r]);
       state.oneShotMarkers = baseline;
       if (editor) editor.setRegions(baseline);
     }
     updateExportSelectedState();
+    refreshHistoryButtons();
     log(`  ${state.fileName}: ${editing === "chops" ? "chops" : "one-shots"} reverted to the last detection/re-chop.`);
   });
 

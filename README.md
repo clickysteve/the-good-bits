@@ -53,6 +53,16 @@ site on GitHub Pages.
   so you can audition the edited audio in-browser; it has no bearing on
   what Export produces. **Revert** discards edits back to the last
   detection or re-chop. Nothing touches disk until Export either way.
+- **Undo/Redo, per file.** Every region-mutating action on the waveform - a
+  drag, an add, a delete, a double-click split, Re-chop, Clear, Revert - is
+  one step on that file's own Undo stack, kept independent of every other
+  file's. A drag is a single step no matter how many times it moved while
+  held: Undo restores the boundary to where it was before the drag started,
+  not one step per pixel. **Cmd/Ctrl+Z** undoes, **Cmd/Ctrl+Shift+Z** (or
+  **Ctrl+Y**) redoes, or use the compact Undo/Redo buttons in the waveform
+  toolbar; making a new edit after an Undo drops whatever was available to
+  redo, same as any other editor. Selecting a slice, playback, zoom/pan and
+  a plain Process rerun never touch this history.
 - **Re-chop and manual chopping, from the editor.** Beyond dragging
   boundaries, a file's card has an explicit (and deliberately destructive)
   **re-chop**: replace every current chop with a target number of

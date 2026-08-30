@@ -48,6 +48,11 @@ export function viewXToTime(xRel, width, viewStart, viewDuration) {
  * @param {(name:string,fallback:string)=>string} opts.color  reads a CSS custom property
  * @param {()=>void} opts.onChange          fired whenever the slice list changes
  * @param {(idx:number|null)=>void} opts.onSelect
+ * @param {()=>void} [opts.onUndo]          fired by the Undo button or Cmd/Ctrl+Z - the canonical
+ *   undo/redo stack lives in the caller (app.js keys it per file in analysisCache), not here, since
+ *   an editor instance gets torn down and rebuilt on every Process/mode-switch while that history
+ *   needs to survive
+ * @param {()=>void} [opts.onRedo]          fired by the Redo button or Cmd/Ctrl+Shift+Z / Ctrl+Y
  */
 export function createEditableWaveform({
   mono,
@@ -59,6 +64,8 @@ export function createEditableWaveform({
   color = (_n, f) => f,
   onChange = () => {},
   onSelect = () => {},
+  onUndo = () => {},
+  onRedo = () => {},
 }) {
   const wrap = document.createElement("div");
   wrap.className = "editable-waveform";
@@ -82,12 +89,16 @@ export function createEditableWaveform({
   loopBtn.classList.add("btn--loop");
   const addBtn = mkBtn("+ Add", `Add a ${noun} (or double-click anywhere on the waveform to start a new slice there)`);
   const deleteBtn = mkBtn("Delete", `Delete the selected ${noun} (Delete)`);
+  const undoBtn = mkBtn("↶ Undo", "Undo the last edit (Cmd/Ctrl+Z)");
+  undoBtn.disabled = true;
+  const redoBtn = mkBtn("↷ Redo", "Redo (Cmd/Ctrl+Shift+Z, or Ctrl+Y)");
+  redoBtn.disabled = true;
   const zoomOutBtn = mkBtn("−", "Zoom out");
   const zoomInBtn = mkBtn("+", "Zoom in");
   const fitBtn = mkBtn("Fit", "Zoom to fit");
   const zoomLabel = document.createElement("span");
   zoomLabel.className = "editable-waveform-zoom-label";
-  toolbar.append(playBtn, stopBtn, loopBtn, addBtn, deleteBtn, zoomOutBtn, zoomInBtn, fitBtn, zoomLabel);
+  toolbar.append(playBtn, stopBtn, loopBtn, addBtn, deleteBtn, undoBtn, redoBtn, zoomOutBtn, zoomInBtn, fitBtn, zoomLabel);
   wrap.appendChild(toolbar);
 
   const canvas = document.createElement("canvas");
@@ -490,6 +501,8 @@ export function createEditableWaveform({
 
   addBtn.addEventListener("click", () => addSliceAt(viewStart + viewDuration / 2));
   deleteBtn.addEventListener("click", deleteSelected);
+  undoBtn.addEventListener("click", () => onUndo());
+  redoBtn.addEventListener("click", () => onRedo());
   loopBtn.addEventListener("click", () => {
     loopEnabled = !loopEnabled;
     loopBtn.classList.toggle("is-active", loopEnabled);
@@ -519,6 +532,21 @@ export function createEditableWaveform({
   fitBtn.addEventListener("click", () => setView(0, duration));
 
   wrap.addEventListener("keydown", (ev) => {
+    // Conventional Undo/Redo. Scoped to `wrap` (only reachable once the waveform has keyboard focus,
+    // same as Delete/Space/Arrow below) rather than a document-level listener, which is what keeps
+    // this from firing while the user is typing in the BPM field, the naming token editor, or any
+    // other text control elsewhere on the page - none of those live inside this element.
+    if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && (ev.key === "z" || ev.key === "Z")) {
+      ev.preventDefault();
+      if (ev.shiftKey) onRedo();
+      else onUndo();
+      return;
+    }
+    if (ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey && (ev.key === "y" || ev.key === "Y")) {
+      ev.preventDefault();
+      onRedo();
+      return;
+    }
     if (ev.key === "Delete" || ev.key === "Backspace") {
       if (selected == null) return;
       ev.preventDefault();
@@ -733,6 +761,12 @@ export function createEditableWaveform({
       slices.sort((a, b) => a.s - b.s);
       select(null);
       redraw();
+    },
+    /** Enables/disables the Undo/Redo buttons - the caller (app.js) owns the actual history and
+     * calls this after every commit/undo/redo so the toolbar reflects it. */
+    setHistoryState: (canUndoNow, canRedoNow) => {
+      undoBtn.disabled = !canUndoNow;
+      redoBtn.disabled = !canRedoNow;
     },
     destroy: () => {
       stopPlayback();
