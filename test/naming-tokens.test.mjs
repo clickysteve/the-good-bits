@@ -1,7 +1,7 @@
 // Node-side unit tests for js/naming-tokens.js - the pure string<->segment conversion behind the
 // File Name Pattern token editor. Run with: node test/naming-tokens.test.mjs
 import assert from "node:assert/strict";
-import { parsePatternToSegments, segmentsToPattern, isKnownToken } from "../js/naming-tokens.js";
+import { parsePatternToSegments, segmentsToPattern, isKnownToken, resolveNamePattern } from "../js/naming-tokens.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -83,12 +83,75 @@ test("segmentsToPattern: case-normalised tokens round-trip to the lowercase cano
   assert.equal(segmentsToPattern(parsePatternToSegments("{NAME}_{Number}")), "{name}_{number}");
 });
 
-test("isKnownToken: recognises exactly name/tag/number, case-insensitively, and nothing else", () => {
+test("isKnownToken: recognises name/tag/key/tempo/number, case-insensitively, and nothing else", () => {
   assert.ok(isKnownToken("name"));
   assert.ok(isKnownToken("TAG"));
   assert.ok(isKnownToken("Number"));
+  assert.ok(isKnownToken("key"));
+  assert.ok(isKnownToken("KEY"));
+  assert.ok(isKnownToken("tempo"));
+  assert.ok(isKnownToken("Tempo"));
   assert.ok(!isKnownToken("foo"));
   assert.ok(!isKnownToken(""));
+});
+
+test("parsePatternToSegments: {tempo} and {key} parse as independent tokens, same as {tag}", () => {
+  assert.deepEqual(parsePatternToSegments("{name}_{tempo}_{key}_{number}"), [
+    { type: "token", key: "name" },
+    { type: "text", value: "_" },
+    { type: "token", key: "tempo" },
+    { type: "text", value: "_" },
+    { type: "token", key: "key" },
+    { type: "text", value: "_" },
+    { type: "token", key: "number" },
+  ]);
+});
+
+// --- resolveNamePattern: the actual filename-token substitution ---------------------------------
+
+test("resolveNamePattern: a pattern using both {tempo} and {key} independently", () => {
+  assert.equal(
+    resolveNamePattern("{name}_{tempo}_{key}_{number}", { name: "vocal", tempo: "120", key: "Cm", number: "01" }),
+    "vocal_120_Cm_01"
+  );
+});
+
+test("resolveNamePattern: {tempo} without {key} - the other token is simply absent, not forced in", () => {
+  assert.equal(resolveNamePattern("{name}_{tempo}_{number}", { name: "vocal", tempo: "120", number: "01" }), "vocal_120_01");
+});
+
+test("resolveNamePattern: {key} without {tempo}", () => {
+  assert.equal(resolveNamePattern("{name}_{key}_{number}", { name: "vocal", key: "Cm", number: "01" }), "vocal_Cm_01");
+});
+
+test("resolveNamePattern: neither {tempo} nor {key} - unaffected, same as before either existed", () => {
+  assert.equal(resolveNamePattern("{name}_{number}", { name: "vocal", tempo: "120", key: "Cm", number: "01" }), "vocal_01");
+});
+
+test("resolveNamePattern: the combined {tag} token still works unchanged, independently of {tempo}/{key}", () => {
+  assert.equal(
+    resolveNamePattern("{name}_{tag}_{number}", { name: "vocal", tag: "Cm 120bpm", tempo: "120", key: "Cm", number: "01" }),
+    "vocal_Cm 120bpm_01"
+  );
+});
+
+test("resolveNamePattern: {tag}, {tempo} and {key} can all coexist in one pattern", () => {
+  assert.equal(
+    resolveNamePattern("{tag}_{tempo}_{key}_{number}", { tag: "Cm 120bpm", tempo: "120", key: "Cm", number: "01" }),
+    "Cm 120bpm_120_Cm_01"
+  );
+});
+
+test("resolveNamePattern: an undetected {tempo}/{key} (undefined) drops out as empty text, not a literal token", () => {
+  assert.equal(resolveNamePattern("{name}_{tempo}_{key}_{number}", { name: "vocal", number: "01" }), "vocal___01");
+});
+
+test("resolveNamePattern: tokens are matched case-insensitively, same as parsePatternToSegments", () => {
+  assert.equal(resolveNamePattern("{NAME}_{Tempo}_{KEY}_{number}", { name: "vocal", tempo: "120", key: "Cm", number: "01" }), "vocal_120_Cm_01");
+});
+
+test("resolveNamePattern: an unrecognised {foo} is left literal, same as parsePatternToSegments", () => {
+  assert.equal(resolveNamePattern("{foo}_{name}", { name: "vocal" }), "{foo}_vocal");
 });
 
 console.log(`\n${passed} test(s) passed.`);

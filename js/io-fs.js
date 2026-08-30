@@ -145,11 +145,19 @@ export async function writeFileFSA(sourceDirHandle, subdirName, relDir, fileName
  * Delete any previously-generated NN.wav files in a <rootName>/relDir/stem destination directory
  * (idempotent re-runs). Shared by chops, one-shots, and their "clean" (unprocessed-copy) siblings -
  * all four use the same plain sequential-number naming.
+ *
+ * Deliberately `create: false` throughout: this function only ever cleans up, it never needs to
+ * write anything, so it must never bring a directory into existence that wasn't already there.
+ * `create: true` here was the actual cause of the "CHOP produces an empty chops clean/ folder even
+ * with Output Stage off" bug - clearing "chops clean/<stem>/" unconditionally on every export
+ * (idempotent re-run cleanup, called regardless of whether a clean copy was ever wanted) created that
+ * whole empty directory tree just to find it empty, defeating the try/catch below whose comment
+ * always intended "doesn't exist -> nothing to clear" to be a no-op, not a side effect.
  */
 export async function clearOldNumberedFilesFSA(sourceDirHandle, rootName, relDir, stem) {
   try {
-    const root = await sourceDirHandle.getDirectoryHandle(rootName, { create: true });
-    const destDir = await getNestedDirHandle(root, relDir ? `${relDir}/${stem}` : stem, true);
+    const root = await sourceDirHandle.getDirectoryHandle(rootName, { create: false });
+    const destDir = await getNestedDirHandle(root, relDir ? `${relDir}/${stem}` : stem, false);
     for await (const [name, handle] of destDir.entries()) {
       if (handle.kind === "file" && /^\d+\.wav$/i.test(name)) {
         try {

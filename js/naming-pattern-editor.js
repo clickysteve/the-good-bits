@@ -23,7 +23,9 @@ import { parsePatternToSegments, segmentsToPattern } from "./naming-tokens.js";
 
 const TOKEN_META = [
   { key: "name", label: "{name}", title: "The source file's name" },
-  { key: "tag", label: "{tag}", title: "Detected key/tempo tag, e.g. Cm 120bpm" },
+  { key: "tag", label: "{tag}", title: "Detected key + tempo combined, e.g. Cm 120bpm" },
+  { key: "key", label: "{key}", title: "Detected musical key alone, e.g. Cm" },
+  { key: "tempo", label: "{tempo}", title: "Detected tempo alone, e.g. 120" },
   { key: "number", label: "{number}", title: "Chop number - always added if missing" },
 ];
 

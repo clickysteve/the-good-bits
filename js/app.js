@@ -25,11 +25,15 @@ import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups
 import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "./dsp/stretch/workspace-state.js";
 import { createStretchWorkspace } from "./stretch-workspace.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
+import { resolveNamePattern } from "./naming-tokens.js";
 import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from "./outputstage.js";
+import { isLofiActive, lofiSnapshotForTask, wantsCleanSecondary } from "./output-scope.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
 import { APP_VERSION } from "./version.js";
 import { createEditableWaveform } from "./editor-waveform.js";
+import { resolveRegions, replaceRegions, resolveSelection } from "./chop-regions.js";
+import { isIncluded, normalizeIncludedFiles, includedFiles, setAllIncluded, noFilesIncluded, resolveActiveKey } from "./file-inclusion.js";
 import {
   AUDIO_EXTS,
   supportsFileSystemAccess,
@@ -116,6 +120,20 @@ let nextFolderId = 1;
 let looseFileGroupCounter = 0;
 let looseDestinationHandle = null; // cached FSA destination for individually-picked files
 const sourceFolders = []; // {id, name, kind:'fsa'|'legacy', handle?, isLoose?, files:[...]}
+
+/**
+ * The single place a folder descriptor enters sourceFolders, so every source path (an FSA folder
+ * pick, the split-subfolders branch, legacy webkitdirectory, drag-and-drop, individually-picked
+ * files, a reconnect) stamps `included: true` onto its files the same way - see js/file-inclusion.js.
+ * A file discovered this way is eligible for Process/Export until the picker's checkbox says
+ * otherwise; nothing downstream (processBatch, the STRETCH file strip, updateProcessButton) needs to
+ * know how the file got here, only whether `.included` is currently false.
+ */
+function pushSourceFolder(descriptor) {
+  descriptor.files = normalizeIncludedFiles(descriptor.files);
+  sourceFolders.push(descriptor);
+}
+
 // Folders remembered from a previous session (via folder-store.js/IndexedDB) whose permission
 // hasn't been re-granted yet this session - shown in the folder list with a Reconnect button.
 const pendingReconnectFolders = []; // {name, handle}
@@ -598,33 +616,56 @@ function buildTaggedStem(stem, tag) {
   return sanitizeForPath(joinNameParts(parts, namingSettings.separator), SAFE_NAME_LIMIT);
 }
 
-/** Substitutes {name}/{tag}/{number} tokens (case-insensitively) in a typed naming pattern. */
-function resolveNamePattern(template, tokens) {
-  return template.replace(/\{(name|tag|number)\}/gi, (match, key) => {
-    const value = tokens[key.toLowerCase()];
-    return value === undefined || value === null ? "" : String(value);
-  });
+/**
+ * Formats a detected key alone for the {key} token, e.g. "Cm" or "C" - same per-key formatting
+ * buildKeyTempoTag uses for the combined {tag}, just without the tempo half. "" if no key was
+ * detected, so {key} quietly drops out of the pattern rather than leaving a gap.
+ */
+function formatKeyToken(kt) {
+  return kt && kt.key ? (kt.scale === "minor" ? `${kt.key}m` : kt.key) : "";
+}
+
+/**
+ * Formats a detected tempo alone for the {tempo} token, e.g. "120" - deliberately just the rounded
+ * number with no "bpm" suffix (unlike the combined {tag}, which reads "120bpm"): {tempo} is meant to
+ * sit next to other tokens the user places and names themselves (e.g. "{name}_{tempo}_{key}"), where
+ * a bare number reads more like a sampler-friendly filename fragment. "" if no tempo was detected.
+ */
+function formatTempoToken(kt) {
+  return kt && kt.bpm ? String(Math.round(kt.bpm)) : "";
 }
 
 /**
  * Build one chop's output filename from the user-typed pattern. A {number} token is added
  * automatically if the pattern doesn't include one, so chops from the same file can never
  * collide/overwrite each other even if the pattern the user typed would otherwise repeat.
+ * `kt` is the detected {key, scale, bpm} result (or a subset for previews) - {tag} still reflects the
+ * combined key+tempo string, while {key}/{tempo} are the same detection split into independent
+ * tokens (see js/naming-tokens.js for why both forms stay supported).
  */
-function buildChopFileName(stem, tag, index) {
+function buildChopFileName(stem, tag, index, kt) {
   const num = String(index).padStart(2, "0");
   let template = (namingSettings.chopPattern || "").trim() || "{number}";
   if (!/\{number\}/i.test(template)) template = `${template} {number}`.trim();
-  const resolved = resolveNamePattern(template, { name: stem, tag, number: num }).replace(/\s+/g, " ").trim();
+  const resolved = resolveNamePattern(template, {
+    name: stem,
+    tag,
+    key: formatKeyToken(kt),
+    tempo: formatTempoToken(kt),
+    number: num,
+  })
+    .replace(/\s+/g, " ")
+    .trim();
   const base = sanitizeForPath(resolved, SAFE_NAME_LIMIT) || num;
   return `${base}.wav`;
 }
 
 /** Refreshes the "here's what that'll look like" example under the naming pattern input. */
 function updateNamingPreview() {
-  const sampleTag = buildKeyTempoTag({ key: "C", scale: "minor", bpm: 120 }, namingSettings.separator);
+  const sampleKt = { key: "C", scale: "minor", bpm: 120 };
+  const sampleTag = buildKeyTempoTag(sampleKt, namingSettings.separator);
   const folderName = buildTaggedStem("drum_take", sampleTag);
-  const sampleNames = [1, 2, 3].map((i) => buildChopFileName("drum_take", sampleTag, i));
+  const sampleNames = [1, 2, 3].map((i) => buildChopFileName("drum_take", sampleTag, i, sampleKt));
   namingPreviewEl.textContent = `${folderName}/  ->  ${sampleNames.join(", ")}`;
 }
 
@@ -814,12 +855,29 @@ function updateStretchTimeTarget() {
 function rebuildStretchFileOrder() {
   stretchFileOrder.length = 0;
   for (const folder of sourceFolders) {
-    for (const fileInfo of folder.files) stretchFileOrder.push({ key: analysisKey(folder, fileInfo), folder, fileInfo });
+    // Excluded source files (see js/file-inclusion.js) never appear on the STRETCH file strip and
+    // can never become the active file - same "not part of this job" treatment as CHOP/BOTH give them.
+    for (const fileInfo of includedFiles(folder.files)) stretchFileOrder.push({ key: analysisKey(folder, fileInfo), folder, fileInfo });
   }
-  if (stretchFileOrder.length && !stretchFileOrder.some((f) => f.key === stretchActiveKey)) {
-    stretchActiveKey = stretchFileOrder[0].key;
-  } else if (!stretchFileOrder.length) {
-    stretchActiveKey = null;
+  stretchActiveKey = resolveActiveKey(stretchFileOrder, stretchActiveKey, (f) => f.key);
+}
+
+/**
+ * Re-derives the STRETCH file strip after a source file's inclusion checkbox changes. If the
+ * currently-active file was the one just excluded, this both re-points stretchActiveKey at the next
+ * included file (or null if none remain - rebuildStretchFileOrder() handles that fallback) and stops
+ * any playback so audio for an excluded file never keeps sounding.
+ */
+function refreshFileIncludedInStretch() {
+  const previousActiveKey = stretchActiveKey;
+  rebuildStretchFileOrder();
+  if (stretchActiveKey !== previousActiveKey) {
+    stretchWorkspace.stopAllPlayback();
+    invalidateStretchPreview();
+  }
+  if (task === "stretch") {
+    renderStretchFileStrip();
+    renderStretchActivePanes();
   }
 }
 
@@ -1025,21 +1083,19 @@ timestretchCharacterSelect.addEventListener("change", () => {
 });
 
 /**
- * Simple is a clean pass, always: original tempo, no output character, nothing coloured.
- *
- * It would be surprising for a density toggle to silently keep applying a lo-fi chain you
- * configured in Advanced and can no longer see. So rather than resetting those settings (which
- * would lose them), Simple bypasses the whole effects chain and Advanced restores it. Every
- * effects decision funnels through here: stretch ratio, lo-fi enablement, and the settings
- * snapshot handed to the worker.
+ * CHOP has no stretch stage - it's STRETCH/BOTH's whole reason for existing, and CHOP's pitch is
+ * cutting without altering the audio's timing. So resolveStretchRatio() always forces a no-op ratio
+ * under CHOP, same as before this task ever had an effects chain to gate at all. Lo-fi (see
+ * lofiActive()/lofiSettingsSnapshot() below) is a separate, now CHOP-eligible decision - see the
+ * "Output Stage in CHOP" comment there for why the two are no longer gated by the same flag.
  */
-function effectsEnabled() {
+function stretchEnabled() {
   return task !== "chop";
 }
 
 /** ratio to pass to stretchChannels for this file, or 1 (no-op) if stretching doesn't apply. */
 function resolveStretchRatio(detectedBpm) {
-  if (!effectsEnabled()) return 1;
+  if (!stretchEnabled()) return 1;
   if (!stretchEffectivelyEnabled()) return 1;
   if (timestretchSettings.mode === "fixed-ratio") return timestretchSettings.ratio;
   return detectedBpm ? ratioForTargetTempo(detectedBpm, timestretchSettings.targetBpm) : 1;
@@ -1135,26 +1191,21 @@ keepCleanCopyCheckbox.addEventListener("change", () => {
   saveSettings();
 });
 
-/** true if any lo-fi stage is switched on, and effects apply at all (see effectsEnabled). */
+/**
+ * True if any lo-fi stage eligible for the current task is switched on. CHOP now shares the Output
+ * Stage character with STRETCH/BOTH (see the "Lo-fi character" -> two-section split in index.html),
+ * but not Drive/Crunch - isLofiActive()/lofiSettingsSnapshot() (js/output-scope.js) are what actually
+ * enforce that cutoff, so a Drive/Crunch setting left on from a BOTH session can't silently colour a
+ * CHOP export via a control CHOP doesn't show.
+ */
 function lofiActive() {
-  if (!effectsEnabled()) return false;
-  return outputStageSettings.enabled || driveSettings.enabled || crunchSettings.enabled;
+  return isLofiActive(task, outputStageSettings, driveSettings, crunchSettings);
 }
 
-/**
- * Plain snapshot of the current lo-fi settings, safe to structured-clone into a worker message.
- * Forced to all-off when effects are bypassed - the worker only sees this snapshot, so gating
- * lofiActive() alone would still let a stale "enabled" flag colour the audio in Simple.
- */
+/** Plain snapshot of the lo-fi settings actually eligible for the current task, safe to
+ * structured-clone into a worker message. See lofiActive() above for the CHOP/Drive/Crunch cutoff. */
 function lofiSettingsSnapshot() {
-  if (!effectsEnabled()) {
-    return {
-      outputStage: { ...outputStageSettings, enabled: false },
-      drive: { ...driveSettings, enabled: false },
-      crunch: { ...crunchSettings, enabled: false },
-    };
-  }
-  return { outputStage: { ...outputStageSettings }, drive: { ...driveSettings }, crunch: { ...crunchSettings } };
+  return lofiSnapshotForTask(task, outputStageSettings, driveSettings, crunchSettings);
 }
 
 /** Runs the enabled lo-fi stages (current settings) over a set of channels - thin wrapper around
@@ -1415,6 +1466,70 @@ function applySettings(saved) {
 // Folder queue UI
 // ---------------------------------------------------------------------------
 
+// Which folders currently have their per-file checklist expanded - a plain Set of folder ids,
+// outside renderFolderList() so re-rendering the whole list (which happens often: every add/remove,
+// every Process run) doesn't collapse a checklist the user just opened.
+const expandedFolderIds = new Set();
+
+/** Handles a source-file inclusion checkbox changing: updates the folder-row summary text, keeps
+ * the STRETCH active-file pointer sane, and disables Process/Export if nothing is included anywhere. */
+function onFileInclusionChanged() {
+  refreshFileIncludedInStretch();
+  renderFolderList();
+  updateProcessButton();
+}
+
+/** Renders one folder's per-file checklist (hidden unless expanded), with per-folder Select
+ * all/Select none links - the "quick group exclusion" the picker asks for, scoped to one import. */
+function renderFolderFileChecklist(folder) {
+  const list = document.createElement("div");
+  list.className = "folder-file-list";
+  list.hidden = !expandedFolderIds.has(folder.id);
+
+  const header = document.createElement("div");
+  header.className = "folder-file-list-header";
+  const includedCount = includedFiles(folder.files).length;
+  const summary = document.createElement("span");
+  summary.className = "folder-file-list-summary";
+  summary.textContent = `${includedCount} of ${folder.files.length} included`;
+  const allBtn = document.createElement("button");
+  allBtn.type = "button";
+  allBtn.className = "btn-link";
+  allBtn.textContent = "All";
+  allBtn.addEventListener("click", () => {
+    setAllIncluded(folder.files, true);
+    onFileInclusionChanged();
+  });
+  const noneBtn = document.createElement("button");
+  noneBtn.type = "button";
+  noneBtn.className = "btn-link";
+  noneBtn.textContent = "None";
+  noneBtn.addEventListener("click", () => {
+    setAllIncluded(folder.files, false);
+    onFileInclusionChanged();
+  });
+  header.append(summary, allBtn, noneBtn);
+  list.appendChild(header);
+
+  for (const fileInfo of folder.files) {
+    const row = document.createElement("label");
+    row.className = "folder-file-row check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = isIncluded(fileInfo);
+    box.addEventListener("change", () => {
+      fileInfo.included = box.checked;
+      onFileInclusionChanged();
+    });
+    const name = document.createElement("span");
+    name.className = "folder-file-row-name";
+    name.textContent = fileInfo.relativeDir ? `${fileInfo.relativeDir}/${fileInfo.name}` : fileInfo.name;
+    row.append(box, name);
+    list.appendChild(row);
+  }
+  return list;
+}
+
 function renderFolderList() {
   folderList.innerHTML = "";
   if (sourceFolders.length === 0 && pendingReconnectFolders.length === 0) {
@@ -1423,6 +1538,34 @@ function renderFolderList() {
     empty.textContent = "Nothing added yet.";
     folderList.appendChild(empty);
   }
+
+  const totalFileCount = sourceFolders.reduce((sum, f) => sum + f.files.length, 0);
+  if (totalFileCount > 0) {
+    const bulkRow = document.createElement("div");
+    bulkRow.className = "folder-list-bulk-row";
+    const label = document.createElement("span");
+    label.className = "folder-list-bulk-label";
+    label.textContent = `${sourceFolders.reduce((sum, f) => sum + includedFiles(f.files).length, 0)} of ${totalFileCount} file(s) included`;
+    const selectAllBtn = document.createElement("button");
+    selectAllBtn.type = "button";
+    selectAllBtn.className = "btn btn--ghost btn--small";
+    selectAllBtn.textContent = "Select all";
+    selectAllBtn.addEventListener("click", () => {
+      for (const folder of sourceFolders) setAllIncluded(folder.files, true);
+      onFileInclusionChanged();
+    });
+    const deselectAllBtn = document.createElement("button");
+    deselectAllBtn.type = "button";
+    deselectAllBtn.className = "btn btn--ghost btn--small";
+    deselectAllBtn.textContent = "Deselect all";
+    deselectAllBtn.addEventListener("click", () => {
+      for (const folder of sourceFolders) setAllIncluded(folder.files, false);
+      onFileInclusionChanged();
+    });
+    bulkRow.append(label, selectAllBtn, deselectAllBtn);
+    folderList.appendChild(bulkRow);
+  }
+
   for (const folder of sourceFolders) {
     const row = document.createElement("div");
     row.className = "folder-row";
@@ -1434,11 +1577,24 @@ function renderFolderList() {
     nameEl.textContent = folder.name;
     const countEl = document.createElement("div");
     countEl.className = "folder-row-count";
-    countEl.textContent = folder.isLoose
-      ? `${folder.files.length} file(s) - output goes to ${folder.destinationLabel || "a chosen folder"}`
-      : `${folder.files.length} audio file(s) found`;
+    const includedCount = includedFiles(folder.files).length;
+    const countLabel =
+      includedCount === folder.files.length ? `${folder.files.length} audio file(s) found` : `${includedCount} of ${folder.files.length} audio file(s) included`;
+    countEl.textContent = folder.isLoose ? `${countLabel} - output goes to ${folder.destinationLabel || "a chosen folder"}` : countLabel;
     info.appendChild(nameEl);
     info.appendChild(countEl);
+
+    const filesBtn = document.createElement("button");
+    filesBtn.type = "button";
+    filesBtn.className = "btn btn--ghost btn--small";
+    filesBtn.textContent = expandedFolderIds.has(folder.id) ? "Hide files" : "Files";
+    filesBtn.title = "Choose which files in this folder are included";
+    filesBtn.disabled = folder.files.length === 0;
+    filesBtn.addEventListener("click", () => {
+      if (expandedFolderIds.has(folder.id)) expandedFolderIds.delete(folder.id);
+      else expandedFolderIds.add(folder.id);
+      renderFolderList();
+    });
 
     const removeBtn = document.createElement("button");
     removeBtn.className = "btn btn--icon";
@@ -1448,13 +1604,19 @@ function renderFolderList() {
       const idx = sourceFolders.indexOf(folder);
       if (idx >= 0) sourceFolders.splice(idx, 1);
       if (folder.kind === "fsa" && !folder.isLoose) forgetFolder(folder.name);
+      expandedFolderIds.delete(folder.id);
       renderFolderList();
       updateProcessButton();
     });
 
+    const actions = document.createElement("div");
+    actions.className = "folder-row-actions";
+    actions.append(filesBtn, removeBtn);
+
     row.appendChild(info);
-    row.appendChild(removeBtn);
+    row.appendChild(actions);
     folderList.appendChild(row);
+    folderList.appendChild(renderFolderFileChecklist(folder));
   }
 
   // Folders remembered from a previous session, waiting on a user-gesture click to re-grant
@@ -1490,7 +1652,7 @@ function renderFolderList() {
           if (idx >= 0) pendingReconnectFolders.splice(idx, 1);
           if (!folderAlreadyQueued(pending.name)) {
             const files = await collectAudioFilesFSA(pending.handle);
-            sourceFolders.push({ id: nextFolderId++, name: pending.name, kind: "fsa", handle: pending.handle, files });
+            pushSourceFolder({ id: nextFolderId++, name: pending.name, kind: "fsa", handle: pending.handle, files });
           }
           renderFolderList();
           updateProcessButton();
@@ -1534,8 +1696,12 @@ function renderFolderList() {
 }
 
 function updateProcessButton() {
-  processBtn.disabled = processing || sourceFolders.length === 0;
-  previewBtn.disabled = processing || sourceFolders.length === 0;
+  // noFilesIncluded() (js/file-inclusion.js) covers both "nothing added yet" and "everything added
+  // was unchecked in the file picker" - Process/Export must refuse to run in either case rather than
+  // silently doing nothing or throwing on an empty batch.
+  const disabled = processing || sourceFolders.length === 0 || noFilesIncluded(sourceFolders);
+  processBtn.disabled = disabled;
+  previewBtn.disabled = disabled;
   cancelBtn.hidden = !processing;
 }
 
@@ -1588,7 +1754,7 @@ async function addFolderFSA(providedHandle, { autoProcess = true } = {}) {
       for (const child of children) {
         if (folderAlreadyQueued(child.name)) continue;
         const files = await collectAudioFilesFSA(child.handle);
-        sourceFolders.push({ id: nextFolderId++, name: child.name, kind: "fsa", handle: child.handle, files });
+        pushSourceFolder({ id: nextFolderId++, name: child.name, kind: "fsa", handle: child.handle, files });
         rememberFolder(child.name, child.handle);
         clearPendingReconnect(child.name);
         added++;
@@ -1607,7 +1773,7 @@ async function addFolderFSA(providedHandle, { autoProcess = true } = {}) {
     return;
   }
   const files = await collectAudioFilesFSA(handle);
-  sourceFolders.push({ id: nextFolderId++, name: handle.name, kind: "fsa", handle, files });
+  pushSourceFolder({ id: nextFolderId++, name: handle.name, kind: "fsa", handle, files });
   rememberFolder(handle.name, handle);
   clearPendingReconnect(handle.name);
   renderFolderList();
@@ -1624,7 +1790,7 @@ legacyFolderInput.addEventListener("change", () => {
   const wasEmpty = sourceFolders.length === 0;
   const groups = collectAudioFilesLegacy(legacyFolderInput.files, { splitSubfolders: splitSubfoldersCheckbox.checked });
   for (const g of groups) {
-    sourceFolders.push({ id: nextFolderId++, name: g.rootName, kind: "legacy", files: g.files });
+    pushSourceFolder({ id: nextFolderId++, name: g.rootName, kind: "legacy", files: g.files });
   }
   renderFolderList();
   updateProcessButton();
@@ -1653,7 +1819,7 @@ async function addIndividualFilesFSA(providedHandles, { autoProcess = true } = {
   const wasEmpty = sourceFolders.length === 0;
   looseFileGroupCounter++;
   const files = handles.map((h) => ({ relativeDir: "", name: h.name, ext: extOf(h.name), fsaHandle: h }));
-  sourceFolders.push({
+  pushSourceFolder({
     id: nextFolderId++,
     name: `Individual files ${looseFileGroupCounter}`,
     kind: "fsa",
@@ -1677,7 +1843,7 @@ legacyFilesInput.addEventListener("change", () => {
   const wasEmpty = sourceFolders.length === 0;
   looseFileGroupCounter++;
   const group = collectIndividualFilesLegacy(legacyFilesInput.files, `Individual files ${looseFileGroupCounter}`);
-  sourceFolders.push({ id: nextFolderId++, name: group.rootName, kind: "legacy", isLoose: true, files: group.files });
+  pushSourceFolder({ id: nextFolderId++, name: group.rootName, kind: "legacy", isLoose: true, files: group.files });
   renderFolderList();
   updateProcessButton();
   maybeAutoProcessInitialBatch(wasEmpty);
@@ -1768,7 +1934,7 @@ folderDropZone.addEventListener("drop", async (ev) => {
       for (const dirEntry of legacyEntries.filter((e) => e.isDirectory)) {
         const groups = await collectDroppedFolderLegacy(dirEntry, { splitSubfolders: splitSubfoldersCheckbox.checked });
         for (const g of groups) {
-          sourceFolders.push({ id: nextFolderId++, name: g.rootName, kind: "legacy", files: g.files });
+          pushSourceFolder({ id: nextFolderId++, name: g.rootName, kind: "legacy", files: g.files });
         }
       }
       const fileEntries = legacyEntries.filter((e) => e.isFile);
@@ -1776,7 +1942,7 @@ folderDropZone.addEventListener("drop", async (ev) => {
         const files = await Promise.all(fileEntries.map((e) => new Promise((resolve, reject) => e.file(resolve, reject))));
         looseFileGroupCounter++;
         const group = collectIndividualFilesLegacy(files, `Individual files ${looseFileGroupCounter}`);
-        sourceFolders.push({ id: nextFolderId++, name: group.rootName, kind: "legacy", isLoose: true, files: group.files });
+        pushSourceFolder({ id: nextFolderId++, name: group.rootName, kind: "legacy", isLoose: true, files: group.files });
       }
       renderFolderList();
       updateProcessButton();
@@ -2087,7 +2253,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     }
   }
 
-  const editContext = { folder, fileInfo, stem, tag, taggedStem, detectedBpm: kt.bpm };
+  const editContext = { folder, fileInfo, stem, tag, taggedStem, detectedBpm: kt.bpm, kt };
   let chopRows = [];
   let chopMarkers = [];
   let oneShotRows = [];
@@ -2100,19 +2266,16 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
 
   if (chopIntoPieces) {
     const modeParams = activeParams();
-    let regions;
-    if (cached && cached.chopRegions) {
-      // The current canonical regions, including any manual edit or re-chop made since the last
-      // fresh detection - reused as-is rather than re-detected, and NOT a new baseline.
-      regions = cached.chopRegions;
-      chopRegionsBaseline = cached.chopRegionsBaseline || regions.map((r) => [...r]);
-    } else if (mode === "drums") {
-      regions = computeDrumRegions(mono, buffer.sampleRate, drumBars, kt.bpm);
-    } else {
-      regions = phraseRegions(mono, buffer.sampleRate, modeParams[mode]).regions;
-    }
+    // resolveRegions() is what makes Process preserve edits: detectFresh() only ever runs when
+    // `cached` has no chopRegions yet to reuse (no prior run, or a settings change that actually
+    // affects detection went stale) - see js/chop-regions.js. Any manual edit or re-chop made since
+    // the last fresh detection rides along in cached.chopRegions and comes back out untouched.
+    const resolved = resolveRegions(cached && cached.chopRegions, cached && cached.chopRegionsBaseline, () =>
+      mode === "drums" ? computeDrumRegions(mono, buffer.sampleRate, drumBars, kt.bpm) : phraseRegions(mono, buffer.sampleRate, modeParams[mode]).regions
+    );
+    const regions = resolved.regions;
+    chopRegionsBaseline = resolved.baseline;
     chopRegions = regions;
-    if (!chopRegionsBaseline) chopRegionsBaseline = regions.map((r) => [...r]);
 
     log(`    key: ${keyText} | tempo: ${bpmText} | ${regions.length} candidate phrase(s)`);
 
@@ -2128,6 +2291,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
       mono,
       zipBatch,
       detectedBpm: kt.bpm,
+      kt,
     }));
 
     log(`    created ${chopRows.length} chop(s)`);
@@ -2136,13 +2300,11 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     // found nothing worth keeping on that particular break.
     const includeOneShots = !cached || cached.includeOneShots !== false;
     if (mode === "drums" && extractOneShots && includeOneShots) {
-      if (cached && cached.oneShotRegions) {
-        oneShotRegions = cached.oneShotRegions;
-        oneShotRegionsBaseline = cached.oneShotRegionsBaseline || oneShotRegions.map((r) => [...r]);
-      } else {
-        oneShotRegions = detectOneShotRegions(mono, buffer.sampleRate);
-        oneShotRegionsBaseline = oneShotRegions.map((r) => [...r]);
-      }
+      const resolvedShots = resolveRegions(cached && cached.oneShotRegions, cached && cached.oneShotRegionsBaseline, () =>
+        detectOneShotRegions(mono, buffer.sampleRate)
+      );
+      oneShotRegions = resolvedShots.regions;
+      oneShotRegionsBaseline = resolvedShots.baseline;
       const extracted = await writeOneShotRegions({
         folder,
         fileInfo,
@@ -2179,6 +2341,12 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     oneShotRegions: oneShotRegions || (previous && previous.oneShotRegions) || null,
     oneShotRegionsBaseline: oneShotRegionsBaseline || (previous && previous.oneShotRegionsBaseline) || null,
     includeOneShots: previous ? previous.includeOneShots !== false : true,
+    // Which chop/one-shot was selected on the waveform before this run, so a normal Process (which
+    // re-renders the whole card, including a brand-new editor instance) doesn't visibly deselect
+    // whatever the user was just looking at. resolveSelection() (used when mounting the editor below)
+    // is what actually re-validates this against the current region count.
+    chopSelectedIndex: previous ? previous.chopSelectedIndex : null,
+    oneShotSelectedIndex: previous ? previous.oneShotSelectedIndex : null,
     // Only ever freshly computed for the STRETCH task (see above) - a CHOP/BOTH run for this same
     // file doesn't touch either of these, same fallback pattern as oneShotRegions above. Without the
     // fallback, switching to CHOP/BOTH and hitting Process would silently wipe out whatever the
@@ -2219,6 +2387,8 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     editContext,
     analysisKey: key,
     hasOneShots: mode === "drums" && extractOneShots,
+    chopSelectedIndex: previous ? previous.chopSelectedIndex : null,
+    oneShotSelectedIndex: previous ? previous.oneShotSelectedIndex : null,
   };
   const block = renderFileResult(state);
   folderResultsEl.appendChild(block);
@@ -2230,14 +2400,17 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
  * zero-crossing snap, optional time-stretch (main chops only), and fades. Shared by the initial
  * auto-detected pass and by the manual chop editor's "Save & re-export".
  */
-async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, detectedBpm }) {
+async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, detectedBpm, kt }) {
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
   const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
   const fadeOutSamples = fadeInSamples;
   const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
   const stretchRatio = resolveStretchRatio(detectedBpm);
+  // The primary/secondary export model (js/output-scope.js): Output Stage (or, in STRETCH/BOTH,
+  // time-stretch too) OFF means the clean chop already IS the primary output, so a secondary clean
+  // copy is never written regardless of the "also export clean" checkbox - see wantsCleanSecondary().
   const processingActive = stretchRatio !== 1 || lofiActive();
-  const wantCleanCopy = keepUnprocessedCopy && processingActive;
+  const wantCleanCopy = wantsCleanSecondary(processingActive, keepUnprocessedCopy);
 
   // Deleting the previous run's chops is a write too, so a preview must not do it either.
   if (folder.kind === "fsa" && !dryRun) {
@@ -2291,7 +2464,7 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
   for (let i = 0; i < regionDefs.length; i++) {
     const { startSample, endSample } = regionDefs[i];
     const { blob, seconds } = heavyResults[i];
-    const fileName = buildChopFileName(stem, tag, i + 1);
+    const fileName = buildChopFileName(stem, tag, i + 1, kt);
     await writeOutput(folder, "chops", relPath, fileName, blob, zipBatch);
     if (wantCleanCopy) {
       await writeOutput(folder, "chops clean", relPath, fileName, cleanBlobs[i], zipBatch);
@@ -2304,7 +2477,7 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
 
 /** Re-decodes a source file and re-exports its main chops from a manually-edited region list. */
 async function reExportSingleFile(editContext, editedRegions) {
-  const { folder, fileInfo, stem, tag, taggedStem, detectedBpm } = editContext;
+  const { folder, fileInfo, stem, tag, taggedStem, detectedBpm, kt } = editContext;
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
@@ -2323,6 +2496,7 @@ async function reExportSingleFile(editContext, editedRegions) {
     mono,
     zipBatch,
     detectedBpm,
+    kt,
   });
 
   if (zipBatch) {
@@ -2342,7 +2516,7 @@ async function reExportSingleFile(editContext, editedRegions) {
  * only that one chop.
  */
 async function exportSelectedChop(editContext, region, index) {
-  const { folder, fileInfo, stem, tag, taggedStem, detectedBpm } = editContext;
+  const { folder, fileInfo, stem, tag, taggedStem, detectedBpm, kt } = editContext;
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
@@ -2374,7 +2548,7 @@ async function exportSelectedChop(editContext, region, index) {
   });
 
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
-  const fileName = buildChopFileName(stem, tag, index + 1);
+  const fileName = buildChopFileName(stem, tag, index + 1, kt);
 
   if (folder.kind === "fsa") {
     const ok = await ensureReadWritePermission(folder.handle);
@@ -2441,7 +2615,7 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
   // touches them when the "also apply to one-shots" scope toggle is on.
   const stretchRatio = applyProcessingToOneShots ? resolveStretchRatio(detectedBpm) : 1;
   const processingActive = applyProcessingToOneShots && (stretchRatio !== 1 || lofiActive());
-  const wantCleanCopy = keepUnprocessedCopy && processingActive;
+  const wantCleanCopy = wantsCleanSecondary(processingActive, keepUnprocessedCopy);
 
   if (folder.kind === "fsa" && !dryRun) {
     await clearOldOneShotsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
@@ -2856,26 +3030,44 @@ function renderFileResult(state) {
         }
       },
       onSelect: (idx) => {
+        // Persisted so a normal Process (which tears down and rebuilds this whole card, editor
+        // included) can restore it below rather than silently leaving nothing selected.
+        const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+        if (editing === "chops") {
+          state.chopSelectedIndex = idx;
+          if (entry) entry.chopSelectedIndex = idx;
+        } else {
+          state.oneShotSelectedIndex = idx;
+          if (entry) entry.oneShotSelectedIndex = idx;
+        }
         highlightRow(idx);
         updateExportSelectedState();
       },
     });
     editorHost.appendChild(editor.el);
     registerThemeRepaint(editor.el, () => editor && editor.redraw());
+    const previousSelection = editing === "chops" ? state.chopSelectedIndex : state.oneShotSelectedIndex;
+    const restored = resolveSelection(previousSelection, editor.getRegions().length);
+    if (restored != null) editor.select(restored);
     updateExportSelectedState();
   }
 
-  /** Replaces the canonical chop regions wholesale (re-chop, or a manual clear-to-start-fresh). */
+  /**
+   * Replaces the canonical chop regions wholesale (re-chop, or a manual clear-to-start-fresh) - an
+   * explicit, user-requested regenerate, unlike a normal Process/Export run. replaceRegions() (see
+   * js/chop-regions.js) is what gives this action its own fresh baseline, distinct from
+   * resolveRegions()'s "preserve what's already there" used by processOneFile.
+   */
   function applyNewChopRegions(newRegions) {
-    const cloned = newRegions.map((r) => [...r]);
+    const { regions: cloned, baseline } = replaceRegions(newRegions);
     const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
     if (entry) {
       entry.chopRegions = cloned.map((r) => [...r]);
-      entry.chopRegionsBaseline = cloned.map((r) => [...r]);
+      entry.chopRegionsBaseline = baseline;
     }
     state.chopMarkers = cloned;
     if (editor && editing === "chops") {
-      editor.setRegions(cloned);
+      editor.setRegions(cloned); // fires onSelect(null), which clears the persisted selection too
       updateExportSelectedState();
     }
   }
@@ -2969,6 +3161,13 @@ function renderFileResult(state) {
   exportSelectedBtn.addEventListener("click", async () => {
     const idx = editor ? editor.getSelected() : null;
     if (idx == null) return;
+    // The source file may have been excluded in the picker after this card was already rendered
+    // (see js/file-inclusion.js) - an excluded file must produce nothing, including via a stale
+    // "Export selected" button on an already-open card.
+    if (!isIncluded(state.editContext.fileInfo)) {
+      log(`  ${state.editContext.fileInfo.name} is excluded - not exporting.`);
+      return;
+    }
     const region = editor.getRegions()[idx];
     exportSelectedBtn.disabled = true;
     const previousLabel = exportSelectedBtn.textContent;
@@ -3049,14 +3248,20 @@ async function processBatch({ write = true } = {}) {
   const zipBatch = FSA_SUPPORTED || dryRun ? null : new ZipBatch();
   let totalChops = 0;
   let processedFolders = 0;
-  const totalFiles = sourceFolders.reduce((sum, f) => sum + f.files.length, 0);
+  // Excluded source files (js/file-inclusion.js) don't count toward the progress bar's total, and -
+  // via the live isIncluded() check inside the loop below - never reach processOneFile at all. The
+  // check is live rather than a filtered snapshot taken once up front so a file unchecked mid-batch
+  // (after this run already started, but before its own turn comes up) is still honoured: completed
+  // async work for other files can't "re-include" it, and it's simply skipped when its turn arrives.
+  const totalFiles = sourceFolders.reduce((sum, f) => sum + includedFiles(f.files).length, 0);
   let filesDone = 0;
   updateProgress(0, totalFiles);
 
   outer: for (const folder of sourceFolders) {
     log(`Folder: ${folder.name}`);
-    if (folder.files.length === 0) {
-      log("  No source audio found, skipped");
+    const eligibleCount = includedFiles(folder.files).length;
+    if (eligibleCount === 0) {
+      log(folder.files.length === 0 ? "  No source audio found, skipped" : "  No included files, skipped");
       continue;
     }
 
@@ -3079,6 +3284,7 @@ async function processBatch({ write = true } = {}) {
         log("Batch cancelled.");
         break outer;
       }
+      if (!isIncluded(fileInfo)) continue;
       updateProgress(filesDone, totalFiles, `${fileInfo.name} (${filesDone + 1}/${totalFiles})`);
       try {
         totalChops += await processOneFile(folder, fileInfo, zipBatch, folderSection);
@@ -3220,7 +3426,7 @@ async function loadRememberedFolders() {
       const perm = await handle.queryPermission({ mode: "readwrite" });
       if (perm === "granted") {
         const files = await collectAudioFilesFSA(handle);
-        sourceFolders.push({ id: nextFolderId++, name, kind: "fsa", handle, files });
+        pushSourceFolder({ id: nextFolderId++, name, kind: "fsa", handle, files });
       } else {
         pendingReconnectFolders.push({ name, handle });
       }

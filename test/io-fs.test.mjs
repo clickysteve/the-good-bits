@@ -3,7 +3,7 @@
 // data shaped like a FileList, so they're testable without a browser).
 // Run with: node test/io-fs.test.mjs
 import assert from "node:assert/strict";
-import { collectAudioFilesLegacy, collectIndividualFilesLegacy } from "../js/io-fs.js";
+import { collectAudioFilesLegacy, collectIndividualFilesLegacy, clearOldNumberedFilesFSA, clearOldChopsFSA } from "../js/io-fs.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -18,8 +18,51 @@ function test(name, fn) {
   }
 }
 
+async function asyncTest(name, fn) {
+  try {
+    await fn();
+    passed++;
+    console.log(`ok - ${name}`);
+  } catch (err) {
+    console.error(`FAIL - ${name}`);
+    console.error(err);
+    process.exitCode = 1;
+  }
+}
+
 function mockFile(webkitRelativePath, name) {
   return { webkitRelativePath, name };
+}
+
+/**
+ * Minimal fake FileSystemDirectoryHandle: just enough of the real API's shape
+ * (getDirectoryHandle/entries/removeEntry) for clearOldNumberedFilesFSA() to exercise, with no real
+ * filesystem underneath - a plain in-memory tree of {dirs: Map<string,FakeDir>, files: Map<string,any>}.
+ */
+function fakeDir(files = {}, dirs = {}) {
+  return {
+    kind: "directory",
+    files: new Map(Object.entries(files).map(([name]) => [name, { kind: "file", name }])),
+    dirs: new Map(Object.entries(dirs)),
+    async getDirectoryHandle(name, { create = false } = {}) {
+      if (this.dirs.has(name)) return this.dirs.get(name);
+      if (!create) {
+        const err = new Error(`NotFoundError: ${name}`);
+        err.name = "NotFoundError";
+        throw err;
+      }
+      const child = fakeDir();
+      this.dirs.set(name, child);
+      return child;
+    },
+    async *entries() {
+      for (const [name, handle] of this.files) yield [name, handle];
+      for (const [name, handle] of this.dirs) yield [name, handle];
+    },
+    async removeEntry(name) {
+      if (!this.files.delete(name)) throw new Error(`no such file: ${name}`);
+    },
+  };
 }
 
 test("collectAudioFilesLegacy: flat mode groups everything under the picked folder", () => {
@@ -86,6 +129,32 @@ test("collectIndividualFilesLegacy: builds one relativeDir-less group, filtering
   assert.equal(group.rootName, "Individual files 1");
   assert.equal(group.files.length, 2);
   assert.ok(group.files.every((f) => f.relativeDir === ""));
+});
+
+await asyncTest("clearOldNumberedFilesFSA: does NOT create a 'chops clean' directory that didn't already exist (the empty-clean-folder bug)", async () => {
+  const root = fakeDir();
+  await clearOldNumberedFilesFSA(root, "chops clean", "", "take1");
+  assert.equal(root.dirs.has("chops clean"), false, "cleaning up must never bring the directory into existence");
+});
+
+await asyncTest("clearOldNumberedFilesFSA: does NOT create the nested stem directory either, when the root exists but the stem folder doesn't", async () => {
+  const root = fakeDir({}, { "chops clean": fakeDir() });
+  await clearOldNumberedFilesFSA(root, "chops clean", "", "take1");
+  const cleanRoot = root.dirs.get("chops clean");
+  assert.equal(cleanRoot.dirs.has("take1"), false);
+});
+
+await asyncTest("clearOldNumberedFilesFSA: removes existing NN.wav files but leaves other files alone, when the directory already exists", async () => {
+  const stemDir = fakeDir({ "01.wav": true, "02.wav": true, "notes.txt": true });
+  const root = fakeDir({}, { chops: fakeDir({}, { take1: stemDir }) });
+  await clearOldNumberedFilesFSA(root, "chops", "", "take1");
+  assert.deepEqual([...stemDir.files.keys()], ["notes.txt"]);
+});
+
+await asyncTest("clearOldChopsFSA: a first-ever export (no chops/ directory yet) is a silent no-op, not an error", async () => {
+  const root = fakeDir();
+  await assert.doesNotReject(() => clearOldChopsFSA(root, "", "take1"));
+  assert.equal(root.dirs.has("chops"), false);
 });
 
 console.log(`\n${passed} test(s) passed.`);

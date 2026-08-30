@@ -227,8 +227,11 @@
       <p class="mod-note" id="timestretch-pitch-note">Pitch preserved. No confident tempo means it exports unstretched.</p>
     </section>
 
-    <section class="mod" data-tasks="stretch both">
-      <h2 class="mod-h">Lo-fi character</h2>
+    <!-- Output stage is the one lo-fi stage CHOP also gets (see js/output-scope.js) - Drive/Crunch
+         stay STRETCH/BOTH-only, in their own section below, so a setting CHOP can't see can't
+         silently affect a CHOP export either. -->
+    <section class="mod" data-tasks="chop stretch both">
+      <h2 class="mod-h">Output stage</h2>
 
       <label class="check">
         <input id="outputstage-enable-checkbox" type="checkbox" />
@@ -256,6 +259,11 @@
           </div>
         </div>
       </div>
+      <p class="mod-note">Shared with STRETCH/BOTH. Off by default - in CHOP, turning it on bakes this character into the exported chops.</p>
+    </section>
+
+    <section class="mod" data-tasks="stretch both">
+      <h2 class="mod-h">Drive &amp; crunch</h2>
 
       <label class="check">
         <input id="drive-enable-checkbox" type="checkbox" />
@@ -298,10 +306,10 @@
           </div>
         </div>
       </div>
-      <p class="mod-note">Applied in order: output stage, then drive, then crunch.</p>
+      <p class="mod-note">Applied in order: output stage, then drive, then crunch. CHOP only ever gets the output stage.</p>
     </section>
 
-    <section class="mod" data-tasks="both">
+    <section class="mod" data-tasks="chop both">
       <h2 class="mod-h">Scope</h2>
       <label class="check">
         <input id="oneshot-processing-checkbox" type="checkbox" />
