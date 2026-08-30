@@ -123,9 +123,20 @@ code {
   font-weight: 700;
   letter-spacing: 0.09em;
   text-transform: uppercase;
+  color: white;
+  text-decoration: none;
 }
 
 .brand-accent { color: var(--accent); }
+
+.brand:hover {
+  opacity: 0.8;
+}
+
+.brand:focus-visible {
+  outline: 1px solid white;
+  outline-offset: 2px;
+}
 
 .version-badge {
   font-family: var(--font-mono);
