@@ -430,22 +430,24 @@ export function createEditableWaveform({
       canvas.classList.add("waveform-canvas--dragging");
       return;
     }
-    const inside = sliceAtTime(t);
-    if (inside != null) {
-      select(inside);
-      return;
-    }
-    select(null);
     if (mono) {
       dragging = { kind: "pan", startClientX: ev.clientX, startViewStart: viewStart };
       canvas.classList.add("waveform-canvas--dragging");
+      select(null);
+    } else {
+      const inside = sliceAtTime(t);
+      if (inside != null) {
+        select(inside);
+      } else {
+        select(null);
+      }
     }
   });
 
   canvas.addEventListener("pointermove", (ev) => {
     const rect = canvas.getBoundingClientRect();
     if (!dragging) {
-      canvas.style.cursor = hitBoundary(ev.clientX) ? "ew-resize" : "grab";
+      canvas.style.cursor = hitBoundary(ev.clientX) ? "ew-resize" : (mono ? "grab" : "default");
       return;
     }
     if (dragging.kind === "boundary") {
