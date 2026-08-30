@@ -1,0 +1,84 @@
+// Node-side unit tests for js/dsp/stretch/workspace-state.js - the pure staleness/randomise logic
+// behind the Stretch workspace's "is this preview still current" indicator and its Randomise button.
+// Run with: node test/stretch-workspace-state.test.mjs
+import assert from "node:assert/strict";
+import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "../js/dsp/stretch/workspace-state.js";
+
+let passed = 0;
+function test(name, fn) {
+  try {
+    fn();
+    passed++;
+    console.log(`ok - ${name}`);
+  } catch (err) {
+    console.error(`FAIL - ${name}`);
+    console.error(err);
+    process.exitCode = 1;
+  }
+}
+
+const baseSettings = { enabled: true, mode: "target-tempo", targetBpm: 120, ratio: 1, character: "clean", macroValues: { texture: 50 }, seed: 1 };
+const baseLofi = { outputStage: { enabled: false }, drive: { enabled: false }, crunch: { enabled: false } };
+
+test("stretchRenderSignature: identical inputs produce identical signatures", () => {
+  const a = stretchRenderSignature(baseSettings, baseLofi);
+  const b = stretchRenderSignature(JSON.parse(JSON.stringify(baseSettings)), JSON.parse(JSON.stringify(baseLofi)));
+  assert.equal(a, b);
+});
+
+test("stretchRenderSignature: changing character, a macro value, or a lofi flag all change the signature", () => {
+  const base = stretchRenderSignature(baseSettings, baseLofi);
+  assert.notEqual(stretchRenderSignature({ ...baseSettings, character: "scatter" }, baseLofi), base);
+  assert.notEqual(stretchRenderSignature({ ...baseSettings, macroValues: { texture: 51 } }, baseLofi), base);
+  assert.notEqual(stretchRenderSignature(baseSettings, { ...baseLofi, drive: { enabled: true } }), base);
+});
+
+test("isProcessedPreviewStale: no rendered signature yet is never stale", () => {
+  assert.equal(isProcessedPreviewStale(null, baseSettings, baseLofi), false);
+  assert.equal(isProcessedPreviewStale(undefined, baseSettings, baseLofi), false);
+});
+
+test("isProcessedPreviewStale: matching signature is not stale, a settings change afterwards is", () => {
+  const rendered = stretchRenderSignature(baseSettings, baseLofi);
+  assert.equal(isProcessedPreviewStale(rendered, baseSettings, baseLofi), false);
+  const changed = { ...baseSettings, character: "infinite" };
+  assert.equal(isProcessedPreviewStale(rendered, changed, baseLofi), true);
+});
+
+test("randomiseMacroValues: only touches the character's own macros, leaves other keys and the object identity untouched", () => {
+  const character = { macros: ["texture", "variation"] };
+  const current = { texture: 10, variation: 20, smear: 77, roughness: 5 };
+  let call = 0;
+  const rng = () => [0.1, 0.9][call++]; // deterministic sequence for the test
+  const next = randomiseMacroValues(character, current, rng);
+  assert.notEqual(next, current, "should return a new object");
+  assert.equal(current.texture, 10, "should not mutate the input");
+  assert.equal(next.texture, 10); // round(0.1*100)
+  assert.equal(next.variation, 90); // round(0.9*100)
+  assert.equal(next.smear, 77, "untouched macro should pass through unchanged");
+  assert.equal(next.roughness, 5, "untouched macro should pass through unchanged");
+});
+
+test("randomiseMacroValues: a character with no macros returns an equivalent (but new) object", () => {
+  const character = {};
+  const current = { texture: 50 };
+  const next = randomiseMacroValues(character, current, Math.random);
+  assert.deepEqual(next, current);
+  assert.notEqual(next, current);
+});
+
+test("randomiseMacroValues: handles a null/undefined currentMacroValues without throwing", () => {
+  const character = { macros: ["smear"] };
+  const next = randomiseMacroValues(character, undefined, () => 0.5);
+  assert.equal(next.smear, 50);
+});
+
+test("randomSeed: stays within [0, 999999] and is driven by the supplied rng", () => {
+  assert.equal(randomSeed(() => 0), 0);
+  assert.equal(randomSeed(() => 0.999999), 999999);
+  const seeds = new Set(Array.from({ length: 20 }, () => randomSeed(Math.random)));
+  assert.ok(seeds.size > 1, "should vary across calls with Math.random");
+  for (const s of seeds) assert.ok(s >= 0 && s <= 999999);
+});
+
+console.log(`\n${passed} test(s) passed.`);

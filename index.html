@@ -188,32 +188,46 @@
             <span class="slider-unit">%</span>
           </div>
         </div>
-        <div class="field">
-          <label for="timestretch-character-select">Character</label>
-          <select id="timestretch-character-select"></select>
-          <p class="mod-note" id="timestretch-character-hint"></p>
+        <div class="field-readout stretch-only">
+          <span>Detected tempo</span>
+          <strong id="timestretch-detected-bpm-readout">–</strong>
         </div>
-        <div class="field" id="timestretch-macro1-row" hidden>
-          <label for="timestretch-macro1-slider" id="timestretch-macro1-label">Amount</label>
-          <div class="slider-row">
-            <input id="timestretch-macro1-slider" type="range" min="0" max="100" step="1" value="50" />
-            <input id="timestretch-macro1-value" type="number" class="slider-number" min="0" max="100" step="1" value="50" />
-            <span class="slider-unit">%</span>
+        <div class="field-readout stretch-only">
+          <span>Stretch ratio</span>
+          <strong id="timestretch-resolved-ratio-readout">–</strong>
+        </div>
+        <!-- Character + its creative controls live in the Stretch workspace itself (the character
+             browser) for the STRETCH task - the whole point of that redesign was to stop squeezing
+             the app's most interesting DSP into this narrow rail. BOTH keeps them here unchanged,
+             since this pass is deliberately scoped to STRETCH only (see js/stretch-workspace.js). -->
+        <div class="both-only">
+          <div class="field">
+            <label for="timestretch-character-select">Character</label>
+            <select id="timestretch-character-select"></select>
+            <p class="mod-note" id="timestretch-character-hint"></p>
           </div>
-          <p class="mod-note" id="timestretch-macro1-hint"></p>
-        </div>
-        <div class="field" id="timestretch-macro2-row" hidden>
-          <label for="timestretch-macro2-slider" id="timestretch-macro2-label">Amount</label>
-          <div class="slider-row">
-            <input id="timestretch-macro2-slider" type="range" min="0" max="100" step="1" value="50" />
-            <input id="timestretch-macro2-value" type="number" class="slider-number" min="0" max="100" step="1" value="50" />
-            <span class="slider-unit">%</span>
+          <div class="field" id="timestretch-macro1-row" hidden>
+            <label for="timestretch-macro1-slider" id="timestretch-macro1-label">Amount</label>
+            <div class="slider-row">
+              <input id="timestretch-macro1-slider" type="range" min="0" max="100" step="1" value="50" />
+              <input id="timestretch-macro1-value" type="number" class="slider-number" min="0" max="100" step="1" value="50" />
+              <span class="slider-unit">%</span>
+            </div>
+            <p class="mod-note" id="timestretch-macro1-hint"></p>
           </div>
-          <p class="mod-note" id="timestretch-macro2-hint"></p>
-        </div>
-        <div class="field" id="timestretch-seed-row" hidden>
-          <label for="timestretch-seed-input">Variation seed</label>
-          <input id="timestretch-seed-input" type="number" min="0" max="999999" step="1" value="1" />
+          <div class="field" id="timestretch-macro2-row" hidden>
+            <label for="timestretch-macro2-slider" id="timestretch-macro2-label">Amount</label>
+            <div class="slider-row">
+              <input id="timestretch-macro2-slider" type="range" min="0" max="100" step="1" value="50" />
+              <input id="timestretch-macro2-value" type="number" class="slider-number" min="0" max="100" step="1" value="50" />
+              <span class="slider-unit">%</span>
+            </div>
+            <p class="mod-note" id="timestretch-macro2-hint"></p>
+          </div>
+          <div class="field" id="timestretch-seed-row" hidden>
+            <label for="timestretch-seed-input">Variation seed</label>
+            <input id="timestretch-seed-input" type="number" min="0" max="999999" step="1" value="1" />
+          </div>
         </div>
       </div>
       <p class="mod-note" id="timestretch-pitch-note">Pitch preserved. No confident tempo means it exports unstretched.</p>
@@ -329,6 +343,13 @@
         <input id="legacy-files-input" type="file" multiple accept=".wav,.m4a,.aif,.aiff,.flac,.mp3" hidden />
 
         <div id="folder-list" class="folder-list"></div>
+
+        <!-- STRETCH's own workspace: pick a file, browse/tweak a character, compare Original vs
+             Processed. Built and populated by js/app.js + js/stretch-workspace.js; CHOP and BOTH
+             keep using #results-panel below unchanged. Shown/hidden purely via the `hidden`
+             attribute (see updateStretchWorkspaceVisibility() in app.js) rather than a [data-task]
+             CSS rule, since it also depends on whether any audio has been queued yet. -->
+        <div id="stretch-workspace" class="stretch-workspace" hidden></div>
 
         <div id="results-panel" class="results-panel"></div>
       </main>

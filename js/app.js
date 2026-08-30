@@ -22,6 +22,8 @@ import {
   equalSliceRegions,
 } from "./dsp.js";
 import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups, MACROS } from "./timestretch.js";
+import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "./dsp/stretch/workspace-state.js";
+import { createStretchWorkspace } from "./stretch-workspace.js";
 import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from "./outputstage.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
@@ -309,6 +311,9 @@ const timestretchMacro2Hint = $("#timestretch-macro2-hint");
 const timestretchSeedRow = $("#timestretch-seed-row");
 const timestretchSeedInput = $("#timestretch-seed-input");
 const timestretchPitchNote = $("#timestretch-pitch-note");
+const timestretchDetectedBpmReadout = $("#timestretch-detected-bpm-readout");
+const timestretchResolvedRatioReadout = $("#timestretch-resolved-ratio-readout");
+const stretchWorkspaceEl = $("#stretch-workspace");
 const detectionParamsPanel = $("#detection-params-panel");
 const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
 const outputstageOptions = $("#outputstage-options");
@@ -721,6 +726,130 @@ timestretchSeedInput.addEventListener("change", () => {
   saveSettings();
 });
 
+// ---------------------------------------------------------------------------
+// Stretch workspace: STRETCH's central Original vs. Processed audition area, its character
+// browser, and per-file selection. CHOP and BOTH are untouched - they keep rendering into
+// #results-panel via renderFileResult(), exactly as before this redesign. See
+// js/stretch-workspace.js for the renderer and js/dsp/stretch/workspace-state.js for the pure
+// staleness/randomise helpers behind it.
+//
+// State lives in two places, same split as everywhere else in this file: `analysisCache` (keyed by
+// analysisKey(), see near the top of this file) gets two extra fields per entry when task is
+// STRETCH - stretchOriginal and stretchProcessed - populated by processOneFile(); this module only
+// tracks which file is currently active in the workspace and re-renders from that cache.
+// ---------------------------------------------------------------------------
+
+const stretchWorkspace = createStretchWorkspace({ container: stretchWorkspaceEl, getAudioContext, color: themeColor });
+
+let stretchActiveKey = null; // analysisKey() of the file shown in the workspace right now
+const stretchFileOrder = []; // [{key, folder, fileInfo}], rebuilt at the start of every stretch-task batch run
+
+/** Everything that affects what a stretch render sounds like - lofi included, since the workspace's Processed pane reflects the whole chain, not just the stretch stage. */
+function currentStretchSignature() {
+  return stretchRenderSignature(timestretchSettings, lofiSettingsSnapshot());
+}
+
+function stretchStaleFor(entry) {
+  return !!(entry && entry.stretchProcessed && isProcessedPreviewStale(entry.stretchProcessed.signature, timestretchSettings, lofiSettingsSnapshot()));
+}
+
+/** Cheap - safe to call on every settings tweak (see saveSettings()). Never rebuilds a waveform. */
+function refreshStretchStaleIndicator() {
+  if (task !== "stretch") return;
+  const entry = stretchActiveKey ? analysisCache.get(stretchActiveKey) : null;
+  stretchWorkspace.setStale(stretchStaleFor(entry));
+  updateStretchDetectedReadouts();
+}
+
+function updateStretchDetectedReadouts() {
+  const entry = stretchActiveKey ? analysisCache.get(stretchActiveKey) : null;
+  const bpm = entry && entry.kt ? entry.kt.bpm : null;
+  timestretchDetectedBpmReadout.textContent = bpm ? `${Math.round(bpm)} BPM` : "–";
+  timestretchResolvedRatioReadout.textContent = entry ? `${resolveStretchRatio(bpm).toFixed(2)}x` : "–";
+}
+
+/**
+ * Rebuilds the flat file list the workspace's file strip shows, from whatever's currently queued -
+ * called on every add/remove (via renderFolderList()) so a newly-added file appears right away
+ * (shown as not-yet-processed) rather than waiting for the next Process/Export run, AND at the start
+ * of every stretch-task batch run so processing order matches what's on screen. Picks a default
+ * active file if none is set (or the previous one is gone).
+ */
+function rebuildStretchFileOrder() {
+  stretchFileOrder.length = 0;
+  for (const folder of sourceFolders) {
+    for (const fileInfo of folder.files) stretchFileOrder.push({ key: analysisKey(folder, fileInfo), folder, fileInfo });
+  }
+  if (stretchFileOrder.length && !stretchFileOrder.some((f) => f.key === stretchActiveKey)) {
+    stretchActiveKey = stretchFileOrder[0].key;
+  } else if (!stretchFileOrder.length) {
+    stretchActiveKey = null;
+  }
+}
+
+function renderStretchFileStrip() {
+  const items = stretchFileOrder.map(({ key, fileInfo }) => {
+    const entry = analysisCache.get(key);
+    return { key, fileName: fileInfo.name, processed: !!(entry && entry.stretchOriginal) };
+  });
+  stretchWorkspace.setFileList(items, stretchActiveKey, setStretchActiveFile);
+}
+
+function renderStretchActivePanes() {
+  const entry = stretchActiveKey ? analysisCache.get(stretchActiveKey) : null;
+  stretchWorkspace.setOriginal(entry ? entry.stretchOriginal : null);
+  stretchWorkspace.setProcessed(entry ? entry.stretchProcessed : null, stretchStaleFor(entry));
+  updateStretchDetectedReadouts();
+}
+
+function setStretchActiveFile(key) {
+  if (stretchActiveKey === key) return;
+  stretchWorkspace.stopAllPlayback();
+  stretchActiveKey = key;
+  renderStretchFileStrip();
+  renderStretchActivePanes();
+}
+
+function renderStretchCharacterBrowser() {
+  if (task !== "stretch") return;
+  stretchWorkspace.renderCharacterBrowser({
+    characterKey: timestretchSettings.character,
+    macroValues: timestretchSettings.macroValues,
+    seed: timestretchSettings.seed,
+    onSelectCharacter: (key) => {
+      if (timestretchSettings.character === key) return;
+      timestretchSettings.character = key;
+      updateCharacterUI(); // keeps the BOTH-only rail select (still live for the BOTH task) in sync
+      renderStretchCharacterBrowser();
+      saveSettings();
+    },
+    onMacroChange: (key, value) => {
+      timestretchSettings.macroValues[key] = value;
+      saveSettings();
+    },
+    onSeedChange: (value) => {
+      timestretchSettings.seed = value;
+      saveSettings();
+    },
+    onRandomise: () => {
+      const character = resolveCharacter(timestretchSettings.character);
+      timestretchSettings.macroValues = randomiseMacroValues(character, timestretchSettings.macroValues);
+      if (character.usesSeed) timestretchSettings.seed = randomSeed();
+      renderStretchCharacterBrowser();
+      updateCharacterUI();
+      saveSettings();
+      log(`  randomised "${character.label}"'s creative controls.`);
+    },
+  });
+}
+
+/** Shows/hides the whole workspace - only meaningful once there's something in it to show. */
+function updateStretchWorkspaceVisibility() {
+  const show = task === "stretch" && sourceFolders.length > 0;
+  stretchWorkspaceEl.hidden = !show;
+  if (!show) stretchWorkspace.stopAllPlayback();
+}
+
 /**
  * STRETCH's entire purpose is stretching, so the "Stretch on export" checkbox has nothing to gate
  * there - stretch is inherently on, and its options should just be visible, not hidden behind a
@@ -919,6 +1048,11 @@ function saveSettings() {
   } catch (_) {
     /* best-effort only - private browsing, storage disabled, quota, etc. */
   }
+  // Every settings mutation in this file funnels through here, which makes this the one place that
+  // needs to know "did something that would change a stretch render just happen" - see
+  // refreshStretchStaleIndicator(). Cheap (a string compare, no waveform rebuild) and a no-op
+  // outside the STRETCH task.
+  refreshStretchStaleIndicator();
 }
 
 function loadSettings() {
@@ -964,6 +1098,15 @@ function applyTask(next, { persist = true } = {}) {
   updateDrumOptionsVisibility();
   updateNamingPreview();
   updateStretchTaskVisibility();
+  updateStretchWorkspaceVisibility();
+  if (task === "stretch") {
+    renderStretchCharacterBrowser();
+    renderStretchFileStrip();
+    renderStretchActivePanes();
+  } else {
+    // Leaving STRETCH (or never having been there) - nothing in the workspace should keep sounding.
+    stretchWorkspace.stopAllPlayback();
+  }
   if (persist) {
     try {
       localStorage.setItem(TASK_STORAGE_KEY, task);
@@ -1109,6 +1252,13 @@ function applySettings(saved) {
     keepCleanCopyCheckbox.checked = keepUnprocessedCopy;
   }
   updateDrumOptionsVisibility();
+  // applyTask() (which runs before this, in init()) already rendered the character browser once
+  // with whatever timestretchSettings held at the time - defaults, for a returning visitor, since
+  // saved.timestretch is merged in above. Re-render now that it reflects the actual saved settings.
+  if (task === "stretch") {
+    renderStretchCharacterBrowser();
+    updateStretchDetectedReadouts();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,6 +1372,14 @@ function renderFolderList() {
     row.appendChild(info);
     row.appendChild(actions);
     folderList.appendChild(row);
+  }
+  updateStretchWorkspaceVisibility();
+  // Keeps the workspace's file strip live even before Process runs: a newly-added file appears
+  // immediately (as not-yet-processed), and a removed folder's files disappear from it too.
+  rebuildStretchFileOrder();
+  if (task === "stretch") {
+    renderStretchFileStrip();
+    renderStretchActivePanes();
   }
 }
 
@@ -1498,6 +1656,9 @@ clearFoldersBtn.addEventListener("click", () => {
   looseDestinationHandle = null;
   forgetAllFolders();
   invalidateAnalysis();
+  // renderFolderList() also calls updateStretchWorkspaceVisibility() (stops any preview playback and
+  // hides the workspace, since sourceFolders is now empty) and rebuildStretchFileOrder() (empties the
+  // file strip and clears stretchActiveKey, since there's nothing left to point at).
   renderFolderList();
   updateProcessButton();
 });
@@ -1684,7 +1845,12 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   const fullStretchRatio = resolveStretchRatio(kt.bpm);
   const fullStretched = fullStretchRatio !== 1;
   const fullLofi = lofiActive();
-  if (fullStretched || fullLofi) {
+  // STRETCH always needs this render for the workspace's Processed pane, even when it would end up
+  // identical to Original (ratio 1, lo-fi off) - the whole point of the A/B view is showing that
+  // clearly rather than showing nothing. CHOP/BOTH keep the original behaviour: only render (and
+  // only ever write) a derived copy when it would actually differ from the source.
+  let stretchProcessedForWorkspace = null;
+  if (fullStretched || fullLofi || task === "stretch") {
     const [{ blob: derivedBlob }] = await processRegionsHeavy({
       sampleRate: buffer.sampleRate,
       bitDepth: 24,
@@ -1696,9 +1862,25 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
       seed: timestretchSettings.seed,
       regions: [{ channels: channels.map((ch) => Float32Array.from(ch)) }],
     });
-    const derivedName = `${taggedStem}${fullStretched ? " stretched" : ""}${fullLofi ? " lofi" : ""}.wav`;
-    await writeOutput(folder, "wav", fileInfo.relativeDir, derivedName, derivedBlob, zipBatch);
-    log(`    wrote a full-length ${[fullStretched && "time-stretched", fullLofi && "lo-fi"].filter(Boolean).join(" + ")} copy`);
+    if (fullStretched || fullLofi) {
+      const derivedName = `${taggedStem}${fullStretched ? " stretched" : ""}${fullLofi ? " lofi" : ""}.wav`;
+      await writeOutput(folder, "wav", fileInfo.relativeDir, derivedName, derivedBlob, zipBatch);
+      log(`    wrote a full-length ${[fullStretched && "time-stretched", fullLofi && "lo-fi"].filter(Boolean).join(" + ")} copy`);
+    }
+    if (task === "stretch") {
+      // Decoded back into raw samples for the workspace's waveform + playback - reuses the exact
+      // WAV bytes Export would write rather than a second, possibly-diverging DSP path.
+      const decoded = await getAudioContext().decodeAudioData(await derivedBlob.arrayBuffer());
+      const processedChannels = bufferChannels(decoded);
+      stretchProcessedForWorkspace = {
+        mono: toMono(processedChannels),
+        sampleRate: decoded.sampleRate,
+        duration: decoded.length / decoded.sampleRate,
+        characterLabel: resolveCharacter(timestretchSettings.character).label,
+        ratio: fullStretchRatio,
+        signature: currentStretchSignature(),
+      };
+    }
   }
 
   const editContext = { folder, fileInfo, stem, tag, taggedStem, detectedBpm: kt.bpm };
@@ -1793,7 +1975,26 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     oneShotRegions: oneShotRegions || (previous && previous.oneShotRegions) || null,
     oneShotRegionsBaseline: oneShotRegionsBaseline || (previous && previous.oneShotRegionsBaseline) || null,
     includeOneShots: previous ? previous.includeOneShots !== false : true,
+    // Only ever freshly computed for the STRETCH task (see above) - a CHOP/BOTH run for this same
+    // file doesn't touch either of these, same fallback pattern as oneShotRegions above. Without the
+    // fallback, switching to CHOP/BOTH and hitting Process would silently wipe out whatever the
+    // Stretch workspace had already shown for this file, even though nothing about the stretch
+    // render actually changed.
+    stretchOriginal:
+      task === "stretch"
+        ? { mono, sampleRate: buffer.sampleRate, duration: mono.length / buffer.sampleRate, bpmText, keyText }
+        : (previous && previous.stretchOriginal) || null,
+    stretchProcessed: task === "stretch" ? stretchProcessedForWorkspace : (previous && previous.stretchProcessed) || null,
   });
+
+  if (task === "stretch") {
+    // No chop-oriented card for this task any more - the workspace (file strip + Original/Processed)
+    // is the whole UI. See js/stretch-workspace.js and the "Stretch workspace" section above.
+    if (!stretchActiveKey) stretchActiveKey = key;
+    renderStretchFileStrip();
+    if (stretchActiveKey === key) renderStretchActivePanes();
+    return 0;
+  }
 
   const state = {
     fileName: fileInfo.name,
@@ -2626,6 +2827,14 @@ async function processBatch({ write = true } = {}) {
   drumTempoSkipPolicy = null;
   log(write ? "Exporting…" : "Processing. Nothing is saved until you hit Export.");
 
+  if (task === "stretch") {
+    // Usually a no-op (renderFolderList() already keeps this current as files are added/removed) -
+    // reasserted here so processing order always matches the queue even if something upstream
+    // changed it without going through that path.
+    rebuildStretchFileOrder();
+    renderStretchFileStrip();
+  }
+
   const zipBatch = FSA_SUPPORTED || dryRun ? null : new ZipBatch();
   let totalChops = 0;
   let processedFolders = 0;
@@ -2650,7 +2859,9 @@ async function processBatch({ write = true } = {}) {
       }
     }
 
-    const folderSection = renderFolderResultSection(folder);
+    // STRETCH has no per-folder results section any more - the workspace shows one active file at a
+    // time regardless of which folder it came from. See processOneFile()'s task === "stretch" branch.
+    const folderSection = task === "stretch" ? null : renderFolderResultSection(folder);
 
     for (const fileInfo of folder.files) {
       if (cancelRequested) {
@@ -2679,7 +2890,10 @@ async function processBatch({ write = true } = {}) {
     log("ZIP download started.");
   }
 
-  if (dryRun) {
+  if (task === "stretch") {
+    const status = cancelRequested ? "Cancelled." : "Done.";
+    log(dryRun ? `${status} Processed ${filesDone} file(s). Adjust anything you want, then hit Export to save.` : `${status} Exported ${filesDone} file(s).`);
+  } else if (dryRun) {
     log(
       `${cancelRequested ? "Cancelled." : "Done."} ${totalChops} chop(s) from ${processedFolders} folder(s). ` +
         `Adjust anything you want, then hit Export to save.`
