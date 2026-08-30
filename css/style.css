@@ -200,6 +200,11 @@ code {
 .seg-btn:hover { color: var(--text); }
 .seg-btn.is-active { background: var(--accent); color: var(--on-accent); font-weight: 500; }
 
+.btn--loop.is-active {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
 /* ---------- essentials strip (both densities, drums only) ---------- */
 
 .essentials {

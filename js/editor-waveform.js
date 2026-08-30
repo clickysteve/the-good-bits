@@ -70,6 +70,8 @@ export function createEditableWaveform({
 
   const playBtn = mkBtn("▶ Play", `Play the selected ${noun} (Space)`);
   const stopBtn = mkBtn("■ Stop", "Stop playback (Esc)");
+  const loopBtn = mkBtn("↺ Loop", "Loop the selected slice");
+  loopBtn.classList.add("btn--loop");
   const addBtn = mkBtn("+ Add", `Add a ${noun} (or double-click the waveform)`);
   const deleteBtn = mkBtn("Delete", `Delete the selected ${noun} (Delete)`);
   const zoomOutBtn = mkBtn("−", "Zoom out");
@@ -77,7 +79,7 @@ export function createEditableWaveform({
   const fitBtn = mkBtn("Fit", "Zoom to fit");
   const zoomLabel = document.createElement("span");
   zoomLabel.className = "editable-waveform-zoom-label";
-  toolbar.append(playBtn, stopBtn, addBtn, deleteBtn, zoomOutBtn, zoomInBtn, fitBtn, zoomLabel);
+  toolbar.append(playBtn, stopBtn, loopBtn, addBtn, deleteBtn, zoomOutBtn, zoomInBtn, fitBtn, zoomLabel);
   wrap.appendChild(toolbar);
 
   const canvas = document.createElement("canvas");
@@ -264,10 +266,16 @@ export function createEditableWaveform({
   let audioCtx = null;
   let currentSource = null;
   let rafId = 0;
+  let loopEnabled = false;
+  let playingIdx = null; // index of the slice currentSource was built from
+  let playStartedAt = 0; // audioCtx.currentTime when currentSource.start() was called
+  let loopRebuildRafId = 0; // coalesces rebuilds while a boundary drag is in progress
 
   function stopPlayback() {
     if (rafId) cancelAnimationFrame(rafId);
     rafId = 0;
+    if (loopRebuildRafId) cancelAnimationFrame(loopRebuildRafId);
+    loopRebuildRafId = 0;
     if (currentSource) {
       try {
         currentSource.stop();
@@ -276,6 +284,7 @@ export function createEditableWaveform({
       }
       currentSource = null;
     }
+    playingIdx = null;
     if (playhead != null) {
       playhead = null;
       redraw();
@@ -283,39 +292,113 @@ export function createEditableWaveform({
     playBtn.classList.remove("is-playing");
   }
 
+  /** Builds a fresh source+buffer for the given {s,e} region, applying the current loop state. */
+  function createSourceForRegion(r) {
+    const a = Math.max(0, Math.round(r.s * sampleRate));
+    const b = Math.min(mono.length, Math.round(r.e * sampleRate));
+    if (b <= a) return null;
+    const buf = audioCtx.createBuffer(1, b - a, sampleRate);
+    buf.getChannelData(0).set(mono.subarray(a, b));
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    if (loopEnabled) {
+      src.loop = true;
+      src.loopStart = 0;
+      src.loopEnd = buf.duration;
+    }
+    return src;
+  }
+
+  /**
+   * Drives the playhead for `src` against `region`, wrapping visually on every loop pass. Reads
+   * src.loop live each frame so toggling Loop off mid-flight lets the current pass finish and
+   * report its true position instead of being clamped to the region end.
+   */
+  function startTick(src, region) {
+    const regionDuration = region.e - region.s;
+    let passStartedAt = playStartedAt;
+    const tick = () => {
+      if (currentSource !== src) return;
+      let elapsed = audioCtx.currentTime - passStartedAt;
+      if (regionDuration > 0 && elapsed >= regionDuration) {
+        if (src.loop) {
+          const wraps = Math.floor(elapsed / regionDuration);
+          passStartedAt += wraps * regionDuration;
+          elapsed -= wraps * regionDuration;
+        } else {
+          elapsed = regionDuration;
+        }
+      }
+      playhead = region.s + elapsed;
+      redraw();
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+  }
+
   function playSelected() {
     if (selected == null || !mono || !sampleRate) return;
-    const r = slices[selected];
     stopPlayback();
     try {
       audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     } catch (_) {
       return; // no Web Audio here; the button just does nothing rather than throwing
     }
-    const a = Math.max(0, Math.round(r.s * sampleRate));
-    const b = Math.min(mono.length, Math.round(r.e * sampleRate));
-    if (b <= a) return;
-    const buf = audioCtx.createBuffer(1, b - a, sampleRate);
-    buf.getChannelData(0).set(mono.subarray(a, b));
-    const src = audioCtx.createBufferSource();
-    src.buffer = buf;
-    src.connect(audioCtx.destination);
-    const startedAt = audioCtx.currentTime;
-    playBtn.classList.add("is-playing");
+    const idx = selected;
+    const region = { s: slices[idx].s, e: slices[idx].e };
+    const src = createSourceForRegion(region);
+    if (!src) return;
     src.onended = () => {
       if (currentSource === src) stopPlayback();
     };
     src.start();
     currentSource = src;
+    playingIdx = idx;
+    playStartedAt = audioCtx.currentTime;
+    playBtn.classList.add("is-playing");
+    startTick(src, region);
+  }
 
-    const tick = () => {
-      if (currentSource !== src) return;
-      playhead = r.s + (audioCtx.currentTime - startedAt);
-      if (playhead >= r.e) playhead = r.e;
-      redraw();
-      rafId = requestAnimationFrame(tick);
+  /** True while a boundary drag on `refs` should live-update the currently looping audition. */
+  function loopRebuildApplies(refs) {
+    return (
+      loopEnabled &&
+      playingIdx != null &&
+      selected === playingIdx &&
+      !!currentSource &&
+      refs.some((r) => r.idx === playingIdx)
+    );
+  }
+
+  /** Rebuilds currentSource from the slice's live bounds, preserving loop/selection/UI state. */
+  function rebuildPlayingSource() {
+    if (playingIdx == null || !currentSource) return;
+    const region = { s: slices[playingIdx].s, e: slices[playingIdx].e };
+    const src = createSourceForRegion(region);
+    if (!src) return;
+    if (rafId) cancelAnimationFrame(rafId);
+    try {
+      currentSource.stop();
+    } catch (_) {
+      /* already stopped */
+    }
+    src.onended = () => {
+      if (currentSource === src) stopPlayback();
     };
-    rafId = requestAnimationFrame(tick);
+    src.start();
+    currentSource = src;
+    playStartedAt = audioCtx.currentTime;
+    startTick(src, region);
+  }
+
+  /** Throttles rebuildPlayingSource to at most once per animation frame during a drag. */
+  function scheduleLoopRebuild(refs) {
+    if (!loopRebuildApplies(refs) || loopRebuildRafId) return;
+    loopRebuildRafId = requestAnimationFrame(() => {
+      loopRebuildRafId = 0;
+      rebuildPlayingSource();
+    });
   }
 
   // ---- mutation -------------------------------------------------------------
@@ -349,6 +432,19 @@ export function createEditableWaveform({
 
   addBtn.addEventListener("click", () => addSliceAt(viewStart + viewDuration / 2));
   deleteBtn.addEventListener("click", deleteSelected);
+  loopBtn.addEventListener("click", () => {
+    loopEnabled = !loopEnabled;
+    loopBtn.classList.toggle("is-active", loopEnabled);
+    // Mutate the live source directly - toggling Loop must never restart playback.
+    if (currentSource) {
+      currentSource.loop = loopEnabled;
+      if (loopEnabled) {
+        currentSource.loopStart = 0;
+        currentSource.loopEnd = currentSource.buffer.duration;
+      }
+    }
+  });
+
   playBtn.addEventListener("click", playSelected);
   stopBtn.addEventListener("click", stopPlayback);
   zoomInBtn.addEventListener("click", () => zoomAt(viewStart + viewDuration / 2, 1.6));
@@ -430,6 +526,12 @@ export function createEditableWaveform({
     addSliceAt(xToTime(ev.clientX - rect.left, rect.width));
   });
 
+  // A pointerdown can't yet know if it's a click or a drag, so it only remembers what a click
+  // would do (select the boundary's start slice, or the slice under the pointer) in a "pending-*"
+  // state. Movement past DRAG_THRESHOLD_PX upgrades it to a real "boundary"/"pan" drag, which never
+  // touches selection - a drag edits or pans, it doesn't select.
+  const DRAG_THRESHOLD_PX = 4;
+
   canvas.addEventListener("pointerdown", (ev) => {
     wrap.focus({ preventScroll: true });
     const rect = canvas.getBoundingClientRect();
@@ -437,24 +539,19 @@ export function createEditableWaveform({
     const b = hitBoundary(ev.clientX);
     canvas.setPointerCapture(ev.pointerId);
     if (b) {
-      dragging = { kind: "boundary", refs: b.refs };
-      // selecting the slice this edge belongs to keeps the list highlight in step with the drag
-      const startRef = b.refs.find((r) => r.which === "s");
-      select(startRef != null ? startRef.idx : b.refs[0].idx);
-      canvas.classList.add("waveform-canvas--dragging");
+      dragging = { kind: "pending-boundary", refs: b.refs, startClientX: ev.clientX, startClientY: ev.clientY };
       return;
     }
     if (mono) {
-      dragging = { kind: "pan", startClientX: ev.clientX, startViewStart: viewStart };
-      canvas.classList.add("waveform-canvas--dragging");
-      select(null);
+      dragging = {
+        kind: "pending-pan",
+        startClientX: ev.clientX,
+        startClientY: ev.clientY,
+        startViewStart: viewStart,
+        hitSlice: sliceAtTime(t),
+      };
     } else {
-      const inside = sliceAtTime(t);
-      if (inside != null) {
-        select(inside);
-      } else {
-        select(null);
-      }
+      select(sliceAtTime(t));
     }
   });
 
@@ -464,9 +561,22 @@ export function createEditableWaveform({
       canvas.style.cursor = hitBoundary(ev.clientX) ? "ew-resize" : (mono ? "grab" : "default");
       return;
     }
+    if (dragging.kind === "pending-boundary" || dragging.kind === "pending-pan") {
+      const dx = ev.clientX - dragging.startClientX;
+      const dy = ev.clientY - dragging.startClientY;
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+      canvas.classList.add("waveform-canvas--dragging");
+      if (dragging.kind === "pending-boundary") {
+        dragging = { kind: "boundary", refs: dragging.refs };
+      } else {
+        // An actual pan drag edits the view, not the selection - leave it exactly as it was.
+        dragging = { kind: "pan", startClientX: dragging.startClientX, startViewStart: dragging.startViewStart };
+      }
+    }
     if (dragging.kind === "boundary") {
       moveBoundary(dragging.refs, xToTime(ev.clientX - rect.left, rect.width));
       redraw();
+      scheduleLoopRebuild(dragging.refs);
     } else if (dragging.kind === "pan") {
       const dxPx = ev.clientX - dragging.startClientX;
       setView(dragging.startViewStart - (dxPx / Math.max(1, rect.width)) * viewDuration, viewDuration);
@@ -489,14 +599,29 @@ export function createEditableWaveform({
 
   function endDrag() {
     if (!dragging) return;
-    canvas.classList.remove("waveform-canvas--dragging");
-    if (dragging.kind === "boundary") {
+    const kind = dragging.kind;
+    if (kind === "pending-boundary") {
+      // Never crossed the drag threshold: a click, which selects the region that starts here.
+      const startRef = dragging.refs.find((r) => r.which === "s");
+      select(startRef != null ? startRef.idx : dragging.refs[0].idx);
+    } else if (kind === "pending-pan") {
+      // Never crossed the drag threshold: a click on the waveform body.
+      select(dragging.hitSlice != null ? dragging.hitSlice : null);
+    } else if (kind === "boundary") {
+      canvas.classList.remove("waveform-canvas--dragging");
       const refs = dragging.refs;
       const current = slices[refs[0].idx][refs[0].which];
       moveBoundary(refs, snap(current));
       slices.sort((a, b) => a.s - b.s);
       redraw();
       onChange();
+      if (loopRebuildRafId) {
+        cancelAnimationFrame(loopRebuildRafId);
+        loopRebuildRafId = 0;
+      }
+      if (loopRebuildApplies(refs)) rebuildPlayingSource();
+    } else if (kind === "pan") {
+      canvas.classList.remove("waveform-canvas--dragging");
     }
     dragging = null;
   }
