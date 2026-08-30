@@ -53,11 +53,12 @@ export function resolveSelection(previousIndex, regionCount) {
 }
 
 /**
- * The double-click-to-split gesture (js/editor-waveform.js): splits whichever canonical region
- * contains `time` into two, right at that point, leaving every other region untouched. Refuses -
- * returns null rather than clamping or fabricating an overlapping region - when there's no
- * containing region, or `time` sits close enough to either of that region's own edges that one
- * resulting half would be shorter than `minSliceSec`. That distance check is also what rejects a
+ * One branch of the double-click gesture (js/editor-waveform.js) - see addOrSplitRegionAt() below for
+ * the general "create a new slice starting here" behaviour this is part of. Splits whichever
+ * canonical region contains `time` into two, right at that point, leaving every other region
+ * untouched. Refuses - returns null rather than clamping or fabricating an overlapping region - when
+ * there's no containing region, or `time` sits close enough to either of that region's own edges that
+ * one resulting half would be shorter than `minSliceSec`. That distance check is also what rejects a
  * click that's effectively ON an existing boundary: a point that close to an edge can't be more
  * than `minSliceSec` inside its region either.
  * @param {[number,number][]} regions - canonical regions, sorted by start, non-overlapping
@@ -73,4 +74,39 @@ export function splitRegionAt(regions, time, minSliceSec) {
   const next = regions.map((r) => [...r]);
   next.splice(idx, 1, [s, time], [time, e]);
   return { regions: next, newIndex: idx + 1 };
+}
+
+/**
+ * The general double-click gesture: "I want a slice beginning here." If `time` falls inside an
+ * existing canonical region, splits that region (delegates to splitRegionAt() above, unchanged
+ * behaviour and refusal rules). Otherwise - empty waveform space, whether before the first region,
+ * in a gap between two regions, or after the last one - creates a brand-new region starting at `time`
+ * and running up to whichever comes first: the start of the next canonical region, or `duration` (end
+ * of the audio) if there is none. This can never overlap an existing region, by construction (the new
+ * region's end is capped at the very next region's start), and never modifies any existing region
+ * either way - only ever inserts one new entry or splits one existing one.
+ *
+ * `time` is assumed to already be the final, snap-adjusted click position (see js/editor-waveform.js,
+ * which does its own zero-crossing snap before calling in - this module stays snap-agnostic, same as
+ * splitRegionAt). Refuses (returns null) rather than fabricating a too-short sliver: creating a new
+ * region still respects `minSliceSec` as its own minimum length.
+ * @param {[number,number][]} regions - canonical regions, sorted by start, non-overlapping
+ * @param {number} time
+ * @param {number} minSliceSec
+ * @param {number} duration - end of the audio, i.e. what a trailing new region should run to
+ * @returns {{regions:[number,number][], newIndex:number}|null}
+ */
+export function addOrSplitRegionAt(regions, time, minSliceSec, duration) {
+  const containingIdx = regions.findIndex(([s, e]) => time >= s && time <= e);
+  if (containingIdx !== -1) return splitRegionAt(regions, time, minSliceSec);
+
+  if (!(time >= 0) || time > duration) return null;
+  const nextIdx = regions.findIndex(([s]) => s > time);
+  const end = nextIdx === -1 ? duration : regions[nextIdx][0];
+  if (end - time < minSliceSec) return null;
+
+  const next = regions.map((r) => [...r]);
+  const insertAt = nextIdx === -1 ? next.length : nextIdx;
+  next.splice(insertAt, 0, [time, end]);
+  return { regions: next, newIndex: insertAt };
 }

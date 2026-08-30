@@ -29,6 +29,7 @@ import { resolveNamePattern } from "./naming-tokens.js";
 import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from "./outputstage.js";
 import { isLofiActive, lofiSnapshotForTask, wantsCleanSecondary } from "./output-scope.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
+import { regionStartsToCueFrames, checkM8MarkerLimit } from "./slice-markers.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
 import { sanitizeSourceBpm, resolveEffectiveTempo, formatBpmText } from "./tempo-override.js";
 import { APP_VERSION } from "./version.js";
@@ -214,6 +215,15 @@ const LEGACY_PATTERN_MAP = {
 const exportSettings = { bitDepth: 24, fadeMs: 5, zcSearchMs: 15 };
 const detectSettings = { key: true, tempo: true };
 
+// Which shape the main chop export takes: "individual" (today's one-file-per-chop behaviour,
+// unchanged and still the default) or "markers" (one continuous WAV per source file, with the
+// current canonical chop-region starts embedded as RIFF cue points - see js/slice-markers.js and
+// exportMarkerWavForFile()). Chop detection/editing itself is identical either way; this only
+// decides what Export actually writes to disk. Only meaningful while chopIntoPieces is true (CHOP/
+// BOTH) - STRETCH has no chop regions to mark.
+const CHOP_EXPORT_FORMATS = ["individual", "markers"];
+let chopExportFormat = "individual";
+
 // Applied to main chops and the full-file wav/ copy, but not one-shots, at export time.
 // macroValues is a flat {texture, variation, smear, roughness} map - a character only reads the
 // macro(s) named in its own registry entry (js/dsp/stretch/characters.js), so values for macros a
@@ -317,6 +327,7 @@ const outputBanner = $("#output-banner");
 const logPanel = $("#log-panel");
 const resultsPanel = $("#results-panel");
 const bitDepthSelect = $("#bit-depth-select");
+const chopExportFormatSelect = $("#chop-export-format-select");
 const fadeMsSlider = $("#fade-ms-slider");
 const fadeMsNumber = $("#fade-ms-value");
 const zcMsSlider = $("#zc-ms-slider");
@@ -1317,6 +1328,7 @@ function saveSettings() {
         chopIntoPieces,
         naming: namingSettings,
         exportSettings,
+        chopExportFormat,
         detectSettings,
         timestretch: timestretchSettings,
         outputStage: outputStageSettings,
@@ -1480,6 +1492,10 @@ function applySettings(saved) {
     bitDepthSelect.value = String(exportSettings.bitDepth);
     fadeMsSlider.value = fadeMsNumber.value = String(exportSettings.fadeMs);
     zcMsSlider.value = zcMsNumber.value = String(exportSettings.zcSearchMs);
+  }
+  if (CHOP_EXPORT_FORMATS.includes(saved.chopExportFormat)) {
+    chopExportFormat = saved.chopExportFormat;
+    chopExportFormatSelect.value = chopExportFormat;
   }
   if (saved.detectSettings) {
     Object.assign(detectSettings, saved.detectSettings);
@@ -2397,6 +2413,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
 
     log(`    key: ${keyText} | tempo: ${bpmText} | ${regions.length} candidate phrase(s)`);
 
+    const writeIndividualFiles = chopExportFormat !== "markers";
     ({ chopRows, chopMarkers } = await exportChopsForRegions({
       folder,
       fileInfo,
@@ -2410,9 +2427,15 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
       zipBatch,
       effectiveBpm,
       kt: effectiveKt,
+      writeIndividualFiles,
     }));
 
-    log(`    created ${chopRows.length} chop(s)`);
+    if (writeIndividualFiles) {
+      log(`    created ${chopRows.length} chop(s)`);
+    } else {
+      log(`    ${chopRows.length} chop boundary/boundaries ready for audition (exporting as one continuous WAV with slice markers, not individual files)`);
+      await exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions, channels, sampleRate: buffer.sampleRate, zipBatch });
+    }
 
     // A file's one-shots can be dropped individually from the preview, for when the extraction
     // found nothing worth keeping on that particular break.
@@ -2516,8 +2539,14 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
  * Writes chops for a set of [start,end] second regions against an already-decoded file, applying
  * zero-crossing snap, optional time-stretch (main chops only), and fades. Shared by the initial
  * auto-detected pass and by the manual chop editor's "Save & re-export".
+ *
+ * `writeIndividualFiles` (default true) gates only the actual chops/ and chops clean/ disk writes -
+ * every chop is still rendered and returned in chopRows/chopMarkers either way, so the waveform
+ * editor and audition list work identically regardless of export format. Passing false is how "WAV
+ * with Slice Markers" mode skips writing the numbered per-chop files while exportMarkerWavForFile()
+ * writes the one continuous file that replaces them for that run.
  */
-async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, effectiveBpm, kt }) {
+async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, effectiveBpm, kt, writeIndividualFiles = true }) {
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
   const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
   const fadeOutSamples = fadeInSamples;
@@ -2527,10 +2556,12 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
   // time-stretch too) OFF means the clean chop already IS the primary output, so a secondary clean
   // copy is never written regardless of the "also export clean" checkbox - see wantsCleanSecondary().
   const processingActive = stretchRatio !== 1 || lofiActive();
-  const wantCleanCopy = wantsCleanSecondary(processingActive, keepUnprocessedCopy);
+  const wantCleanCopy = writeIndividualFiles && wantsCleanSecondary(processingActive, keepUnprocessedCopy);
 
-  // Deleting the previous run's chops is a write too, so a preview must not do it either.
-  if (folder.kind === "fsa" && !dryRun) {
+  // Deleting the previous run's chops is a write too, so a preview must not do it either. Skipped
+  // entirely in markers mode: this run isn't writing chops/ at all, so it has no business deleting
+  // whatever individual chops happen to already be sitting there from an earlier "Individual WAVs" run.
+  if (writeIndividualFiles && folder.kind === "fsa" && !dryRun) {
     await clearOldChopsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
     // Cleared unconditionally (same idempotent-rerun logic as above) so a "chops clean/" left
     // behind from a previous run with the toggle on doesn't linger once it's turned off.
@@ -2582,14 +2613,51 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
     const { startSample, endSample } = regionDefs[i];
     const { blob, seconds } = heavyResults[i];
     const fileName = buildChopFileName(stem, tag, i + 1, kt);
-    await writeOutput(folder, "chops", relPath, fileName, blob, zipBatch);
-    if (wantCleanCopy) {
-      await writeOutput(folder, "chops clean", relPath, fileName, cleanBlobs[i], zipBatch);
+    if (writeIndividualFiles) {
+      await writeOutput(folder, "chops", relPath, fileName, blob, zipBatch);
+      if (wantCleanCopy) {
+        await writeOutput(folder, "chops clean", relPath, fileName, cleanBlobs[i], zipBatch);
+      }
     }
     chopRows.push({ fileName, blob, seconds });
     chopMarkers.push([startSample / buffer.sampleRate, endSample / buffer.sampleRate]);
   }
   return { chopRows, chopMarkers };
+}
+
+/**
+ * "WAV with Slice Markers" export: writes ONE continuous WAV for the whole source file, with the
+ * current canonical chop-region starts embedded as RIFF cue points (js/slice-markers.js has the pure
+ * region -> cue-frame math and the M8 marker-count check). Companion to exportChopsForRegions rather
+ * than a replacement for it - see chopExportFormat above for how the two are selected between.
+ *
+ * Always encodes the clean, unprocessed `channels` decode - never a stretched or lo-fi render. Both
+ * time-stretch and the lo-fi chain are currently applied independently per already-cut chop (see
+ * processRegionsHeavy): each chop restarts the lo-fi chain's internal filter/LFO state from zero, so a
+ * single continuous render with the same settings would not sound identical at the boundaries it
+ * claims to mark, and time-stretch would also change the sample-accurate mapping between the
+ * canonical region times and the rendered audio, breaking the cue points outright. Marker export
+ * sidesteps both problems by never processing the continuous source - see the "Chop output" panel's
+ * note in index.html, which tells the user this up front.
+ */
+async function exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions, channels, sampleRate, zipBatch }) {
+  if (!regions || regions.length === 0) {
+    log(`    no chop regions to mark - skipped WAV with Slice Markers export`);
+    return;
+  }
+  const frameCount = channels[0].length;
+  const cueFrames = regionStartsToCueFrames(regions, sampleRate, frameCount);
+  const { ok, count, limit } = checkM8MarkerLimit(cueFrames.length);
+  const blob = encodeWav(channels, sampleRate, exportSettings.bitDepth, { cuePoints: cueFrames });
+  const fileName = `${taggedStem} slices.wav`;
+  await writeOutput(folder, "wav", fileInfo.relativeDir, fileName, blob, zipBatch);
+  if (ok) {
+    log(`    wrote ${fileName} with ${count} slice marker(s) (M8-compatible)`);
+  } else {
+    logWarn(
+      `${fileName}: ${count} slice markers exceeds the M8's ${limit}-marker limit - all ${count} were written to the file, but the M8 may not read them all. Not labeled M8-compatible.`
+    );
+  }
 }
 
 /** Re-decodes a source file and re-exports its main chops from a manually-edited region list. */
@@ -2600,6 +2668,7 @@ async function reExportSingleFile(editContext, editedRegions) {
   const channels = bufferChannels(buffer);
   const mono = toMono(channels);
   const zipBatch = folder.kind === "fsa" || dryRun ? null : new ZipBatch();
+  const writeIndividualFiles = chopExportFormat !== "markers";
 
   const { chopRows, chopMarkers } = await exportChopsForRegions({
     folder,
@@ -2614,7 +2683,15 @@ async function reExportSingleFile(editContext, editedRegions) {
     zipBatch,
     effectiveBpm,
     kt,
+    writeIndividualFiles,
   });
+
+  // Editing regions and re-exporting must keep producing whatever format Export would currently
+  // write for this file - otherwise switching to markers mode, tweaking a boundary, and clicking
+  // "Update previews" would silently leave the on-disk marker WAV stale relative to the edit.
+  if (!writeIndividualFiles) {
+    await exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions: editedRegions, channels, sampleRate: buffer.sampleRate, zipBatch });
+  }
 
   if (zipBatch) {
     await zipBatch.downloadAs(`${taggedStem}_re-exported.zip`);
@@ -3478,6 +3555,10 @@ cancelBtn.addEventListener("click", () => {
 
 bitDepthSelect.addEventListener("change", () => {
   exportSettings.bitDepth = parseInt(bitDepthSelect.value, 10);
+  saveSettings();
+});
+chopExportFormatSelect.addEventListener("change", () => {
+  chopExportFormat = CHOP_EXPORT_FORMATS.includes(chopExportFormatSelect.value) ? chopExportFormatSelect.value : "individual";
   saveSettings();
 });
 bindSliderNumber(fadeMsSlider, fadeMsNumber, (v) => {

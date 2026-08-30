@@ -18,7 +18,7 @@
 //     card, which is what makes "delete slice 6" possible without counting.
 
 import { findNearestZeroCrossing, computePeaksInRange } from "./dsp.js";
-import { splitRegionAt } from "./chop-regions.js";
+import { addOrSplitRegionAt } from "./chop-regions.js";
 
 /** Two boundaries closer than this are treated as the same edge. */
 const SHARED_EPS_SEC = 0.006;
@@ -80,7 +80,7 @@ export function createEditableWaveform({
   const stopBtn = mkBtn("■ Stop", "Stop playback (Esc)");
   const loopBtn = mkBtn("↺ Loop", "Loop the selected slice");
   loopBtn.classList.add("btn--loop");
-  const addBtn = mkBtn("+ Add", `Add a ${noun} (or double-click a slice to split it there)`);
+  const addBtn = mkBtn("+ Add", `Add a ${noun} (or double-click anywhere on the waveform to start a new slice there)`);
   const deleteBtn = mkBtn("Delete", `Delete the selected ${noun} (Delete)`);
   const zoomOutBtn = mkBtn("−", "Zoom out");
   const zoomInBtn = mkBtn("+", "Zoom in");
@@ -263,7 +263,7 @@ export function createEditableWaveform({
     playBtn.disabled = selected == null;
     hint.textContent =
       selected == null
-        ? `${slices.length} ${noun}${slices.length === 1 ? "" : "s"} · click one to select, double-click to split, scroll to zoom`
+        ? `${slices.length} ${noun}${slices.length === 1 ? "" : "s"} · click one to select, double-click to add/split, scroll to zoom`
         : `${noun} ${String(selected + 1).padStart(2, "0")} selected · ${formatEditorTime(slices[selected].s)} to ${formatEditorTime(
             slices[selected].e
           )} · Space plays, Delete removes`;
@@ -439,32 +439,52 @@ export function createEditableWaveform({
   }
 
   /**
-   * Double-click gesture: splits the canonical slice containing `clickTime` into two, right at that
-   * point - never adds an arbitrary/overlapping region. The actual split decision (and its refusal
-   * rules - too close to an edge, no containing region) lives in splitRegionAt() (chop-regions.js) so
-   * it's covered by the same unit tests without a canvas; this just supplies the DOM-only bits
-   * (zero-crossing snap, selection, array<->slice-object shape).
+   * Double-click gesture: "I want a slice beginning here." Inside an existing canonical region, that
+   * means splitting it in two, right at the click - never an arbitrary/overlapping region. In empty
+   * waveform space (before the first region, in a gap, or after the last one), it means creating a
+   * brand-new region starting at the click and running to whichever comes first: the next region's
+   * start, or the end of the audio. The actual decision (and its refusal rules - too close to an
+   * edge, a new region that would be shorter than the minimum) lives in addOrSplitRegionAt()
+   * (chop-regions.js) so it's covered by the same unit tests without a canvas; this just supplies the
+   * DOM-only bits (zero-crossing snap, selection, array<->slice-object shape).
    */
-  function splitSliceAt(clickTime) {
+  function addOrSplitAt(clickTime) {
     if (!(duration > 0)) return;
     const t = Math.max(0, Math.min(duration, clickTime));
     const idx = sliceAtTime(t);
-    if (idx == null) return; // no canonical region under the click - nothing to split
-    const r = slices[idx];
-    if (t - r.s < MIN_SLICE_SEC || r.e - t < MIN_SLICE_SEC) return;
-    // Snapping to the nearest zero-crossing can walk the point back across the tolerance just
-    // cleared above - clamp into the still-valid interior of the SAME containing slice rather than
-    // either producing an invalid split or letting the snap silently pick a different one.
-    const splitAt = Math.max(r.s + MIN_SLICE_SEC, Math.min(r.e - MIN_SLICE_SEC, snap(t)));
-    const result = splitRegionAt(
+    let finalTime;
+    if (idx != null) {
+      const r = slices[idx];
+      if (t - r.s < MIN_SLICE_SEC || r.e - t < MIN_SLICE_SEC) return;
+      // Snapping to the nearest zero-crossing can walk the point back across the tolerance just
+      // cleared above - clamp into the still-valid interior of the SAME containing slice rather than
+      // either producing an invalid split or letting the snap silently pick a different one.
+      finalTime = Math.max(r.s + MIN_SLICE_SEC, Math.min(r.e - MIN_SLICE_SEC, snap(t)));
+    } else {
+      // Empty space: the window available for a new region runs from the end of whichever region
+      // precedes the click (0 if none) up to the start of whichever region follows it (the file's
+      // own duration if none). slices is sorted by start and non-overlapping, so the last region
+      // ending at/before t is the immediate predecessor, and the first starting after t is the
+      // immediate successor.
+      let precEnd = 0;
+      for (const s of slices) if (s.e <= t) precEnd = s.e;
+      const next = slices.find((s) => s.s > t);
+      const nextStart = next ? next.s : duration;
+      if (nextStart - t < MIN_SLICE_SEC) return;
+      // Same clamp shape as the split branch above: never let the snap walk the new region's start
+      // out of the empty space it's meant to occupy, in either direction.
+      finalTime = Math.max(precEnd, Math.min(nextStart - MIN_SLICE_SEC, snap(t)));
+    }
+    const result = addOrSplitRegionAt(
       slices.map((sl) => [sl.s, sl.e]),
-      splitAt,
-      MIN_SLICE_SEC
+      finalTime,
+      MIN_SLICE_SEC,
+      duration
     );
-    if (!result) return; // shouldn't happen given the clamp above, but never fabricate a bad split
+    if (!result) return; // shouldn't happen given the clamps above, but never fabricate a bad region
     slices.length = 0;
     for (const [s, e] of result.regions) slices.push({ s, e });
-    select(result.newIndex); // the new region, which starts at the click point
+    select(result.newIndex); // the new (or newly split) region, which starts at the click point
     onChange();
   }
 
@@ -570,7 +590,7 @@ export function createEditableWaveform({
 
   canvas.addEventListener("dblclick", (ev) => {
     const rect = canvas.getBoundingClientRect();
-    splitSliceAt(xToTime(ev.clientX - rect.left, rect.width));
+    addOrSplitAt(xToTime(ev.clientX - rect.left, rect.width));
   });
 
   // A pointerdown can't yet know if it's a click or a drag, so it only remembers what a click

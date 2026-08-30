@@ -1,7 +1,7 @@
 // Node-side unit tests for js/chop-regions.js - the pure decision logic behind "Process must
 // preserve user-edited chops". Run with: node test/chop-regions.test.mjs
 import assert from "node:assert/strict";
-import { resolveRegions, replaceRegions, resolveSelection, splitRegionAt } from "../js/chop-regions.js";
+import { resolveRegions, replaceRegions, resolveSelection, splitRegionAt, addOrSplitRegionAt } from "../js/chop-regions.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -137,6 +137,72 @@ test("splitRegionAt: a time outside every region (e.g. a gap, or past the end) i
   assert.equal(splitRegionAt([[0, 1], [2, 3]], 1.5, 0.03), null, "in the gap between two regions");
   assert.equal(splitRegionAt([[0, 1]], 5, 0.03), null, "past the end of the only region");
   assert.equal(splitRegionAt([], 0.5, 0.03), null, "no regions at all");
+});
+
+// --- addOrSplitRegionAt (general double-click gesture: "create a new slice starting here") ----
+
+test("addOrSplitRegionAt: click inside a region delegates to splitRegionAt (same result)", () => {
+  const regions = [[0, 4]];
+  const viaGeneral = addOrSplitRegionAt(regions, 2.3, 0.03, 4);
+  const viaSplit = splitRegionAt(regions, 2.3, 0.03);
+  assert.deepEqual(viaGeneral, viaSplit);
+});
+
+test("addOrSplitRegionAt: no regions at all -> creates one region from the click to the end of the audio", () => {
+  const result = addOrSplitRegionAt([], 1.5, 0.03, 5);
+  assert.ok(result);
+  assert.deepEqual(result.regions, [[1.5, 5]]);
+  assert.equal(result.newIndex, 0);
+});
+
+test("addOrSplitRegionAt: empty space before the first region -> new region ends at that region's start", () => {
+  const regions = [[3, 5]];
+  const result = addOrSplitRegionAt(regions, 1, 0.03, 5);
+  assert.deepEqual(result.regions, [[1, 3], [3, 5]]);
+  assert.equal(result.newIndex, 0, "the new region is the one that should become selected");
+  assert.deepEqual(regions, [[3, 5]], "must not mutate the input");
+});
+
+test("addOrSplitRegionAt: empty space in a gap between two regions -> new region fills the gap, neither neighbour is touched", () => {
+  const regions = [[0, 1], [3, 4]];
+  const result = addOrSplitRegionAt(regions, 1.5, 0.03, 4);
+  assert.deepEqual(result.regions, [[0, 1], [1.5, 3], [3, 4]]);
+  assert.equal(result.newIndex, 1);
+});
+
+test("addOrSplitRegionAt: empty space after the final region -> new region ends at the end of the audio", () => {
+  const regions = [[0, 1]];
+  const result = addOrSplitRegionAt(regions, 2, 0.03, 5);
+  assert.deepEqual(result.regions, [[0, 1], [2, 5]]);
+  assert.equal(result.newIndex, 1);
+});
+
+test("addOrSplitRegionAt: never creates an overlap - the new region's end is capped at the very next region's start", () => {
+  const regions = [[0, 1], [2, 3], [5, 6]];
+  const result = addOrSplitRegionAt(regions, 1.2, 0.03, 10);
+  assert.deepEqual(result.regions, [[0, 1], [1.2, 2], [2, 3], [5, 6]]);
+  for (let i = 1; i < result.regions.length; i++) {
+    assert.ok(result.regions[i][0] >= result.regions[i - 1][1], "regions must stay non-overlapping");
+  }
+});
+
+test("addOrSplitRegionAt: refuses when the click is too close to the next region to leave a valid new region", () => {
+  const regions = [[3, 5]];
+  assert.equal(addOrSplitRegionAt(regions, 2.98, 0.03, 5), null, "0.02s of gap left before the next region's start");
+});
+
+test("addOrSplitRegionAt: refuses when the click is too close to the end of the audio to leave a valid new region", () => {
+  const regions = [[0, 1]];
+  assert.equal(addOrSplitRegionAt(regions, 4.99, 0.03, 5), null, "0.01s of audio left after the click");
+});
+
+test("addOrSplitRegionAt: refuses past the end of the audio or before its start, rather than fabricating a region there", () => {
+  assert.equal(addOrSplitRegionAt([], 10, 0.03, 5), null, "past the end");
+  assert.equal(addOrSplitRegionAt([], -1, 0.03, 5), null, "before the start");
+});
+
+test("addOrSplitRegionAt: a click exactly on the end of the audio still refuses (zero-length trailing region)", () => {
+  assert.equal(addOrSplitRegionAt([[0, 3]], 5, 0.03, 5), null);
 });
 
 console.log(`\n${passed} test(s) passed.`);

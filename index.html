@@ -127,6 +127,22 @@
       <div id="params-panel" class="params-panel"></div>
     </section>
 
+    <section class="mod" data-tasks="chop both">
+      <h2 class="mod-h">Chop output</h2>
+      <div class="field">
+        <label for="chop-export-format-select">Export format</label>
+        <select id="chop-export-format-select">
+          <option value="individual" selected>Individual WAVs</option>
+          <option value="markers">WAV with Slice Markers</option>
+        </select>
+      </div>
+      <p class="mod-note">
+        Individual WAVs: one file per chop, as usual. WAV with Slice Markers: one continuous WAV per source file
+        with the current chop boundaries embedded as standard RIFF cue points - compatible with Dirtywave M8
+        slice import (up to 128 markers). Always uses the clean, unprocessed audio, regardless of Output Stage.
+      </p>
+    </section>
+
     <section class="mod" data-tasks="chop stretch both">
       <h2 class="mod-h">Export</h2>
       <div class="field">

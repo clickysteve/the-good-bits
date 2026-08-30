@@ -113,13 +113,27 @@ export function parseWav(arrayBuffer) {
  * @param {Float32Array[]} channels
  * @param {number} sampleRate
  * @param {16|24} bitDepth
+ * @param {{cuePoints?: number[]}} [options] - cuePoints, if given and non-empty, are written as a
+ *   standard RIFF "cue " chunk (one cue point per entry) between "fmt " and "data". Each value is a
+ *   sample-frame offset into the data chunk (NOT milliseconds/seconds/bytes) - see js/slice-markers.js
+ *   for how chop-region starts become these offsets. Omitting cuePoints (or passing an empty array)
+ *   produces byte-for-byte the same plain WAV this function has always produced - existing callers
+ *   are unaffected.
  */
-export function encodeWav(channels, sampleRate, bitDepth = 24) {
+export function encodeWav(channels, sampleRate, bitDepth = 24, options = {}) {
+  const { cuePoints = null } = options;
   const numChannels = channels.length;
   const frameCount = channels[0].length;
   const bytesPerSample = bitDepth / 8;
   const dataSize = frameCount * numChannels * bytesPerSample;
-  const buffer = new ArrayBuffer(44 + dataSize);
+
+  const hasCues = Array.isArray(cuePoints) && cuePoints.length > 0;
+  // Each cue point record is 24 bytes (6 uint32 fields); the chunk body is also prefixed with a
+  // 4-byte dwCuePoints count. "cue "+size(4) header is 8 bytes on top of that.
+  const cueBodySize = hasCues ? 4 + cuePoints.length * 24 : 0;
+  const cueChunkTotal = hasCues ? 8 + cueBodySize : 0;
+
+  const buffer = new ArrayBuffer(44 + cueChunkTotal + dataSize);
   const dv = new DataView(buffer);
 
   const writeStr = (off, str) => {
@@ -127,7 +141,7 @@ export function encodeWav(channels, sampleRate, bitDepth = 24) {
   };
 
   writeStr(0, "RIFF");
-  dv.setUint32(4, 36 + dataSize, true);
+  dv.setUint32(4, 36 + cueChunkTotal + dataSize, true);
   writeStr(8, "WAVE");
   writeStr(12, "fmt ");
   dv.setUint32(16, 16, true); // fmt chunk size
@@ -137,10 +151,31 @@ export function encodeWav(channels, sampleRate, bitDepth = 24) {
   dv.setUint32(28, sampleRate * numChannels * bytesPerSample, true); // byte rate
   dv.setUint16(32, numChannels * bytesPerSample, true); // block align
   dv.setUint16(34, bitDepth, true);
-  writeStr(36, "data");
-  dv.setUint32(40, dataSize, true);
 
-  let off = 44;
+  let off = 36;
+  if (hasCues) {
+    const maxFrame = Math.max(0, frameCount - 1);
+    writeStr(off, "cue ");
+    dv.setUint32(off + 4, cueBodySize, true);
+    dv.setUint32(off + 8, cuePoints.length, true);
+    off += 12;
+    for (let i = 0; i < cuePoints.length; i++) {
+      // Clamp defensively - callers should already be passing in-range frame offsets, but a
+      // malformed/edge-case region (e.g. a slice start at or past EOF) must never produce a cue
+      // pointing outside the data chunk this same call is about to write.
+      const sampleOffset = Math.max(0, Math.min(maxFrame, Math.round(cuePoints[i])));
+      dv.setUint32(off, i + 1, true); // dwName - unique cue ID (1-based, sequential)
+      dv.setUint32(off + 4, sampleOffset, true); // dwPosition - conventionally mirrors dwSampleOffset
+      writeStr(off + 8, "data"); // fccChunk - the chunk this cue points into
+      dv.setUint32(off + 12, 0, true); // dwChunkStart - single data chunk, no wave list
+      dv.setUint32(off + 16, 0, true); // dwBlockStart - uncompressed PCM, no block structure
+      dv.setUint32(off + 20, sampleOffset, true); // dwSampleOffset - sample frame into the data chunk
+      off += 24;
+    }
+  }
+  writeStr(off, "data");
+  dv.setUint32(off + 4, dataSize, true);
+  off += 8;
   const clamp = (x) => Math.max(-1, Math.min(1, x));
 
   if (bitDepth === 16) {
