@@ -666,14 +666,37 @@ input[type="range"]::-moz-range-thumb {
 
 .result-file--skipped .result-file-meta { color: var(--warn); }
 
-/* Restrained "not exporting" cue - never a disabled/unavailable look. Every control on the card
-   (waveform, chops, playback, editing) stays exactly as usable as when export is on. */
-.result-file--export-off { border-style: dashed; }
+/* The collapsed "include in export" is off row - same compact single-line layout language as
+   result-file--skipped above (reused deliberately, see renderCollapsedExportOffCard() in app.js),
+   but neutral/dim rather than amber: this is a deliberate export decision, not an analysis failure,
+   and the two must read as different things, not different severities of the same thing. */
+.result-file--export-off {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border-style: dashed;
+}
 .result-file--export-off .result-file-name { color: var(--text-dim); }
+.result-file--export-off .result-file-meta { color: var(--text-faint); }
 
 .result-file-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .result-file-title-group { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
 .result-file-name { font-family: var(--font-display); font-size: 15px; font-weight: 600; }
+
+/* Provenance, not the headline - see formatSourcePath() in js/io-fs.js. Truncates rather than
+   wrapping or pushing the layout around; the title attribute (set in app.js) always carries the full
+   path for a long one. */
+.result-file-source {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .result-file-meta { color: var(--text-faint); font-size: 11.5px; font-family: var(--font-mono); }
 .result-file-header-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .result-file-static { display: flex; flex-direction: column; gap: 8px; }
@@ -700,7 +723,7 @@ input[type="range"]::-moz-range-thumb {
   white-space: nowrap;
 }
 
-.chop-row audio { height: 30px; flex: 1; max-width: 300px; min-width: 0; }
+.chop-row:hover .chop-name { color: var(--text); }
 
 /* waveforms */
 
@@ -1085,6 +1108,7 @@ input[type="range"]::-moz-range-thumb {
 
 .log-line { white-space: pre-wrap; word-break: break-word; }
 .log-line--warn { color: var(--warn); }
+.log-line--good { color: var(--good); font-weight: 500; }
 
 .actionbar {
   flex: none;

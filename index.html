@@ -52,6 +52,7 @@
     </div>
 
     <div class="topbar-right">
+      <button type="button" id="new-session-btn" class="btn btn--ghost btn--small" title="Clear this batch and start a fresh one. Your saved settings are kept.">New session</button>
       <button type="button" id="settings-toggle" class="seg-btn seg-btn--solo" aria-expanded="false">Settings</button>
     </div>
   </header>
@@ -102,17 +103,10 @@
       </div>
       <p class="mod-note">Click a token to insert it, or type. Any order. A number is always added.</p>
       <div class="field">
-        <label for="naming-separator-select">Key/tempo tag separator</label>
-        <select id="naming-separator-select">
-          <option value=" ">Space - Cm 120bpm</option>
-          <option value="_">Underscore - Cm_120bpm</option>
-          <option value="-">Hyphen - Cm-120bpm</option>
-        </select>
+        <label id="naming-folder-pattern-label">Folder name pattern</label>
+        <div id="naming-folder-pattern-editor-host"></div>
       </div>
-      <label class="check">
-        <input id="naming-folder-tag-checkbox" type="checkbox" checked />
-        <span>Add the key/tempo tag to the folder name</span>
-      </label>
+      <p class="mod-note">Each source's own output folder (and its full-length WAV copy). No number here - a folder names one whole source, not one chop.</p>
       <p id="naming-preview" class="naming-preview" aria-live="polite"></p>
     </section>
 
@@ -168,8 +162,7 @@
           <span class="slider-unit">ms</span>
         </div>
       </div>
-      <label class="check"><input id="detect-key-checkbox" type="checkbox" checked /><span>Detect musical key</span></label>
-      <label class="check"><input id="detect-tempo-checkbox" type="checkbox" checked /><span>Detect tempo</span></label>
+      <p class="mod-note">Good Bits automatically analyses key and tempo for every source - there's nothing to opt into. Use the naming tokens above to decide whether that shows up in exported names.</p>
       <p id="essentia-status" class="essentia-status">Loading key &amp; tempo detection…</p>
     </section>
 

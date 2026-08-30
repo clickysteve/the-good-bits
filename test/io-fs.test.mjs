@@ -9,6 +9,7 @@ import {
   clearOldNumberedFilesFSA,
   clearOldChopsFSA,
   collectAudioFilesFSA,
+  formatSourcePath,
 } from "../js/io-fs.js";
 
 let passed = 0;
@@ -204,6 +205,28 @@ await asyncTest("collectAudioFilesFSA: excludes a nested 'chops'/'wav' output se
   const files = await collectAudioFilesFSA(root);
   assert.equal(files.length, 1);
   assert.equal(files[0].name, "take1.wav");
+});
+
+// --- formatSourcePath: compact provenance display for one source file --------------------------
+
+test("formatSourcePath: a file directly in the picked folder (no relativeDir)", () => {
+  assert.equal(formatSourcePath("Samples", "", "vocals.m4a"), "Samples / vocals.m4a");
+});
+
+test("formatSourcePath: a recursive import's relativeDir is split into its own path segments", () => {
+  assert.equal(formatSourcePath("Samples", "Trumpets/Weird", "vocals.m4a"), "Samples / Trumpets / Weird / vocals.m4a");
+});
+
+test("formatSourcePath: no root name available (e.g. an individually-picked file) - falls back to just the file", () => {
+  assert.equal(formatSourcePath("", "", "vocals.m4a"), "vocals.m4a");
+});
+
+test("formatSourcePath: two files with the same basename from different subfolders produce distinct paths", () => {
+  const a = formatSourcePath("Samples", "Trumpets/Session 03", "vocals.m4a");
+  const b = formatSourcePath("Samples", "Trumpets/Session 04", "vocals.m4a");
+  assert.notEqual(a, b);
+  assert.equal(a, "Samples / Trumpets / Session 03 / vocals.m4a");
+  assert.equal(b, "Samples / Trumpets / Session 04 / vocals.m4a");
 });
 
 console.log(`\n${passed} test(s) passed.`);

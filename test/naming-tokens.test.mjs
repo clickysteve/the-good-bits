@@ -1,7 +1,7 @@
 // Node-side unit tests for js/naming-tokens.js - the pure string<->segment conversion behind the
 // File Name Pattern token editor. Run with: node test/naming-tokens.test.mjs
 import assert from "node:assert/strict";
-import { parsePatternToSegments, segmentsToPattern, isKnownToken, resolveNamePattern } from "../js/naming-tokens.js";
+import { parsePatternToSegments, segmentsToPattern, isKnownToken, resolveNamePattern, resolveFolderName } from "../js/naming-tokens.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -152,6 +152,53 @@ test("resolveNamePattern: tokens are matched case-insensitively, same as parsePa
 
 test("resolveNamePattern: an unrecognised {foo} is left literal, same as parsePatternToSegments", () => {
   assert.equal(resolveNamePattern("{foo}_{name}", { name: "vocal" }), "{foo}_vocal");
+});
+
+// --- resolveFolderName: the folder-name pattern resolution (js/app.js's buildTaggedStem) ----------
+
+test("resolveFolderName: {name} and {key} both present", () => {
+  assert.equal(resolveFolderName("{name} {key}", { name: "rhodes_loop", tag: "Cm 120bpm", key: "Cm", tempo: "120" }), "rhodes_loop Cm");
+});
+
+test("resolveFolderName: {name} and {tempo} both present", () => {
+  assert.equal(resolveFolderName("{name} {tempo}bpm", { name: "drum_take", tag: "Cm 120bpm", key: "Cm", tempo: "120" }), "drum_take 120bpm");
+});
+
+test("resolveFolderName: {name}, {key} and {tempo} all present", () => {
+  assert.equal(
+    resolveFolderName("{name} {key} {tempo}bpm", { name: "rhodes_loop", tag: "Cm 120bpm", key: "Cm", tempo: "120" }),
+    "rhodes_loop Cm 120bpm"
+  );
+});
+
+test("resolveFolderName: neither {key} nor {tempo} - plain {name} pattern", () => {
+  assert.equal(resolveFolderName("{name}", { name: "drum_take", tag: "", key: "", tempo: "" }), "drum_take");
+});
+
+test("resolveFolderName: missing key cleans up rather than leaving 'undefined' or a doubled space", () => {
+  assert.equal(resolveFolderName("{name} {key} {tempo}bpm", { name: "drum_take", tag: "120bpm", key: "", tempo: "120" }), "drum_take 120bpm");
+});
+
+test("resolveFolderName: missing tempo cleans up the same way", () => {
+  assert.equal(resolveFolderName("{name} {key} {tempo}bpm", { name: "drum_take", tag: "Cm", key: "Cm", tempo: "" }), "drum_take Cm bpm");
+});
+
+test("resolveFolderName: both key and tempo missing - falls all the way back to the bare name, not an empty string", () => {
+  assert.equal(resolveFolderName("{name} {key} {tempo}bpm", { name: "drum_take", tag: "", key: "", tempo: "" }), "drum_take bpm");
+  assert.equal(resolveFolderName("{key} {tempo}", { name: "drum_take", tag: "", key: "", tempo: "" }), "drum_take");
+});
+
+test("resolveFolderName: an empty/blank pattern falls back to {name}", () => {
+  assert.equal(resolveFolderName("", { name: "drum_take", tag: "", key: "", tempo: "" }), "drum_take");
+  assert.equal(resolveFolderName("   ", { name: "drum_take", tag: "", key: "", tempo: "" }), "drum_take");
+});
+
+test("resolveFolderName: the legacy combined {tag} token still works, independently of {key}/{tempo}", () => {
+  assert.equal(resolveFolderName("{name} {tag}", { name: "drum_take", tag: "Cm 120bpm", key: "Cm", tempo: "120" }), "drum_take Cm 120bpm");
+});
+
+test("resolveFolderName: {number} is not a recognised part of this call's contract - a stray one resolves to empty like any other missing token", () => {
+  assert.equal(resolveFolderName("{name} {number}", { name: "drum_take", tag: "", key: "", tempo: "" }), "drum_take");
 });
 
 console.log(`\n${passed} test(s) passed.`);

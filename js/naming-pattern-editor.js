@@ -33,8 +33,12 @@ const TOKEN_META = [
  * @param {object} opts
  * @param {string} opts.initialValue
  * @param {(pattern:string) => void} opts.onChange  fired only for user edits, never for setValue()
+ * @param {string[]} [opts.tokens]  restricts the insert-button row to these token keys (parsing/
+ *   rendering still recognises every token in NAMING_TOKENS regardless - this only hides a button
+ *   whose token wouldn't mean anything in this particular field, e.g. {number} in a folder-name
+ *   pattern that names one source, not one chop). Defaults to every token in naming-tokens.js.
  */
-export function createNamingPatternEditor({ initialValue = "", onChange = () => {} }) {
+export function createNamingPatternEditor({ initialValue = "", onChange = () => {}, tokens = null }) {
   const wrap = document.createElement("div");
   wrap.className = "naming-pattern-editor-wrap";
 
@@ -135,7 +139,8 @@ export function createNamingPatternEditor({ initialValue = "", onChange = () => 
     sync();
   }
 
-  for (const t of TOKEN_META) {
+  const tokenMeta = tokens ? TOKEN_META.filter((t) => tokens.includes(t.key)) : TOKEN_META;
+  for (const t of tokenMeta) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "naming-token-btn";

@@ -29,6 +29,20 @@ function extOf(name) {
   return i === -1 ? "" : name.slice(i).toLowerCase();
 }
 
+/**
+ * Compact " / "-joined provenance path for one source file: the picker-chosen root folder's name,
+ * any relative subfolder path discovered under it (populated by the recursive collectors below for
+ * every import path - FSA folder, legacy webkitdirectory, drag-and-drop), and the file's own name.
+ * Never fabricates anything beyond what those already hold - there is no absolute filesystem path to
+ * show (the browser deliberately never exposes one), so this is the most truthful "where did this
+ * come from" available. Two files with the same basename from different subfolders always produce
+ * different output here, since relativeDir differs.
+ */
+export function formatSourcePath(rootName, relativeDir, fileName) {
+  const parts = [rootName, ...(relativeDir ? relativeDir.split("/") : []), fileName].filter(Boolean);
+  return parts.join(" / ");
+}
+
 function isExcludedSegment(name) {
   const n = name.toLowerCase();
   return n === "wav" || n === "chops" || n === "one shots" || n === "chops clean" || n === "one shots clean";

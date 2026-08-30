@@ -6,7 +6,6 @@ import {
   applyFades,
   sanitizeForPath,
   buildKeyTempoTag,
-  joinNameParts,
   barsToSeconds,
   bandEnergies,
   classifyHit,
@@ -25,7 +24,7 @@ import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups
 import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "./dsp/stretch/workspace-state.js";
 import { createStretchWorkspace } from "./stretch-workspace.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
-import { resolveNamePattern } from "./naming-tokens.js";
+import { resolveNamePattern, resolveFolderName } from "./naming-tokens.js";
 import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from "./outputstage.js";
 import { isLofiActive, lofiSnapshotForTask, wantsCleanSecondary } from "./output-scope.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
@@ -64,6 +63,7 @@ import {
   clearOldOneShotsFSA,
   clearOldNumberedFilesFSA,
   ZipBatch,
+  formatSourcePath,
 } from "./io-fs.js";
 import { rememberFolder, listRememberedFolders, forgetFolder, forgetAllFolders } from "./folder-store.js";
 
@@ -105,7 +105,6 @@ function detectionSignature() {
     drumBars,
     chopIntoPieces,
     extractOneShots,
-    detect: detectSettings,
     params: activeParams()[mode],
     zcSearchMs: exportSettings.zcSearchMs,
   });
@@ -161,6 +160,22 @@ let looseFileGroupCounter = 0;
 let looseDestinationHandle = null; // cached FSA destination for individually-picked files
 const sourceFolders = []; // {id, name, kind:'fsa'|'legacy', handle?, isLoose?, files:[...]}
 
+// Every editable-waveform instance currently mounted on a result card registers itself here (see
+// mountEditor() in renderFileResult) so New Session - and a fresh Process/Export run - can positively
+// stop its playback rather than relying on the card's DOM being removed: a playing
+// AudioBufferSourceNode keeps sounding even once the element that started it is gone from the page.
+const mountedFileEditors = new Set();
+
+/** Stops every currently-mounted file card's waveform playback (see mountedFileEditors above). */
+function stopAllFileEditorPlayback() {
+  for (const ed of mountedFileEditors) ed.stopPlayback();
+}
+
+// Bumped by newSession() (see below). processBatch() captures the value current when IT started and
+// re-checks it before every write into analysisCache or the results panel, so a batch already running
+// when New Session is clicked can't keep populating the fresh, empty session it left behind.
+let sessionEpoch = 0;
+
 /**
  * The single place a folder descriptor enters sourceFolders, so every source path (an FSA folder
  * pick, the split-subfolders branch, legacy webkitdirectory, drag-and-drop, individually-picked
@@ -205,12 +220,21 @@ let chopIntoPieces = true;
 
 // Output naming: how the chops folder/filenames are built from the source name and the
 // detected key/tempo tag. Kept separate from params so it applies the same regardless of mode.
-// chopPattern is a typable template using {name}/{tag}/{number} tokens (see buildChopFileName) -
-// no fixed set of presets, so it can be typed exactly how a given sampler wants it named.
+// chopPattern is a typable template using {name}/{tag}/{key}/{tempo}/{number} tokens (see
+// buildChopFileName) - no fixed set of presets, so it can be typed exactly how a given sampler wants
+// it named. folderPattern is the same token system applied to each source's own output folder (and
+// its wav/ full-track copy) - see buildTaggedStem() - deliberately without {number}, which identifies
+// one chop, not a whole source. Both replaced a pair of older, narrower controls (a fixed "add the
+// key/tempo tag to the folder name" checkbox and its own separate separator setting) that could only
+// turn the combined tag on/off as a unit - see applySettings()'s migration of old saves.
 const namingSettings = {
   chopPattern: "{number}",
-  includeFolderTag: true, // fold the key/tempo tag into the chops folder name (and wav/ copy)
-  separator: " ", // ' ' | '_' | '-' - joins the key and tempo inside the auto-generated tag
+  folderPattern: "{name} {tag}",
+  // ' ' | '_' | '-' - joins the key and tempo inside the legacy combined {tag} token only. No
+  // longer has its own UI control (a pattern that wants independent key/tempo formatting just uses
+  // the {key}/{tempo} tokens directly instead) but stays a real setting so a saved pattern still
+  // using {tag} keeps rendering exactly as it always has.
+  separator: " ",
 };
 
 // Internal safety cap on generated name length so a long source name + a long typed pattern can't
@@ -225,7 +249,9 @@ const LEGACY_PATTERN_MAP = {
 };
 
 const exportSettings = { bitDepth: 24, fadeMs: 5, zcSearchMs: 15 };
-const detectSettings = { key: true, tempo: true };
+// Key/tempo detection is always attempted (see processOneFile/ensureStretchSourceAnalyzed) - there's
+// no longer a user-facing opt-out. Whether a detected value actually shows up anywhere is a separate,
+// later choice: whether the {key}/{tempo}/{tag} naming tokens are used in a pattern.
 
 // Which shape the main chop export takes: "individual" (today's one-file-per-chop behaviour,
 // unchanged and still the default) or "markers" (one continuous WAV per source file, with the
@@ -344,18 +370,16 @@ const fadeMsSlider = $("#fade-ms-slider");
 const fadeMsNumber = $("#fade-ms-value");
 const zcMsSlider = $("#zc-ms-slider");
 const zcMsNumber = $("#zc-ms-value");
-const detectKeyCheckbox = $("#detect-key-checkbox");
-const detectTempoCheckbox = $("#detect-tempo-checkbox");
 const essentiaStatus = $("#essentia-status");
 const versionBadge = $("#version-badge");
 const taskSwitcherBtns = document.querySelectorAll("#task-switcher .seg-btn");
 const settingsToggleBtn = $("#settings-toggle");
+const newSessionBtn = $("#new-session-btn");
 const drumOptions = $("#drum-options");
 const drumBarsSelect = $("#drum-bars-select");
 const oneShotsCheckbox = $("#one-shots-checkbox");
 const namingPatternEditorHost = $("#naming-pattern-editor-host");
-const namingSeparatorSelect = $("#naming-separator-select");
-const namingFolderTagCheckbox = $("#naming-folder-tag-checkbox");
+const namingFolderPatternEditorHost = $("#naming-folder-pattern-editor-host");
 const namingPreviewEl = $("#naming-preview");
 const timestretchEnableCheckbox = $("#timestretch-enable-checkbox");
 const timestretchOptions = $("#timestretch-options");
@@ -426,6 +450,17 @@ function logWarn(line) {
   const el = document.createElement("div");
   el.className = "log-line log-line--warn";
   el.textContent = `⚠ ${line}`;
+  logPanel.appendChild(el);
+  logPanel.scrollTop = logPanel.scrollHeight;
+}
+
+/** SUCCESS only - a real Export that actually finished writing something, never Preview/cancelled/
+ * error text (see processBatch()'s single call site). Green is a strong, specific signal ("yes, this
+ * worked") that a merely-neutral log() line can't give the "did it actually work?" question. */
+function logSuccess(line) {
+  const el = document.createElement("div");
+  el.className = "log-line log-line--good";
+  el.textContent = `✓ ${line}`;
   logPanel.appendChild(el);
   logPanel.scrollTop = logPanel.scrollHeight;
 }
@@ -650,22 +685,19 @@ const namingPatternEditor = createNamingPatternEditor({
 });
 namingPatternEditorHost.appendChild(namingPatternEditor.el);
 
-namingSeparatorSelect.addEventListener("change", () => {
-  namingSettings.separator = namingSeparatorSelect.value;
-  updateNamingPreview();
-  saveSettings();
+// Same token system, applied to each source's own output folder name (and its wav/ full-track
+// copy) - see buildTaggedStem() below. No {number} button: a folder names one whole source, not one
+// chop, so a per-chop number would never mean anything here (see js/naming-tokens.js).
+const namingFolderPatternEditor = createNamingPatternEditor({
+  initialValue: namingSettings.folderPattern,
+  tokens: ["name", "tag", "key", "tempo"],
+  onChange: (pattern) => {
+    namingSettings.folderPattern = pattern;
+    updateNamingPreview();
+    saveSettings();
+  },
 });
-namingFolderTagCheckbox.addEventListener("change", () => {
-  namingSettings.includeFolderTag = namingFolderTagCheckbox.checked;
-  updateNamingPreview();
-  saveSettings();
-});
-
-/** Build the "<stem><sep><tag>" folder/base name (tag omitted if includeFolderTag is off or nothing was detected). */
-function buildTaggedStem(stem, tag) {
-  const parts = namingSettings.includeFolderTag && tag ? [stem, tag] : [stem];
-  return sanitizeForPath(joinNameParts(parts, namingSettings.separator), SAFE_NAME_LIMIT);
-}
+namingFolderPatternEditorHost.appendChild(namingFolderPatternEditor.el);
 
 /**
  * Formats a detected key alone for the {key} token, e.g. "Cm" or "C" - same per-key formatting
@@ -684,6 +716,24 @@ function formatKeyToken(kt) {
  */
 function formatTempoToken(kt) {
   return kt && kt.bpm ? String(Math.round(kt.bpm)) : "";
+}
+
+/**
+ * Build the per-source output folder name (and the base name for its wav/ full-track copy) from the
+ * folder-name pattern - the same {name}/{tag}/{key}/{tempo} token substitution buildChopFileName
+ * uses for filenames, via resolveFolderName() in js/naming-tokens.js, which also owns the "missing
+ * token -> clean output, not 'undefined' or doubled separators" cleanup. `kt` should already be the
+ * EFFECTIVE key/tempo (manual override applied, if any - see effectiveTempo()/effectiveKt in
+ * processOneFile) so a corrected tempo is what {tempo} actually reflects.
+ */
+function buildTaggedStem(stem, kt) {
+  const resolved = resolveFolderName(namingSettings.folderPattern, {
+    name: stem,
+    tag: buildKeyTempoTag(kt, namingSettings.separator),
+    key: formatKeyToken(kt),
+    tempo: formatTempoToken(kt),
+  });
+  return sanitizeForPath(resolved, SAFE_NAME_LIMIT) || stem;
 }
 
 /**
@@ -711,11 +761,11 @@ function buildChopFileName(stem, tag, index, kt) {
   return `${base}.wav`;
 }
 
-/** Refreshes the "here's what that'll look like" example under the naming pattern input. */
+/** Refreshes the "here's what that'll look like" example under the naming pattern inputs. */
 function updateNamingPreview() {
   const sampleKt = { key: "C", scale: "minor", bpm: 120 };
   const sampleTag = buildKeyTempoTag(sampleKt, namingSettings.separator);
-  const folderName = buildTaggedStem("drum_take", sampleTag);
+  const folderName = buildTaggedStem("drum_take", sampleKt);
   const sampleNames = [1, 2, 3].map((i) => buildChopFileName("drum_take", sampleTag, i, sampleKt));
   namingPreviewEl.textContent = `${folderName}/  ->  ${sampleNames.join(", ")}`;
 }
@@ -1341,7 +1391,6 @@ function saveSettings() {
         naming: namingSettings,
         exportSettings,
         chopExportFormat,
-        detectSettings,
         timestretch: timestretchSettings,
         outputStage: outputStageSettings,
         drive: driveSettings,
@@ -1494,10 +1543,17 @@ function applySettings(saved) {
     if (mergedNaming.chopPattern && LEGACY_PATTERN_MAP[mergedNaming.chopPattern]) {
       mergedNaming.chopPattern = LEGACY_PATTERN_MAP[mergedNaming.chopPattern];
     }
+    // Migrate the old "add the key/tempo tag to the folder name" checkbox into the new token-based
+    // folderPattern, the first time a settings blob saved before it existed gets loaded - {name} {tag}
+    // reproduces "on" (today's default), bare {name} reproduces "off". Once folderPattern exists in a
+    // save (every save from here on), this is skipped entirely and the stored pattern wins outright.
+    if (typeof mergedNaming.folderPattern !== "string") {
+      mergedNaming.folderPattern = mergedNaming.includeFolderTag === false ? "{name}" : "{name} {tag}";
+    }
+    delete mergedNaming.includeFolderTag; // replaced by folderPattern - see above
     Object.assign(namingSettings, mergedNaming);
     namingPatternEditor.setValue(namingSettings.chopPattern);
-    namingSeparatorSelect.value = namingSettings.separator;
-    namingFolderTagCheckbox.checked = namingSettings.includeFolderTag;
+    namingFolderPatternEditor.setValue(namingSettings.folderPattern);
   }
   if (saved.exportSettings) {
     Object.assign(exportSettings, saved.exportSettings);
@@ -1508,11 +1564,6 @@ function applySettings(saved) {
   if (CHOP_EXPORT_FORMATS.includes(saved.chopExportFormat)) {
     chopExportFormat = saved.chopExportFormat;
     chopExportFormatSelect.value = chopExportFormat;
-  }
-  if (saved.detectSettings) {
-    Object.assign(detectSettings, saved.detectSettings);
-    detectKeyCheckbox.checked = detectSettings.key;
-    detectTempoCheckbox.checked = detectSettings.tempo;
   }
   if (typeof saved.splitSubfolders === "boolean") {
     splitSubfoldersCheckbox.checked = saved.splitSubfolders;
@@ -2094,7 +2145,15 @@ folderDropZone.addEventListener("drop", async (ev) => {
   }
 });
 
-clearFoldersBtn.addEventListener("click", () => {
+/**
+ * Everything "Clear" (the dropzone button) and New Session (the header button, see newSession()
+ * below) share: drop every queued source/folder and all analysis/state tied to them - imported
+ * files, canonical chops and edits, cached key/tempo analysis, Undo/Redo history and Stretch previews
+ * (all live in analysisCache, so invalidateAnalysis() covers the lot), and manual BPM overrides.
+ * Factored out so the two can't drift apart; New Session is a strict superset (results panel, log,
+ * playback, a still-running batch) on top of exactly this.
+ */
+function clearSourceQueue() {
   sourceFolders.length = 0;
   pendingReconnectFolders.length = 0;
   looseDestinationHandle = null;
@@ -2102,11 +2161,62 @@ clearFoldersBtn.addEventListener("click", () => {
   invalidateAnalysis();
   tempoOverrides.clear(); // no source files left to hold a correction for
   invalidateStretchPreview(); // nothing left to auto-process for
+  // The progress bar itself is already hidden by updateProgress(0, 0) below, but progressLabel is a
+  // separate element outside #progress-row (see the footer in index.html) - without this, a stale
+  // "N / M file(s)" from the last run keeps showing under an otherwise-empty queue.
+  updateProgress(0, 0);
   // renderFolderList() also calls updateStretchWorkspaceVisibility() (stops any preview playback and
   // hides the workspace, since sourceFolders is now empty) and rebuildStretchFileOrder() (empties the
   // file strip and clears stretchActiveKey, since there's nothing left to point at).
   renderFolderList();
   updateProcessButton();
+}
+
+clearFoldersBtn.addEventListener("click", clearSourceQueue);
+
+/**
+ * "I'm done with this batch, let me start another" - see the New Session button near Settings in the
+ * header. A strict superset of the plain Clear button above: the same queue/analysis reset, plus
+ * everything Clear doesn't touch - the results panel, the log, every result card's own waveform
+ * playback, and (via sessionEpoch/cancelRequested) a batch that's still actively running. Deliberately
+ * leaves saveSettings()'s blob (naming patterns, export settings, characters, Output Stage, ...)
+ * completely untouched - those are user preferences the user configured deliberately, not job state,
+ * and "start a new session" should never quietly mean "lose how I like this set up".
+ */
+async function newSession() {
+  const hasWork = processing || sourceFolders.length > 0;
+  if (hasWork) {
+    const { confirmed } = await showConfirmDialog({
+      title: "Start a new session?",
+      body: processing
+        ? "A batch is still running. Starting a new session stops it immediately and clears everything queued - every imported file, chop edit and analysis result. Your saved settings (naming, export, characters, etc.) are kept."
+        : "This clears everything queued - every imported file, chop edit and analysis result. Your saved settings (naming, export, characters, etc.) are kept.",
+      confirmLabel: "Start new session",
+      cancelLabel: "Keep working",
+    });
+    if (!confirmed) return;
+  }
+
+  // Order matters here: stop a running batch (epoch + cancelRequested) and all playback BEFORE
+  // wiping the queue/results/log below, so nothing still in flight gets a chance to touch what's
+  // about to be the fresh empty state.
+  sessionEpoch++; // processBatch() re-checks this before every write - see its declaration above
+  cancelRequested = true; // belt-and-braces: also trips a running batch's own Cancel-style check
+  processing = false;
+  dryRun = false;
+  progressRow.hidden = true;
+  stopAllFileEditorPlayback();
+  mountedFileEditors.clear();
+  stretchWorkspace.stopAllPlayback();
+
+  clearSourceQueue();
+  resultsPanel.innerHTML = "";
+  clearLog();
+  log("New session started.");
+}
+
+newSessionBtn.addEventListener("click", () => {
+  newSession();
 });
 
 // ---------------------------------------------------------------------------
@@ -2273,7 +2383,7 @@ async function ensureStretchSourceAnalyzed(folder, fileInfo) {
   const channels = bufferChannels(buffer);
   const mono = toMono(channels);
   const validCached = cachedAnalysis(folder, fileInfo);
-  const kt = validCached ? validCached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: detectSettings.key, tempo: detectSettings.tempo });
+  const kt = validCached ? validCached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: true, tempo: true });
   const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
   const bpmText = formatBpmText(effectiveTempo(key, kt), tempoOverrides.has(key), kt.available);
   analysisCache.set(key, {
@@ -2362,9 +2472,10 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   // A valid cache entry means Preview already ran essentia over this file and nothing that would
   // move a cut point has changed since, so Export reuses that work instead of repeating it.
   const cached = cachedAnalysis(folder, fileInfo);
-  const wantKey = detectSettings.key;
-  const wantTempo = detectSettings.tempo;
-  const kt = cached ? cached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: wantKey, tempo: wantTempo });
+  // Key/tempo detection is always attempted (no user-facing opt-out any more) - see analyzeKeyAndTempo's
+  // {key,tempo} flags, which just mean "attempt this", not "the user asked for it". A failed detection
+  // still comes back as a normal result (kt.key/kt.bpm simply falsy), it never throws.
+  const kt = cached ? cached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: true, tempo: true });
   if (cached) log(`    reusing the analysis from the last run`);
   // Every musical decision below - the tag, the {tempo} token, bar-based chop length, the stretch
   // ratio - is asking "what tempo should this source be treated as?", which is effectiveBpm, not
@@ -2374,12 +2485,16 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   const isManualTempo = tempoOverrides.has(key);
   const effectiveKt = { ...kt, bpm: effectiveBpm };
   const tag = buildKeyTempoTag(effectiveKt, namingSettings.separator);
-  const taggedStem = buildTaggedStem(stem, tag);
+  const taggedStem = buildTaggedStem(stem, effectiveKt);
 
   const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
   const bpmText = formatBpmText(effectiveBpm, isManualTempo, kt.available);
 
-  if (chopIntoPieces && mode === "drums" && wantTempo && !effectiveBpm) {
+  // Drums-mode chop length is bar-based, so it genuinely needs a tempo to work from - unlike the
+  // rest of the app, this one processing mode really can't proceed the normal way without one.
+  // Detection itself is unconditional now (see the kt line above), so this only ever fires on a real
+  // detection failure, never on an opt-out that no longer exists.
+  if (chopIntoPieces && mode === "drums" && !effectiveBpm) {
     const proceed = await resolveTempoWarning(fileInfo.name);
     if (!proceed) {
       log(`    skipped - no tempo detected`);
@@ -3025,9 +3140,14 @@ function renderFolderResultSection(folder) {
 }
 
 /**
- * The exported-audio list under the waveform. `onPick` links a row back to the waveform, so
- * selection works in both directions: click a slice on the waveform to light up its row, or click
- * a row to select that slice.
+ * The compact textual chop/one-shot list under the waveform - name + duration only, no per-row
+ * native <audio> player any more. The interactive waveform above (see renderFileResult/mountEditor)
+ * is the actual audition surface now: its own Play/Loop toolbar buttons already play whichever slice
+ * is selected, which made a whole column of large native audio controls here pure duplication -
+ * one per chop, on every card, for every file in a batch that can run into the dozens. `onPick`
+ * still links a row back to the waveform both ways: click a slice on the waveform to light up its
+ * row, or click a row (anywhere on it, now that there's no audio control competing for the click) to
+ * select - and, via the waveform's own Play button, audition - that slice.
  */
 function renderChopList(chopRows, onPick) {
   const list = document.createElement("div");
@@ -3039,16 +3159,10 @@ function renderChopList(chopRows, onPick) {
     const label = document.createElement("span");
     label.className = "chop-name";
     label.textContent = `${chop.fileName} (${chop.seconds.toFixed(1)}s)`;
-    const audio = document.createElement("audio");
-    audio.controls = true;
-    audio.preload = "none";
-    audio.src = URL.createObjectURL(chop.blob);
     row.appendChild(label);
-    row.appendChild(audio);
     if (onPick) {
-      // the audio element has its own controls, so only the label area selects
-      label.addEventListener("click", () => onPick(idx));
-      label.style.cursor = "pointer";
+      row.addEventListener("click", () => onPick(idx));
+      row.style.cursor = "pointer";
     }
     list.appendChild(row);
   });
@@ -3083,6 +3197,51 @@ function repaintForTheme() {
 
 
 /**
+ * Compact collapsed presentation for a source whose "include in export" (js/file-inclusion.js) is
+ * off - reuses the no-tempo-detected skip row's compact single-line LAYOUT (see
+ * renderSkippedFileResult) so a big multi-file review session can visually get export-disabled
+ * sources out of the way, but deliberately NOT its amber "something needs attention" colouring or
+ * wording: this is a deliberate export decision, not an analysis failure, and the two must stay
+ * distinguishable at a glance as well as in state. Nothing about the source is discarded to get
+ * here - analysisCache (canonical chops, manual edits, Undo/Redo history, detected key/tempo, BPM
+ * overrides) is completely untouched; this is a pure rendering choice over the same `state` the full
+ * card below uses, and ticking the checkbox re-renders that exact full card, unchanged, in its place.
+ */
+function renderCollapsedExportOffCard(state) {
+  const { fileName, editContext } = state;
+
+  const block = document.createElement("div");
+  block.className = "result-file result-file--export-off";
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "result-file-name";
+  nameEl.textContent = fileName;
+
+  const metaEl = document.createElement("span");
+  metaEl.className = "result-file-meta";
+  metaEl.textContent = "skipped - excluded from export";
+
+  const exportLabel = document.createElement("label");
+  exportLabel.className = "check check--inline result-export-toggle";
+  exportLabel.title = "Tick to include this source in export again - every chop, edit and analysis result is exactly as you left it.";
+  const exportBox = document.createElement("input");
+  exportBox.type = "checkbox";
+  exportBox.checked = false; // this card only ever renders while export is off - see renderFileResult()
+  const exportText = document.createElement("span");
+  exportText.textContent = "include in export";
+  exportLabel.append(exportBox, exportText);
+  exportBox.addEventListener("change", () => {
+    editContext.fileInfo.exportIncluded = exportBox.checked;
+    log(`  ${fileName}: ${exportBox.checked ? "included in" : "excluded from"} export.`);
+    onExportInclusionChanged();
+    if (exportBox.checked) block.replaceWith(renderFileResult(state));
+  });
+
+  block.append(nameEl, metaEl, exportLabel);
+  return block;
+}
+
+/**
  * Renders one processed file's card.
  *
  * The waveform here is the interactive one, always - there is no separate "edit mode" to enter any
@@ -3104,6 +3263,14 @@ function repaintForTheme() {
 function renderFileResult(state) {
   const { fileName, keyText, bpmText, chopRows, oneShotRows, duration, editContext, chopSkipped } = state;
 
+  // Export-off files collapse to the compact row above instead of staying fully expanded - this is
+  // purely which of the two card shapes gets rendered; the underlying source, its analysis and every
+  // edit sitting in analysisCache are identical either way, and re-ticking "include in export" comes
+  // straight back here with the same `state`.
+  if (editContext && !isExportIncluded(editContext.fileInfo)) {
+    return renderCollapsedExportOffCard(state);
+  }
+
   const block = document.createElement("div");
   block.className = "result-file";
 
@@ -3112,6 +3279,17 @@ function renderFileResult(state) {
   const nameEl = document.createElement("span");
   nameEl.className = "result-file-name";
   nameEl.textContent = fileName;
+  const sourceEl = document.createElement("span");
+  // Provenance, not the headline - which subfolder (recursive imports can put same-named files in
+  // different ones) this source actually came from. See formatSourcePath() in js/io-fs.js: it only
+  // ever shows the picker-chosen root name + the relativeDir the import walk actually discovered,
+  // never a fabricated absolute filesystem path (the browser doesn't expose one).
+  sourceEl.className = "result-file-source";
+  if (editContext) {
+    const fullPath = formatSourcePath(editContext.folder.name, editContext.fileInfo.relativeDir, editContext.fileInfo.name);
+    sourceEl.textContent = fullPath;
+    sourceEl.title = fullPath;
+  }
   const metaEl = document.createElement("span");
   metaEl.className = "result-file-meta";
   metaEl.textContent = `key: ${keyText} · tempo: ${bpmText} · ${chopSkipped ? "whole file processed" : `${chopRows.length} chop(s)`}${
@@ -3120,6 +3298,7 @@ function renderFileResult(state) {
   const titleGroup = document.createElement("div");
   titleGroup.className = "result-file-title-group";
   titleGroup.appendChild(nameEl);
+  if (editContext) titleGroup.appendChild(sourceEl);
   titleGroup.appendChild(metaEl);
   header.appendChild(titleGroup);
 
@@ -3129,27 +3308,28 @@ function renderFileResult(state) {
   // File-level export eligibility (js/file-inclusion.js) - separate from, and evaluated after,
   // whichever chop/one-shot is selected below. Turning this off never touches processing, the
   // waveform, chops, playback, or canonical regions - it only stops writeOutput() (app.js, the single
-  // choke point every export write passes through) from producing anything for this source. The
-  // block-level modifier class is a restrained "not exporting" cue, not a disabled/unavailable look:
-  // every control on this card stays fully interactive either way.
+  // choke point every export write passes through) from producing anything for this source (and, as
+  // of the collapse above, swaps this card for the compact one). Every control on this card stays
+  // fully interactive right up until that swap.
   if (editContext) {
     const exportLabel = document.createElement("label");
     exportLabel.className = "check check--inline result-export-toggle";
     exportLabel.title = "Untick to leave this source out of Export entirely - processing, editing and playback are unaffected.";
     const exportBox = document.createElement("input");
     exportBox.type = "checkbox";
-    exportBox.checked = isExportIncluded(editContext.fileInfo);
+    exportBox.checked = true; // this branch only ever renders while export is on - see the collapse check above
     const exportText = document.createElement("span");
     exportText.textContent = "include in export";
     exportLabel.appendChild(exportBox);
     exportLabel.appendChild(exportText);
-    block.classList.toggle("result-file--export-off", !exportBox.checked);
     exportBox.addEventListener("change", () => {
       editContext.fileInfo.exportIncluded = exportBox.checked;
-      block.classList.toggle("result-file--export-off", !exportBox.checked);
       log(`  ${fileName}: ${exportBox.checked ? "included in" : "excluded from"} export.`);
-      updateExportSelectedState();
       onExportInclusionChanged();
+      // Collapse in place, from the exact same state - every chop/edit/history/analysis this card was
+      // showing rides along untouched in `state`/analysisCache, ready to reappear exactly as it was
+      // the moment export is switched back on from the collapsed row.
+      if (!exportBox.checked) block.replaceWith(renderFileResult(state));
     });
     actionsGroup.appendChild(exportLabel);
   }
@@ -3384,7 +3564,10 @@ function renderFileResult(state) {
   }
 
   function mountEditor() {
-    if (editor) editor.destroy();
+    if (editor) {
+      editor.destroy();
+      mountedFileEditors.delete(editor);
+    }
     editorHost.innerHTML = "";
     editor = null;
     rechopRow.hidden = editing !== "chops";
@@ -3460,6 +3643,7 @@ function renderFileResult(state) {
         log(`  ${state.fileName}: redid the ${editing === "chops" ? "chop" : "one-shot"} edit.`);
       },
     });
+    mountedFileEditors.add(editor);
     editorHost.appendChild(editor.el);
     registerThemeRepaint(editor.el, () => editor && editor.redraw());
     const previousSelection = editing === "chops" ? state.chopSelectedIndex : state.oneShotSelectedIndex;
@@ -3640,10 +3824,13 @@ function escapeHtml(str) {
 // Batch processing
 // ---------------------------------------------------------------------------
 
-/** Shows/hides and updates the progress bar under Process Batch. total<=0 hides it. */
+/** Shows/hides and updates the progress bar under Process Batch. total<=0 hides it and clears its
+ * label too - progressLabel is a separate element outside #progress-row (see the footer in
+ * index.html), so hiding the bar alone would leave a stale "N / M file(s)" showing under it. */
 function updateProgress(done, total, label) {
   if (total <= 0) {
     progressRow.hidden = true;
+    progressLabel.textContent = "";
     return;
   }
   progressRow.hidden = false;
@@ -3665,6 +3852,11 @@ async function processBatch({ write = true } = {}) {
     log('No files included in export. Turn "include in export" on for at least one source, then try again.');
     return;
   }
+  // Captured once, at the top of this run - see sessionEpoch's declaration near the top of this file.
+  // A New Session click bumps it, and every check below against this local copy is how a batch
+  // already in flight notices and stops quietly, rather than continuing to populate a session that
+  // already moved on.
+  const myEpoch = sessionEpoch;
   processing = true;
   dryRun = !write;
   cancelRequested = false;
@@ -3673,6 +3865,10 @@ async function processBatch({ write = true } = {}) {
   updateProcessButton();
   clearLog();
   resultsPanel.innerHTML = "";
+  // A card discarded this way (rather than via its own toggle) never got a chance to stop its own
+  // playback - see mountedFileEditors' declaration near the top of this file.
+  stopAllFileEditorPlayback();
+  mountedFileEditors.clear();
   drumTempoSkipPolicy = null;
   log(write ? "Exporting…" : "Processing. Nothing is saved until you hit Export.");
   // Cleared up front, not just left to be overwritten - a folder skipped entirely this run (no
@@ -3694,6 +3890,11 @@ async function processBatch({ write = true } = {}) {
   const zipBatch = FSA_SUPPORTED || dryRun ? null : new ZipBatch();
   let totalChops = 0;
   let processedFolders = 0;
+  // Tracked so the final summary can't claim green success over a run that actually hit a real
+  // failure (a file that threw, a folder whose write permission was denied) - see the success-colour
+  // decision at the bottom of this function. A file simply skipped by isIncluded()/an empty folder
+  // isn't a failure of anything, so neither of those touches this.
+  let hadErrors = false;
   // Excluded source files (js/file-inclusion.js) don't count toward the progress bar's total, and -
   // via the live isIncluded() check inside the loop below - never reach processOneFile at all. The
   // check is live rather than a filtered snapshot taken once up front so a file unchecked mid-batch
@@ -3717,6 +3918,7 @@ async function processBatch({ write = true } = {}) {
       const ok = await ensureReadWritePermission(folder.handle);
       if (!ok) {
         log("  Permission to write to this folder was denied, skipped");
+        hadErrors = true;
         continue;
       }
     }
@@ -3726,6 +3928,7 @@ async function processBatch({ write = true } = {}) {
     const folderSection = task === "stretch" ? null : renderFolderResultSection(folder);
 
     for (const fileInfo of folder.files) {
+      if (myEpoch !== sessionEpoch) break outer; // a new session started - stop quietly, see below
       if (cancelRequested) {
         log("Batch cancelled.");
         break outer;
@@ -3737,6 +3940,7 @@ async function processBatch({ write = true } = {}) {
       } catch (err) {
         log(`  ERROR on ${fileInfo.name}: ${err.message || err} - skipping this file, batch continues`);
         console.error(err);
+        hadErrors = true;
       }
       filesDone++;
       updateProgress(filesDone, totalFiles);
@@ -3745,6 +3949,17 @@ async function processBatch({ write = true } = {}) {
       await new Promise((r) => setTimeout(r, 0));
     }
     processedFolders++;
+  }
+
+  if (myEpoch !== sessionEpoch) {
+    // A new session started while this batch was still running - stop here rather than finishing the
+    // old batch's zip download/destination summary/"Done" line against a session that already moved
+    // on (see newSession()). No log line either: the new session's own log was already started fresh.
+    processing = false;
+    dryRun = false;
+    cancelRequested = false;
+    progressRow.hidden = true;
+    return;
   }
 
   if (zipBatch) {
@@ -3764,16 +3979,30 @@ async function processBatch({ write = true } = {}) {
     }
   }
 
+  // Success (green) is reserved for a real Export that actually finished cleanly - no cancellation,
+  // and no per-file/per-folder failure logged above (hadErrors) - the one message that answers "did
+  // it work?" with a clear yes. Preview, a cancelled run, and a run that hit real errors are all still
+  // just informational, not that clear yes, so they stay in the log's normal neutral colour; each
+  // individual ERROR already got its own distinct handling at its own catch site above.
+  const exportSucceeded = !dryRun && !cancelRequested && !hadErrors;
   if (task === "stretch") {
     const status = cancelRequested ? "Cancelled." : "Done.";
-    log(dryRun ? `${status} Processed ${filesDone} file(s). Adjust anything you want, then hit Export to save.` : `${status} Exported ${filesDone} file(s).`);
+    if (dryRun) {
+      log(`${status} Processed ${filesDone} file(s). Adjust anything you want, then hit Export to save.`);
+    } else if (!exportSucceeded) {
+      log(`${status} Exported ${filesDone} file(s).`);
+    } else {
+      logSuccess(`${status} Exported ${filesDone} file(s).`);
+    }
   } else if (dryRun) {
     log(
       `${cancelRequested ? "Cancelled." : "Done."} ${totalChops} chop(s) from ${processedFolders} folder(s). ` +
         `Adjust anything you want, then hit Export to save.`
     );
-  } else {
+  } else if (!exportSucceeded) {
     log(`${cancelRequested ? "Cancelled." : "Done."} Exported ${totalChops} chop(s) from ${processedFolders} folder(s).`);
+  } else {
+    logSuccess(`Done. Exported ${totalChops} chop(s) from ${processedFolders} folder(s).`);
   }
   processing = false;
   dryRun = false;
@@ -3816,14 +4045,6 @@ bindSliderNumber(fadeMsSlider, fadeMsNumber, (v) => {
 });
 bindSliderNumber(zcMsSlider, zcMsNumber, (v) => {
   exportSettings.zcSearchMs = v;
-  saveSettings();
-});
-detectKeyCheckbox.addEventListener("change", () => {
-  detectSettings.key = detectKeyCheckbox.checked;
-  saveSettings();
-});
-detectTempoCheckbox.addEventListener("change", () => {
-  detectSettings.tempo = detectTempoCheckbox.checked;
   saveSettings();
 });
 splitSubfoldersCheckbox.addEventListener("change", saveSettings);

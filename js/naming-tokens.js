@@ -65,3 +65,19 @@ export function resolveNamePattern(template, tokens) {
     return value === undefined || value === null ? "" : String(value);
   });
 }
+
+/**
+ * Resolves a FOLDER/base-name pattern - the same {name}/{tag}/{key}/{tempo} tokens a filename
+ * pattern uses, minus {number} (a source's own output folder has no per-chop number to add, unlike
+ * buildChopFileName's filenames - see js/app.js's buildTaggedStem, the one caller). Falls back to
+ * "{name}" for an empty/blank pattern, and collapses the run of whitespace a missing token can leave
+ * behind (e.g. "{name} {key} {tempo}bpm" with no key detected) the same way buildChopFileName already
+ * does for filenames, so a source with unavailable metadata still produces a clean name instead of
+ * doubled spaces or a dangling separator. Falls back to the bare source name if the resolved pattern
+ * is empty outright (e.g. a pattern that's only tokens, all of which are unavailable).
+ */
+export function resolveFolderName(pattern, tokens) {
+  const template = (pattern || "").trim() || "{name}";
+  const resolved = resolveNamePattern(template, tokens).replace(/\s+/g, " ").trim();
+  return resolved || tokens.name || "";
+}
