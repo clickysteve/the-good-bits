@@ -2,7 +2,7 @@
 // behind the Stretch workspace's "is this preview still current" indicator and its Randomise button.
 // Run with: node test/stretch-workspace-state.test.mjs
 import assert from "node:assert/strict";
-import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "../js/dsp/stretch/workspace-state.js";
+import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed, mapPreviewPosition } from "../js/dsp/stretch/workspace-state.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -79,6 +79,25 @@ test("randomSeed: stays within [0, 999999] and is driven by the supplied rng", (
   const seeds = new Set(Array.from({ length: 20 }, () => randomSeed(Math.random)));
   assert.ok(seeds.size > 1, "should vary across calls with Math.random");
   for (const s of seeds) assert.ok(s >= 0 && s <= 999999);
+});
+
+test("mapPreviewPosition: maps by proportion of duration, not raw seconds", () => {
+  // 10s into a 20s original (50%) -> 50% of a 30s processed take = 15s, NOT 10s.
+  assert.equal(mapPreviewPosition(10, 20, 30), 15);
+  assert.equal(mapPreviewPosition(0, 20, 30), 0);
+  assert.equal(mapPreviewPosition(20, 20, 30), 30);
+});
+
+test("mapPreviewPosition: clamps an out-of-range position instead of extrapolating past either end", () => {
+  assert.equal(mapPreviewPosition(25, 20, 30), 30); // position beyond its own duration clamps to 100%
+  assert.equal(mapPreviewPosition(-5, 20, 30), 0);
+});
+
+test("mapPreviewPosition: falls back to 0 for an unusable (zero/negative/NaN) duration on either side", () => {
+  assert.equal(mapPreviewPosition(10, 0, 30), 0);
+  assert.equal(mapPreviewPosition(10, 20, 0), 0);
+  assert.equal(mapPreviewPosition(10, -1, 30), 0);
+  assert.equal(mapPreviewPosition(10, 20, NaN), 0);
 });
 
 console.log(`\n${passed} test(s) passed.`);

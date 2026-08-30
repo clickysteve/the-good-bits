@@ -46,3 +46,16 @@ export function randomiseMacroValues(character, currentMacroValues, rng = Math.r
 export function randomSeed(rng = Math.random) {
   return Math.floor(rng() * 1000000);
 }
+
+/**
+ * Maps a playhead position from one preview's timeline to the other's by proportion (fraction of
+ * duration elapsed), not raw seconds - since stretching changes duration, "10s into a 20s original"
+ * and "10s into a 29s processed take" are not remotely the same musical moment, but "50% through"
+ * is a reasonable stand-in for it in both. Falls back to 0 if either duration is unusable (silent/
+ * unloaded audio), rather than propagating NaN/Infinity into a seek call.
+ */
+export function mapPreviewPosition(fromPositionSec, fromDurationSec, toDurationSec) {
+  if (!(fromDurationSec > 0) || !(toDurationSec > 0)) return 0;
+  const proportion = Math.max(0, Math.min(1, fromPositionSec / fromDurationSec));
+  return proportion * toDurationSec;
+}

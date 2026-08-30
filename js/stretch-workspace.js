@@ -1,8 +1,10 @@
 // stretch-workspace.js
 //
-// The STRETCH task's central workspace: a compact file strip, an Original vs. Processed A/B
-// audition pane (built on preview-waveform.js), and a character browser (a grid of cards grouped by
-// sonic family, reading straight from the DSP's own character registry, plus a focused macro-control
+// The STRETCH task's central workspace: a compact file strip, a Time/Target panel (mode, target
+// tempo/ratio, detected tempo, resolved ratio - moved in from the old sidebar so the source/target
+// relationship sits right next to the audio it produces), an Original vs. Processed A/B audition
+// pane (built on preview-waveform.js), and a character browser (a grid of cards grouped by sonic
+// family, reading straight from the DSP's own character registry, plus a focused macro-control
 // panel for whichever character is selected). app.js owns all real state (timestretchSettings,
 // analysisCache, the batch pipeline) - this module is a renderer + interaction surface over it, the
 // same relationship editor-waveform.js has with the chop-editor card it's mounted inside.
@@ -10,19 +12,148 @@
 // Deliberately split into several small `setX`/`renderX` methods rather than one big
 // `render(viewModel)`: dragging a macro slider must be cheap (update a number, nothing else) and
 // must NOT tear down and rebuild the Original/Processed waveforms - that would both look janky and
-// silently kill any audio currently playing. Only an actual character switch, file switch, or a
-// fresh Process result rebuilds the parts of the DOM that need it.
+// silently kill any audio currently playing. Only an actual character switch, file switch, mode
+// switch, or a fresh Process result rebuilds the parts of the DOM that need it.
 import { characterGroups, MACROS } from "./dsp/stretch/characters.js";
+import { mapPreviewPosition } from "./dsp/stretch/workspace-state.js";
 import { createPreviewWaveform } from "./preview-waveform.js";
 
 function fmtSeconds(s) {
   return `${s.toFixed(1)}s`;
 }
 
-export function createStretchWorkspace({ container, getAudioContext, color }) {
+/**
+ * @param {object} deps
+ * @param {HTMLElement} deps.container
+ * @param {() => AudioContext} deps.getAudioContext
+ * @param {(name:string, fallback:string) => string} deps.color
+ * @param {(mode:string) => void} deps.onModeChange
+ * @param {(v:number) => void} deps.onTargetBpmChange   BPM, already rounded/clamped by the caller
+ * @param {(v:number) => void} deps.onRatioChange        percent (100 = 1.0x), already rounded/clamped
+ */
+export function createStretchWorkspace({ container, getAudioContext, color, onModeChange, onTargetBpmChange, onRatioChange }) {
   const fileStrip = document.createElement("div");
   fileStrip.className = "stretch-file-strip";
   container.appendChild(fileStrip);
+
+  // ---- Time / Target ---------------------------------------------------
+  //
+  // Built once; a mode switch just toggles which of the two mode-specific fields is visible (same
+  // show/one-hidden approach the old sidebar used), so dragging the target-tempo or ratio slider
+  // never rebuilds anything here - it only calls back into app.js, exactly like the macro sliders
+  // in the character detail panel below.
+
+  const timeTarget = document.createElement("div");
+  timeTarget.className = "stretch-time-target";
+  const timeHead = document.createElement("div");
+  timeHead.className = "stretch-pane-head";
+  const timeTitle = document.createElement("h3");
+  timeTitle.textContent = "Time / Target";
+  timeHead.appendChild(timeTitle);
+  timeTarget.appendChild(timeHead);
+
+  const modeField = document.createElement("div");
+  modeField.className = "field";
+  const modeLabel = document.createElement("label");
+  modeLabel.textContent = "Mode";
+  modeLabel.htmlFor = "stretch-time-mode-select";
+  const modeSelect = document.createElement("select");
+  modeSelect.id = "stretch-time-mode-select";
+  for (const [value, label] of [
+    ["target-tempo", "Match a target tempo"],
+    ["fixed-ratio", "Fixed ratio"],
+  ]) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    modeSelect.appendChild(opt);
+  }
+  modeSelect.addEventListener("change", () => onModeChange(modeSelect.value));
+  modeField.append(modeLabel, modeSelect);
+  timeTarget.appendChild(modeField);
+
+  const timeGrid = document.createElement("div");
+  timeGrid.className = "stretch-time-grid";
+  timeTarget.appendChild(timeGrid);
+
+  function makeReadout(label) {
+    const el = document.createElement("div");
+    el.className = "field-readout stretch-time-readout";
+    const span = document.createElement("span");
+    span.textContent = label;
+    const strong = document.createElement("strong");
+    strong.textContent = "–";
+    el.append(span, strong);
+    timeGrid.appendChild(el);
+    return strong;
+  }
+
+  const sourceReadout = makeReadout("Source");
+
+  function makeSliderField(labelText, { min, max, step, unit }) {
+    const field = document.createElement("div");
+    field.className = "field stretch-time-slider-field";
+    const label = document.createElement("label");
+    label.textContent = labelText;
+    const row = document.createElement("div");
+    row.className = "slider-row";
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = String(min);
+    slider.max = String(max);
+    slider.step = String(step);
+    const number = document.createElement("input");
+    number.type = "number";
+    number.className = "slider-number";
+    number.min = String(min);
+    number.max = String(max);
+    number.step = String(step);
+    const unitEl = document.createElement("span");
+    unitEl.className = "slider-unit";
+    unitEl.textContent = unit;
+    row.append(slider, number, unitEl);
+    field.append(label, row);
+    timeGrid.appendChild(field);
+    return { field, slider, number };
+  }
+
+  const targetBpmField = makeSliderField("Target tempo", { min: 40, max: 300, step: 1, unit: "BPM" });
+  targetBpmField.slider.addEventListener("input", () => {
+    targetBpmField.number.value = targetBpmField.slider.value;
+    onTargetBpmChange(Number(targetBpmField.slider.value));
+  });
+  targetBpmField.number.addEventListener("change", () => {
+    let v = Math.min(300, Math.max(40, Math.round(Number(targetBpmField.number.value) || 120)));
+    targetBpmField.number.value = targetBpmField.slider.value = String(v);
+    onTargetBpmChange(v);
+  });
+
+  const ratioField = makeSliderField("Stretch amount", { min: 25, max: 400, step: 1, unit: "%" });
+  ratioField.slider.addEventListener("input", () => {
+    ratioField.number.value = ratioField.slider.value;
+    onRatioChange(Number(ratioField.slider.value));
+  });
+  ratioField.number.addEventListener("change", () => {
+    let v = Math.min(400, Math.max(25, Math.round(Number(ratioField.number.value) || 100)));
+    ratioField.number.value = ratioField.slider.value = String(v);
+    onRatioChange(v);
+  });
+
+  const ratioReadout = makeReadout("Ratio");
+  container.appendChild(timeTarget);
+
+  /** Cheap: no rebuild, just reflects current settings - call on every settings/active-file change. */
+  function setTimeTarget({ mode, targetBpm, ratioPct, detectedBpmText, resolvedRatioText }) {
+    modeSelect.value = mode;
+    targetBpmField.field.hidden = mode !== "target-tempo";
+    ratioField.field.hidden = mode !== "fixed-ratio";
+    if (document.activeElement !== targetBpmField.number) targetBpmField.slider.value = targetBpmField.number.value = String(targetBpm);
+    if (document.activeElement !== ratioField.number) ratioField.slider.value = ratioField.number.value = String(ratioPct);
+    sourceReadout.textContent = detectedBpmText;
+    ratioReadout.textContent = resolvedRatioText;
+  }
+
+  // ---- Original / Processed A/B -----------------------------------------
 
   const ab = document.createElement("div");
   ab.className = "stretch-ab";
@@ -39,21 +170,32 @@ export function createStretchWorkspace({ container, getAudioContext, color }) {
     meta.className = "stretch-pane-meta";
     head.append(h, meta);
     pane.appendChild(head);
+    const processingBadge = document.createElement("p");
+    processingBadge.className = "stretch-processing-badge";
+    processingBadge.textContent = "Processing…";
+    processingBadge.hidden = true;
+    pane.appendChild(processingBadge);
     const staleBadge = document.createElement("p");
     staleBadge.className = "stretch-stale-badge";
-    staleBadge.textContent = "Settings changed - press Process to update this preview";
+    staleBadge.textContent = "Settings changed - updating…";
     staleBadge.hidden = true;
     pane.appendChild(staleBadge);
+    const errorBadge = document.createElement("p");
+    errorBadge.className = "stretch-error-badge";
+    errorBadge.hidden = true;
+    pane.appendChild(errorBadge);
     const waveHost = document.createElement("div");
     waveHost.className = "stretch-pane-wave";
     pane.appendChild(waveHost);
     ab.appendChild(pane);
-    return { pane, meta, waveHost, staleBadge };
+    return { pane, meta, waveHost, staleBadge, processingBadge, errorBadge };
   }
 
   const originalPane = makePane("original", "Original");
   const processedPane = makePane("processed", "Processed");
   processedPane.pane.classList.add("stretch-pane--emphasis");
+
+  // ---- Character browser -------------------------------------------------
 
   const browser = document.createElement("div");
   browser.className = "stretch-character-browser";
@@ -74,9 +216,15 @@ export function createStretchWorkspace({ container, getAudioContext, color }) {
   let originalWave = null;
   let processedWave = null;
   let hasProcessedData = false; // tracks whether processedPane currently shows real audio (for setStale)
+  let activeSide = "original"; // which pane currently "owns" audition focus - see Left/Right below
 
   function destroyWave(ref) {
     if (ref) ref.destroy();
+  }
+
+  function updateFocusVisual() {
+    originalPane.pane.classList.toggle("is-focused", activeSide === "original");
+    processedPane.pane.classList.toggle("is-focused", activeSide === "processed");
   }
 
   /** items: [{key, fileName, processed:boolean}]; onSelect(key) fires on click. */
@@ -108,7 +256,19 @@ export function createStretchWorkspace({ container, getAudioContext, color }) {
     }
     const bits = [data.bpmText, fmtSeconds(data.duration)].filter(Boolean);
     originalPane.meta.textContent = bits.join(" · ");
-    originalWave = createPreviewWaveform({ mono: data.mono, sampleRate: data.sampleRate, duration: data.duration, color, getAudioContext });
+    originalWave = createPreviewWaveform({
+      mono: data.mono,
+      sampleRate: data.sampleRate,
+      duration: data.duration,
+      color,
+      getAudioContext,
+      onPlayStateChange: (playing) => {
+        if (playing) {
+          activeSide = "original";
+          updateFocusVisual();
+        }
+      },
+    });
     originalPane.waveHost.appendChild(originalWave.el);
   }
 
@@ -117,6 +277,7 @@ export function createStretchWorkspace({ container, getAudioContext, color }) {
     destroyWave(processedWave);
     processedWave = null;
     processedPane.waveHost.innerHTML = "";
+    processedPane.errorBadge.hidden = true;
     if (!data) {
       hasProcessedData = false;
       processedPane.meta.textContent = "";
@@ -128,16 +289,43 @@ export function createStretchWorkspace({ container, getAudioContext, color }) {
     hasProcessedData = true;
     const bits = [data.characterLabel, `${data.ratio.toFixed(2)}x`, fmtSeconds(data.duration)].filter(Boolean);
     processedPane.meta.textContent = bits.join(" · ");
+    processedPane.staleBadge.textContent = "Settings changed - updating…";
     processedPane.staleBadge.hidden = !isStale;
     processedPane.pane.classList.toggle("is-stale", !!isStale);
-    processedWave = createPreviewWaveform({ mono: data.mono, sampleRate: data.sampleRate, duration: data.duration, color, getAudioContext });
+    processedWave = createPreviewWaveform({
+      mono: data.mono,
+      sampleRate: data.sampleRate,
+      duration: data.duration,
+      color,
+      getAudioContext,
+      onPlayStateChange: (playing) => {
+        if (playing) {
+          activeSide = "processed";
+          updateFocusVisual();
+        }
+      },
+    });
     processedPane.waveHost.appendChild(processedWave.el);
   }
 
   /** Cheap: just the stale badge/border, no waveform rebuild - safe to call on every settings tweak. */
   function setStale(isStale) {
+    processedPane.staleBadge.textContent = "Settings changed - updating…";
     processedPane.staleBadge.hidden = !isStale || !hasProcessedData;
     processedPane.pane.classList.toggle("is-stale", !!isStale && hasProcessedData);
+  }
+
+  /** While true, shows a compact "Processing…" indicator on the Processed pane without touching the waveform underneath it. */
+  function setProcessing(isProcessing) {
+    processedPane.processingBadge.hidden = !isProcessing;
+    processedPane.pane.classList.toggle("is-processing", isProcessing);
+    if (isProcessing) processedPane.staleBadge.hidden = true; // processing IS the resolution of "stale" in progress
+  }
+
+  /** Shows a short error message on the Processed pane (auto-preview failed) - the waveform underneath, if any, is left exactly as it was. */
+  function setProcessingError(message) {
+    processedPane.errorBadge.textContent = message;
+    processedPane.errorBadge.hidden = !message;
   }
 
   /**
@@ -289,11 +477,61 @@ export function createStretchWorkspace({ container, getAudioContext, color }) {
     if (processedWave) processedWave.stop();
   }
 
+  // ---- Left/Right A/B switching -------------------------------------------
+  //
+  // Scoped to `container` (catches keydowns bubbling up from anywhere inside the workspace), not
+  // the document, so it can never steal arrow keys from a form control elsewhere on the page (the
+  // naming pattern editor, the left rail, etc). Inside the workspace itself, real form controls -
+  // the mode select, target-tempo/ratio/macro sliders, the seed input - are excluded by the
+  // closest(...) check below, since arrow keys already have expected native behaviour on those.
+  // Buttons (character cards, file chips, Randomise, the waveforms' own Play/Stop) are deliberately
+  // NOT excluded: a button has no native arrow-key behaviour to preserve, and clicking one (a
+  // character card, most obviously) is exactly when a listener would expect Left/Right to work next.
+
+  function switchTo(target) {
+    const from = activeSide === "original" ? originalWave : processedWave;
+    const to = target === "original" ? originalWave : processedWave;
+    if (!to) return;
+    if (activeSide === target) {
+      // Already the active side - Left/Right when stopped just (re)confirms focus, per spec.
+      updateFocusVisual();
+      return;
+    }
+    const wasPlaying = !!(from && from.isPlaying());
+    const targetPos =
+      from && from.hasAudio() && to.hasAudio() ? mapPreviewPosition(from.getPosition(), from.getDuration(), to.getDuration()) : to.getPosition();
+    if (from) from.pause();
+    activeSide = target;
+    updateFocusVisual();
+    if (wasPlaying && to.hasAudio()) to.play(targetPos);
+    else to.seekTo(targetPos);
+  }
+
+  container.addEventListener("keydown", (ev) => {
+    if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+    const t = ev.target;
+    if (t && t.closest && t.closest('input, select, textarea, [contenteditable="true"]')) return;
+    ev.preventDefault();
+    switchTo(ev.key === "ArrowLeft" ? "original" : "processed");
+  });
+
   function destroy() {
     destroyWave(originalWave);
     destroyWave(processedWave);
     container.innerHTML = "";
   }
 
-  return { el: container, setFileList, setOriginal, setProcessed, setStale, renderCharacterBrowser, stopAllPlayback, destroy };
+  return {
+    el: container,
+    setFileList,
+    setTimeTarget,
+    setOriginal,
+    setProcessed,
+    setStale,
+    setProcessing,
+    setProcessingError,
+    renderCharacterBrowser,
+    stopAllPlayback,
+    destroy,
+  };
 }

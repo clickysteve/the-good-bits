@@ -97,10 +97,10 @@
     <section class="mod" data-tasks="chop stretch both">
       <h2 class="mod-h">Naming</h2>
       <div class="field">
-        <label for="naming-pattern-input">File name pattern</label>
-        <input id="naming-pattern-input" type="text" spellcheck="false" autocomplete="off" value="{number}" />
+        <label id="naming-pattern-label">File name pattern</label>
+        <div id="naming-pattern-editor-host"></div>
       </div>
-      <p class="mod-note"><code>{name}</code>, <code>{tag}</code>, <code>{number}</code>, any order. A number is always added.</p>
+      <p class="mod-note">Click a token to insert it, or type. Any order. A number is always added.</p>
       <div class="field">
         <label for="naming-separator-select">Key/tempo tag separator</label>
         <select id="naming-separator-select">
@@ -165,42 +165,36 @@
         <span>Stretch on export</span>
       </label>
       <div id="timestretch-options" class="mod-body" hidden>
-        <div class="field">
-          <label for="timestretch-mode-select">Mode</label>
-          <select id="timestretch-mode-select">
-            <option value="target-tempo">Match a target tempo</option>
-            <option value="fixed-ratio">Fixed ratio</option>
-          </select>
-        </div>
-        <div class="field" id="timestretch-target-row">
-          <label for="timestretch-target-bpm-input">Target tempo</label>
-          <div class="slider-row">
-            <input id="timestretch-target-bpm-input" type="range" min="40" max="300" step="1" value="120" />
-            <input id="timestretch-target-bpm-value" type="number" class="slider-number" min="40" max="300" step="1" value="120" />
-            <span class="slider-unit">BPM</span>
-          </div>
-        </div>
-        <div class="field" id="timestretch-ratio-row" hidden>
-          <label for="timestretch-ratio-input">Stretch amount</label>
-          <div class="slider-row">
-            <input id="timestretch-ratio-input" type="range" min="25" max="400" step="1" value="100" />
-            <input id="timestretch-ratio-value" type="number" class="slider-number" min="25" max="400" step="1" value="100" />
-            <span class="slider-unit">%</span>
-          </div>
-        </div>
-        <div class="field-readout stretch-only">
-          <span>Detected tempo</span>
-          <strong id="timestretch-detected-bpm-readout">–</strong>
-        </div>
-        <div class="field-readout stretch-only">
-          <span>Stretch ratio</span>
-          <strong id="timestretch-resolved-ratio-readout">–</strong>
-        </div>
-        <!-- Character + its creative controls live in the Stretch workspace itself (the character
-             browser) for the STRETCH task - the whole point of that redesign was to stop squeezing
-             the app's most interesting DSP into this narrow rail. BOTH keeps them here unchanged,
-             since this pass is deliberately scoped to STRETCH only (see js/stretch-workspace.js). -->
+        <!-- Mode/target/ratio and Character (+ its creative controls) all live in the Stretch
+             workspace itself for the STRETCH task - the whole point of that redesign was to stop
+             squeezing the app's most interesting controls into this narrow rail. BOTH keeps them
+             here unchanged, since this pass is deliberately scoped to STRETCH only (see
+             js/stretch-workspace.js, which builds an equivalent set of controls over the same
+             timestretchSettings object under different element ids). -->
         <div class="both-only">
+          <div class="field">
+            <label for="timestretch-mode-select">Mode</label>
+            <select id="timestretch-mode-select">
+              <option value="target-tempo">Match a target tempo</option>
+              <option value="fixed-ratio">Fixed ratio</option>
+            </select>
+          </div>
+          <div class="field" id="timestretch-target-row">
+            <label for="timestretch-target-bpm-input">Target tempo</label>
+            <div class="slider-row">
+              <input id="timestretch-target-bpm-input" type="range" min="40" max="300" step="1" value="120" />
+              <input id="timestretch-target-bpm-value" type="number" class="slider-number" min="40" max="300" step="1" value="120" />
+              <span class="slider-unit">BPM</span>
+            </div>
+          </div>
+          <div class="field" id="timestretch-ratio-row" hidden>
+            <label for="timestretch-ratio-input">Stretch amount</label>
+            <div class="slider-row">
+              <input id="timestretch-ratio-input" type="range" min="25" max="400" step="1" value="100" />
+              <input id="timestretch-ratio-value" type="number" class="slider-number" min="25" max="400" step="1" value="100" />
+              <span class="slider-unit">%</span>
+            </div>
+          </div>
           <div class="field">
             <label for="timestretch-character-select">Character</label>
             <select id="timestretch-character-select"></select>

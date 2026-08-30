@@ -24,6 +24,7 @@ import {
 import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups, MACROS } from "./timestretch.js";
 import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "./dsp/stretch/workspace-state.js";
 import { createStretchWorkspace } from "./stretch-workspace.js";
+import { createNamingPatternEditor } from "./naming-pattern-editor.js";
 import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from "./outputstage.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
@@ -283,7 +284,7 @@ const settingsToggleBtn = $("#settings-toggle");
 const drumOptions = $("#drum-options");
 const drumBarsSelect = $("#drum-bars-select");
 const oneShotsCheckbox = $("#one-shots-checkbox");
-const namingPatternInput = $("#naming-pattern-input");
+const namingPatternEditorHost = $("#naming-pattern-editor-host");
 const namingSeparatorSelect = $("#naming-separator-select");
 const namingFolderTagCheckbox = $("#naming-folder-tag-checkbox");
 const namingPreviewEl = $("#naming-preview");
@@ -311,8 +312,6 @@ const timestretchMacro2Hint = $("#timestretch-macro2-hint");
 const timestretchSeedRow = $("#timestretch-seed-row");
 const timestretchSeedInput = $("#timestretch-seed-input");
 const timestretchPitchNote = $("#timestretch-pitch-note");
-const timestretchDetectedBpmReadout = $("#timestretch-detected-bpm-readout");
-const timestretchResolvedRatioReadout = $("#timestretch-resolved-ratio-readout");
 const stretchWorkspaceEl = $("#stretch-workspace");
 const detectionParamsPanel = $("#detection-params-panel");
 const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
@@ -568,11 +567,20 @@ oneShotsCheckbox.addEventListener("change", () => {
 // Output naming
 // ---------------------------------------------------------------------------
 
-namingPatternInput.addEventListener("input", () => {
-  namingSettings.chopPattern = namingPatternInput.value;
-  updateNamingPreview();
-  saveSettings();
+// Token/chip editor over the same plain namingSettings.chopPattern string the old plain <input>
+// stored - see js/naming-pattern-editor.js for the DOM layer and js/naming-tokens.js for the pure
+// string<->segment conversion it's built on. onChange only fires for user edits (typing, a token
+// button, removing a chip), never for the setValue() call in applySettings() below.
+const namingPatternEditor = createNamingPatternEditor({
+  initialValue: namingSettings.chopPattern,
+  onChange: (pattern) => {
+    namingSettings.chopPattern = pattern;
+    updateNamingPreview();
+    saveSettings();
+  },
 });
+namingPatternEditorHost.appendChild(namingPatternEditor.el);
+
 namingSeparatorSelect.addEventListener("change", () => {
   namingSettings.separator = namingSeparatorSelect.value;
   updateNamingPreview();
@@ -727,19 +735,41 @@ timestretchSeedInput.addEventListener("change", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Stretch workspace: STRETCH's central Original vs. Processed audition area, its character
-// browser, and per-file selection. CHOP and BOTH are untouched - they keep rendering into
-// #results-panel via renderFileResult(), exactly as before this redesign. See
+// Stretch workspace: STRETCH's central Time/Target panel, Original vs. Processed audition area,
+// its character browser, and per-file selection. CHOP and BOTH are untouched - they keep rendering
+// into #results-panel via renderFileResult(), exactly as before this redesign. See
 // js/stretch-workspace.js for the renderer and js/dsp/stretch/workspace-state.js for the pure
-// staleness/randomise helpers behind it.
+// staleness/randomise/position-mapping helpers behind it.
 //
 // State lives in two places, same split as everywhere else in this file: `analysisCache` (keyed by
-// analysisKey(), see near the top of this file) gets two extra fields per entry when task is
-// STRETCH - stretchOriginal and stretchProcessed - populated by processOneFile(); this module only
-// tracks which file is currently active in the workspace and re-renders from that cache.
+// analysisKey(), see near the top of this file) gets extra fields per entry when task is STRETCH -
+// stretchOriginal (now including the full decoded channels, not just the mono downmix, so a
+// character/macro change can re-render without re-decoding or re-running key/tempo detection - see
+// ensureStretchSourceAnalyzed() near processOneFile()) and stretchProcessed; this module tracks
+// which file is currently active and drives auto-preview, then re-renders from that cache.
 // ---------------------------------------------------------------------------
 
-const stretchWorkspace = createStretchWorkspace({ container: stretchWorkspaceEl, getAudioContext, color: themeColor });
+const stretchWorkspace = createStretchWorkspace({
+  container: stretchWorkspaceEl,
+  getAudioContext,
+  color: themeColor,
+  onModeChange: (mode) => {
+    timestretchSettings.mode = mode;
+    updateTimestretchModeVisibility(); // keeps the BOTH-only rail fields' hidden state in sync too
+    scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
+    saveSettings();
+  },
+  onTargetBpmChange: (v) => {
+    timestretchSettings.targetBpm = v;
+    scheduleStretchPreview(STRETCH_PREVIEW_DEBOUNCE_MS);
+    saveSettings();
+  },
+  onRatioChange: (v) => {
+    timestretchSettings.ratio = v / 100;
+    scheduleStretchPreview(STRETCH_PREVIEW_DEBOUNCE_MS);
+    saveSettings();
+  },
+});
 
 let stretchActiveKey = null; // analysisKey() of the file shown in the workspace right now
 const stretchFileOrder = []; // [{key, folder, fileInfo}], rebuilt at the start of every stretch-task batch run
@@ -758,14 +788,20 @@ function refreshStretchStaleIndicator() {
   if (task !== "stretch") return;
   const entry = stretchActiveKey ? analysisCache.get(stretchActiveKey) : null;
   stretchWorkspace.setStale(stretchStaleFor(entry));
-  updateStretchDetectedReadouts();
+  updateStretchTimeTarget();
 }
 
-function updateStretchDetectedReadouts() {
+/** Cheap - updates the Time/Target panel's mode/slider values and its Source/Ratio readouts. No rebuild. */
+function updateStretchTimeTarget() {
   const entry = stretchActiveKey ? analysisCache.get(stretchActiveKey) : null;
   const bpm = entry && entry.kt ? entry.kt.bpm : null;
-  timestretchDetectedBpmReadout.textContent = bpm ? `${Math.round(bpm)} BPM` : "–";
-  timestretchResolvedRatioReadout.textContent = entry ? `${resolveStretchRatio(bpm).toFixed(2)}x` : "–";
+  stretchWorkspace.setTimeTarget({
+    mode: timestretchSettings.mode,
+    targetBpm: timestretchSettings.targetBpm,
+    ratioPct: Math.round(timestretchSettings.ratio * 100),
+    detectedBpmText: bpm ? `${Math.round(bpm)} BPM` : "–",
+    resolvedRatioText: entry ? `${resolveStretchRatio(bpm).toFixed(2)}x` : "–",
+  });
 }
 
 /**
@@ -799,7 +835,7 @@ function renderStretchActivePanes() {
   const entry = stretchActiveKey ? analysisCache.get(stretchActiveKey) : null;
   stretchWorkspace.setOriginal(entry ? entry.stretchOriginal : null);
   stretchWorkspace.setProcessed(entry ? entry.stretchProcessed : null, stretchStaleFor(entry));
-  updateStretchDetectedReadouts();
+  updateStretchTimeTarget();
 }
 
 function setStretchActiveFile(key) {
@@ -808,6 +844,10 @@ function setStretchActiveFile(key) {
   stretchActiveKey = key;
   renderStretchFileStrip();
   renderStretchActivePanes();
+  // The newly active file might already be stale (its cached preview was rendered under different
+  // settings) or never processed at all - scheduleStretchPreview() itself checks that and no-ops if
+  // it's already current, so this is safe to call unconditionally on every switch.
+  scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
 }
 
 function renderStretchCharacterBrowser() {
@@ -821,14 +861,17 @@ function renderStretchCharacterBrowser() {
       timestretchSettings.character = key;
       updateCharacterUI(); // keeps the BOTH-only rail select (still live for the BOTH task) in sync
       renderStretchCharacterBrowser();
+      scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
       saveSettings();
     },
     onMacroChange: (key, value) => {
       timestretchSettings.macroValues[key] = value;
+      scheduleStretchPreview(STRETCH_PREVIEW_DEBOUNCE_MS);
       saveSettings();
     },
     onSeedChange: (value) => {
       timestretchSettings.seed = value;
+      scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
       saveSettings();
     },
     onRandomise: () => {
@@ -837,6 +880,7 @@ function renderStretchCharacterBrowser() {
       if (character.usesSeed) timestretchSettings.seed = randomSeed();
       renderStretchCharacterBrowser();
       updateCharacterUI();
+      scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
       saveSettings();
       log(`  randomised "${character.label}"'s creative controls.`);
     },
@@ -848,6 +892,94 @@ function updateStretchWorkspaceVisibility() {
   const show = task === "stretch" && sourceFolders.length > 0;
   stretchWorkspaceEl.hidden = !show;
   if (!show) stretchWorkspace.stopAllPlayback();
+}
+
+// ---------------------------------------------------------------------------
+// Automatic Stretch preview processing.
+//
+// In dedicated STRETCH mode, changing a setting that affects the rendered audio (character, its
+// macros, seed, Randomise, mode, target tempo, stretch ratio, or the lo-fi chain) re-renders the
+// ACTIVE file's Processed preview on its own, rather than requiring an explicit Process click every
+// time - see scheduleStretchPreview(), called from every one of those settings' handlers.
+//
+// Two things make this safe:
+//
+//   - Debounce: a slider drag calls scheduleStretchPreview() on every `input` tick, but each call
+//     just resets one shared timer, so the actual render only starts once the value has settled for
+//     STRETCH_PREVIEW_DEBOUNCE_MS. Discrete actions (a character click, Randomise, a seed edit) use
+//     the much shorter STRETCH_PREVIEW_QUICK_MS instead - there's nothing to debounce, but a tiny
+//     delay still keeps a rapid double-click from starting two renders back to back.
+//
+//   - Latest-request-wins: every render tags itself with the generation counter at the moment it
+//     starts, and the active file's key. Some characters (PaulStretch-style extreme modes) are much
+//     slower than others, so an older, still-in-flight request can easily finish AFTER a newer one -
+//     each async step re-checks its own generation/key against the current ones and simply stops
+//     (without touching the UI or the cache) the moment either has moved on. Only the request that
+//     is still current when it finishes is allowed to become the visible Processed preview.
+// ---------------------------------------------------------------------------
+
+const STRETCH_PREVIEW_DEBOUNCE_MS = 450; // continuous controls: sliders being dragged
+const STRETCH_PREVIEW_QUICK_MS = 120; // discrete actions: a click, a committed number, a file switch
+
+let stretchPreviewTimer = null;
+let stretchPreviewGeneration = 0;
+
+/** Debounced entry point - called from every settings handler that can change the rendered audio. */
+function scheduleStretchPreview(delayMs) {
+  if (task !== "stretch" || !stretchActiveKey) return;
+  const entry = analysisCache.get(stretchActiveKey);
+  // Already current (or already scheduled off the back of an earlier tick this same drag) - nothing to do.
+  if (entry && entry.stretchProcessed && !stretchStaleFor(entry)) return;
+  clearTimeout(stretchPreviewTimer);
+  stretchPreviewTimer = setTimeout(runStretchPreview, delayMs);
+}
+
+/** Cancels any pending/in-flight auto-preview's ability to land - used when there's nothing left to preview at all. */
+function invalidateStretchPreview() {
+  clearTimeout(stretchPreviewTimer);
+  stretchPreviewTimer = null;
+  stretchPreviewGeneration++;
+  stretchWorkspace.setProcessing(false);
+}
+
+async function runStretchPreview() {
+  const myGeneration = ++stretchPreviewGeneration;
+  const myKey = stretchActiveKey;
+  if (!myKey) return;
+  const found = stretchFileOrder.find((f) => f.key === myKey);
+  if (!found) return;
+  const { folder, fileInfo } = found;
+
+  const isCurrent = () => myGeneration === stretchPreviewGeneration && stretchActiveKey === myKey;
+  stretchWorkspace.setProcessing(true);
+  stretchWorkspace.setProcessingError("");
+  try {
+    const { channels, sampleRate, kt } = await ensureStretchSourceAnalyzed(folder, fileInfo);
+    if (!isCurrent()) return; // superseded while analyzing (a newer request, or the active file changed)
+
+    const ratio = resolveStretchRatio(kt.bpm);
+    const blob = await renderStretchAudio(channels, sampleRate, ratio);
+    if (!isCurrent()) return; // superseded while rendering
+
+    const characterLabel = resolveCharacter(timestretchSettings.character).label;
+    const processed = await decodeStretchPreview(blob, characterLabel, ratio);
+    if (!isCurrent()) return; // superseded while decoding the result back for playback
+
+    const entry = analysisCache.get(myKey);
+    if (entry) entry.stretchProcessed = processed;
+    renderStretchFileStrip();
+    renderStretchActivePanes();
+  } catch (err) {
+    console.error(err);
+    if (isCurrent()) {
+      // Leave whatever was already shown (still flagged stale, if it was) rather than blanking it -
+      // a failed auto-preview shouldn't make the workspace look empty or pretend nothing changed.
+      stretchWorkspace.setProcessingError(`Couldn't update the preview: ${err.message || err}`);
+      log(`  ERROR updating the stretch preview for ${fileInfo.name}: ${err.message || err}`);
+    }
+  } finally {
+    if (myGeneration === stretchPreviewGeneration) stretchWorkspace.setProcessing(false);
+  }
 }
 
 /**
@@ -936,49 +1068,62 @@ for (const d of DRIVE_TYPES) {
 }
 driveTypeSelect.value = driveSettings.type;
 
+// Lo-fi chain settings also feed the Stretch workspace's Processed preview (it's the whole chain,
+// not just the stretch stage - see currentStretchSignature()), so every handler here schedules an
+// auto-preview too; scheduleStretchPreview() itself no-ops outside the STRETCH task.
 outputstageEnableCheckbox.addEventListener("change", () => {
   outputStageSettings.enabled = outputstageEnableCheckbox.checked;
   outputstageOptions.hidden = !outputStageSettings.enabled;
+  scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
   saveSettings();
 });
 outputstageModeSelect.addEventListener("change", () => {
   outputStageSettings.mode = outputstageModeSelect.value;
+  scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
   saveSettings();
 });
 bindSliderNumber(outputstageMixSlider, outputstageMixNumber, (v) => {
   outputStageSettings.mixPct = v;
+  scheduleStretchPreview(STRETCH_PREVIEW_DEBOUNCE_MS);
   saveSettings();
 });
 bindSliderNumber(outputstageIntensitySlider, outputstageIntensityNumber, (v) => {
   outputStageSettings.intensityPct = v;
+  scheduleStretchPreview(STRETCH_PREVIEW_DEBOUNCE_MS);
   saveSettings();
 });
 
 driveEnableCheckbox.addEventListener("change", () => {
   driveSettings.enabled = driveEnableCheckbox.checked;
   driveOptions.hidden = !driveSettings.enabled;
+  scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
   saveSettings();
 });
 driveTypeSelect.addEventListener("change", () => {
   driveSettings.type = driveTypeSelect.value;
+  scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
   saveSettings();
 });
 bindSliderNumber(driveAmountSlider, driveAmountNumber, (v) => {
   driveSettings.amountPct = v;
+  scheduleStretchPreview(STRETCH_PREVIEW_DEBOUNCE_MS);
   saveSettings();
 });
 
 crunchEnableCheckbox.addEventListener("change", () => {
   crunchSettings.enabled = crunchEnableCheckbox.checked;
   crunchOptions.hidden = !crunchSettings.enabled;
+  scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
   saveSettings();
 });
 bindSliderNumber(crunchBitsSlider, crunchBitsNumber, (v) => {
   crunchSettings.bits = v;
+  scheduleStretchPreview(STRETCH_PREVIEW_DEBOUNCE_MS);
   saveSettings();
 });
 bindSliderNumber(crunchRateSlider, crunchRateNumber, (v) => {
   crunchSettings.rateDivide = v;
+  scheduleStretchPreview(STRETCH_PREVIEW_DEBOUNCE_MS);
   saveSettings();
 });
 oneshotProcessingCheckbox.addEventListener("change", () => {
@@ -1103,9 +1248,14 @@ function applyTask(next, { persist = true } = {}) {
     renderStretchCharacterBrowser();
     renderStretchFileStrip();
     renderStretchActivePanes();
+    // Arriving at (or staying on) STRETCH with an already-stale active preview picks auto-processing
+    // back up - scheduleStretchPreview() itself checks staleness and no-ops if there's nothing to do.
+    scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
   } else {
-    // Leaving STRETCH (or never having been there) - nothing in the workspace should keep sounding.
+    // Leaving STRETCH (or never having been there) - nothing in the workspace should keep sounding,
+    // and no auto-preview should keep working in the background while attention is elsewhere.
     stretchWorkspace.stopAllPlayback();
+    invalidateStretchPreview();
   }
   if (persist) {
     try {
@@ -1184,7 +1334,7 @@ function applySettings(saved) {
       mergedNaming.chopPattern = LEGACY_PATTERN_MAP[mergedNaming.chopPattern];
     }
     Object.assign(namingSettings, mergedNaming);
-    namingPatternInput.value = namingSettings.chopPattern;
+    namingPatternEditor.setValue(namingSettings.chopPattern);
     namingSeparatorSelect.value = namingSettings.separator;
     namingFolderTagCheckbox.checked = namingSettings.includeFolderTag;
   }
@@ -1257,7 +1407,7 @@ function applySettings(saved) {
   // saved.timestretch is merged in above. Re-render now that it reflects the actual saved settings.
   if (task === "stretch") {
     renderStretchCharacterBrowser();
-    updateStretchDetectedReadouts();
+    updateStretchTimeTarget();
   }
 }
 
@@ -1656,6 +1806,7 @@ clearFoldersBtn.addEventListener("click", () => {
   looseDestinationHandle = null;
   forgetAllFolders();
   invalidateAnalysis();
+  invalidateStretchPreview(); // nothing left to auto-process for
   // renderFolderList() also calls updateStretchWorkspaceVisibility() (stops any preview playback and
   // hides the workspace, since sourceFolders is now empty) and rebuildStretchFileOrder() (empties the
   // file strip and clears stretchActiveKey, since there's nothing left to point at).
@@ -1768,6 +1919,80 @@ async function processRegionsHeavy({ sampleRate, bitDepth, fadeInSamples, fadeOu
   });
 }
 
+/**
+ * Just the stretch+lo-fi render (no source decode/analysis, no disk write) for an already-decoded
+ * set of channels, using the CURRENT timestretchSettings/lofi settings - the "STRETCH RENDER" half
+ * of what processOneFile() used to do as one inline block. Shared by the batch pipeline
+ * (processOneFile, below) and the Stretch workspace's auto-preview (runStretchPreview(), above), so
+ * both always go through exactly the DSP path Export would use - never a second, possibly-diverging
+ * implementation. Always copies the channels first: processRegionsHeavy transfers its input buffers
+ * to the worker, which would otherwise detach the caller's (possibly cached, reused-next-time) arrays.
+ */
+async function renderStretchAudio(channels, sampleRate, ratio) {
+  const [{ blob }] = await processRegionsHeavy({
+    sampleRate,
+    bitDepth: 24,
+    fadeInSamples: 0,
+    fadeOutSamples: 0,
+    stretchRatio: ratio,
+    character: timestretchSettings.character,
+    macroValues: timestretchSettings.macroValues,
+    seed: timestretchSettings.seed,
+    regions: [{ channels: channels.map((ch) => Float32Array.from(ch)) }],
+  });
+  return blob;
+}
+
+/** Decodes a renderStretchAudio() result back into the Stretch workspace's {mono, sampleRate, duration, ...} shape. */
+async function decodeStretchPreview(blob, characterLabel, ratio) {
+  const decoded = await getAudioContext().decodeAudioData(await blob.arrayBuffer());
+  const processedChannels = bufferChannels(decoded);
+  return {
+    mono: toMono(processedChannels),
+    sampleRate: decoded.sampleRate,
+    duration: decoded.length / decoded.sampleRate,
+    characterLabel,
+    ratio,
+    signature: currentStretchSignature(),
+  };
+}
+
+/**
+ * Ensures analysisCache has a decoded stretchOriginal (mono + full multi-channel audio) for this
+ * file, decoding and running key/tempo detection ONLY if nothing usable is cached yet - the
+ * "SOURCE ANALYSIS" half of the old inline block, and the reason clicking a different Character
+ * doesn't re-decode the file or re-run essentia. Shared conceptually with processOneFile()'s own
+ * decode+detect (which stays independent below, since it also owns the CHOP-mode tempo-warning
+ * dialog and the wav/ copy write, neither of which belong in this lightweight preview-only path).
+ */
+async function ensureStretchSourceAnalyzed(folder, fileInfo) {
+  const key = analysisKey(folder, fileInfo);
+  const existing = analysisCache.get(key);
+  if (existing && existing.stretchOriginal && existing.stretchOriginal.channels && cachedAnalysis(folder, fileInfo)) {
+    return { key, channels: existing.stretchOriginal.channels, sampleRate: existing.stretchOriginal.sampleRate, kt: existing.kt };
+  }
+  const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
+  const { buffer } = await decodeFile(file, fileInfo.ext);
+  const channels = bufferChannels(buffer);
+  const mono = toMono(channels);
+  const validCached = cachedAnalysis(folder, fileInfo);
+  const kt = validCached ? validCached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: detectSettings.key, tempo: detectSettings.tempo });
+  const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
+  const bpmText = kt.bpm ? `${Math.round(kt.bpm)} BPM` : kt.available ? "unclear" : "unavailable";
+  analysisCache.set(key, {
+    signature: detectionSignature(),
+    kt,
+    chopRegions: (existing && existing.chopRegions) || null,
+    chopRegionsBaseline: (existing && existing.chopRegionsBaseline) || null,
+    oneShotRegions: (existing && existing.oneShotRegions) || null,
+    oneShotRegionsBaseline: (existing && existing.oneShotRegionsBaseline) || null,
+    includeOneShots: existing ? existing.includeOneShots !== false : true,
+    stretchOriginal: { mono, channels, sampleRate: buffer.sampleRate, duration: mono.length / buffer.sampleRate, bpmText, keyText },
+    stretchProcessed: (existing && existing.stretchProcessed) || null,
+  });
+  return { key, channels, sampleRate: buffer.sampleRate, kt };
+}
+
 // ---------------------------------------------------------------------------
 // Per-file processing
 // ---------------------------------------------------------------------------
@@ -1851,35 +2076,14 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   // only ever write) a derived copy when it would actually differ from the source.
   let stretchProcessedForWorkspace = null;
   if (fullStretched || fullLofi || task === "stretch") {
-    const [{ blob: derivedBlob }] = await processRegionsHeavy({
-      sampleRate: buffer.sampleRate,
-      bitDepth: 24,
-      fadeInSamples: 0,
-      fadeOutSamples: 0,
-      stretchRatio: fullStretchRatio,
-      character: timestretchSettings.character,
-      macroValues: timestretchSettings.macroValues,
-      seed: timestretchSettings.seed,
-      regions: [{ channels: channels.map((ch) => Float32Array.from(ch)) }],
-    });
+    const derivedBlob = await renderStretchAudio(channels, buffer.sampleRate, fullStretchRatio);
     if (fullStretched || fullLofi) {
       const derivedName = `${taggedStem}${fullStretched ? " stretched" : ""}${fullLofi ? " lofi" : ""}.wav`;
       await writeOutput(folder, "wav", fileInfo.relativeDir, derivedName, derivedBlob, zipBatch);
       log(`    wrote a full-length ${[fullStretched && "time-stretched", fullLofi && "lo-fi"].filter(Boolean).join(" + ")} copy`);
     }
     if (task === "stretch") {
-      // Decoded back into raw samples for the workspace's waveform + playback - reuses the exact
-      // WAV bytes Export would write rather than a second, possibly-diverging DSP path.
-      const decoded = await getAudioContext().decodeAudioData(await derivedBlob.arrayBuffer());
-      const processedChannels = bufferChannels(decoded);
-      stretchProcessedForWorkspace = {
-        mono: toMono(processedChannels),
-        sampleRate: decoded.sampleRate,
-        duration: decoded.length / decoded.sampleRate,
-        characterLabel: resolveCharacter(timestretchSettings.character).label,
-        ratio: fullStretchRatio,
-        signature: currentStretchSignature(),
-      };
+      stretchProcessedForWorkspace = await decodeStretchPreview(derivedBlob, resolveCharacter(timestretchSettings.character).label, fullStretchRatio);
     }
   }
 
@@ -1980,9 +2184,12 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     // fallback, switching to CHOP/BOTH and hitting Process would silently wipe out whatever the
     // Stretch workspace had already shown for this file, even though nothing about the stretch
     // render actually changed.
+    // `channels` (the full multi-channel decode, not just the mono downmix) is what lets a later
+    // character/macro change in the workspace re-render without decoding this file again - see
+    // ensureStretchSourceAnalyzed().
     stretchOriginal:
       task === "stretch"
-        ? { mono, sampleRate: buffer.sampleRate, duration: mono.length / buffer.sampleRate, bpmText, keyText }
+        ? { mono, channels, sampleRate: buffer.sampleRate, duration: mono.length / buffer.sampleRate, bpmText, keyText }
         : (previous && previous.stretchOriginal) || null,
     stretchProcessed: task === "stretch" ? stretchProcessedForWorkspace : (previous && previous.stretchProcessed) || null,
   });
@@ -2833,6 +3040,10 @@ async function processBatch({ write = true } = {}) {
     // changed it without going through that path.
     rebuildStretchFileOrder();
     renderStretchFileStrip();
+    // A manual Process/Export always wins over an auto-preview that happened to be pending or
+    // in-flight for the active file: cancel it now so its result (however it turns out) can't land
+    // after - and overwrite - the fresh one this batch run is about to produce.
+    invalidateStretchPreview();
   }
 
   const zipBatch = FSA_SUPPORTED || dryRun ? null : new ZipBatch();

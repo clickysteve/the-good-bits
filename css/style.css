@@ -422,6 +422,78 @@ input[type="range"]::-moz-range-thumb {
 .param-value { color: var(--accent-2); font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 11.5px; }
 .param-row--checkbox { grid-column: 1 / -1; }
 
+/* file name pattern: token/chip editor - see js/naming-pattern-editor.js */
+
+.naming-pattern-editor-wrap { display: flex; flex-direction: column; gap: 6px; }
+
+.naming-token-row { display: flex; gap: 5px; flex-wrap: wrap; }
+
+.naming-token-btn {
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--accent-2);
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+}
+.naming-token-btn:hover { background: var(--bg-raised-hover); border-color: var(--accent-dim); }
+
+.naming-pattern-editor {
+  font: inherit;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 6px 9px;
+  min-height: 2.3em;
+  line-height: 1.5;
+  word-break: break-word;
+  outline: none;
+}
+.naming-pattern-editor:hover { border-color: var(--accent-dim); }
+.naming-pattern-editor:focus-visible,
+.naming-pattern-editor:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.naming-pattern-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-faint);
+}
+
+.naming-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--accent-dim);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 1px 3px 1px 8px;
+  margin: 0 1px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+}
+.naming-chip-label { pointer-events: none; }
+.naming-chip-remove {
+  font: inherit;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 50%;
+  width: 1.2em;
+  height: 1.2em;
+  line-height: 1;
+  padding: 0;
+}
+.naming-chip-remove:hover { color: var(--on-accent); background: var(--accent); }
+
 /* naming preview */
 
 .naming-preview {
@@ -716,6 +788,30 @@ input[type="range"]::-moz-range-thumb {
 .stretch-file-chip.is-active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
 .stretch-file-chip.is-unprocessed { opacity: .55; font-style: italic; }
 
+/* Time / Target - mode, source/target tempo, resolved ratio. Moved in from the old sidebar (still
+   there, unchanged, for BOTH) so the source->target relationship sits right next to the audio it
+   produces - see js/stretch-workspace.js's createStretchWorkspace(). */
+.stretch-time-target {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 13px;
+}
+
+.stretch-time-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px 20px;
+}
+
+.stretch-time-readout { flex: 0 0 auto; min-width: 84px; flex-direction: column; align-items: flex-start; gap: 2px; }
+.stretch-time-readout strong { font-size: 15px; }
+.stretch-time-slider-field { flex: 1 1 220px; min-width: 200px; }
+
 .stretch-ab { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
 
 .stretch-pane {
@@ -727,11 +823,23 @@ input[type="range"]::-moz-range-thumb {
   border-radius: var(--radius);
   padding: 12px 14px 13px;
   min-width: 0;
+  transition: border-color .15s ease, box-shadow .15s ease;
 }
 
-/* Processed gets a touch more visual weight than Original - it's the creative output. */
-.stretch-pane--processed { border-color: var(--accent-dim); }
+/* Processed gets a touch more visual weight than Original - it's the creative output - plus a
+   restrained warm/orange tint on the panel itself (not the waveform canvas, which stays on its own
+   neutral --wave-bg for readability) so the two panes read as "source" vs. "result" at a glance even
+   before you look at the labels. color-mix keeps this one step removed from a literal colour value,
+   the same way the rest of the palette is themed. */
+.stretch-pane--processed {
+  border-color: var(--accent-dim);
+  background: color-mix(in srgb, var(--bg-panel) 92%, var(--accent) 8%);
+}
 .stretch-pane--processed.is-stale { border-color: var(--warn); }
+
+/* Which side currently owns audition focus (Left/Right, or whichever was last played) - additional
+   to, and visually distinct from, Processed's permanent tint above: a brighter accent border. */
+.stretch-pane.is-focused { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
 
 .stretch-pane-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .stretch-pane-head h3 {
@@ -756,6 +864,30 @@ input[type="range"]::-moz-range-thumb {
   padding: 5px 9px;
 }
 .stretch-stale-badge[hidden] { display: none; }
+
+/* Auto-preview in flight - neutral/informational, deliberately not the stale badge's warning
+   colour, and never covers the waveform itself (see setProcessing() in stretch-workspace.js). */
+.stretch-processing-badge {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--accent-2);
+  background: rgba(255, 75, 59, .07);
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+}
+.stretch-processing-badge[hidden] { display: none; }
+
+.stretch-error-badge {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--danger);
+  background: rgba(255, 107, 129, .08);
+  border: 1px solid rgba(255, 107, 129, .25);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+}
+.stretch-error-badge[hidden] { display: none; }
 
 /* the plain audition waveform - see js/preview-waveform.js */
 .preview-waveform { display: flex; flex-direction: column; gap: 6px; outline: none; }

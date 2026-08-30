@@ -273,6 +273,10 @@ export function createPreviewWaveform({ mono, sampleRate, duration, color = (_n,
     togglePlay,
     seekTo,
     isPlaying: () => playing,
+    hasAudio: () => hasAudio,
+    getPosition: () => currentPos(),
+    getDuration: () => duration,
+    focus: () => wrap.focus({ preventScroll: true }),
     redraw,
     destroy: () => {
       pause();
