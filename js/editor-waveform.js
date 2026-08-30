@@ -639,6 +639,20 @@ export function createEditableWaveform({
     playSelected,
     stopPlayback,
     redraw,
+    /**
+     * Wholesale-replaces the slice list, e.g. after a re-chop. Programmatic, so it does NOT fire
+     * onChange - the caller already knows what the new regions are and is responsible for updating
+     * whatever it keeps in sync with edits (the caller decides whether this counts as a plain edit
+     * or a new baseline).
+     */
+    setRegions: (newRegions) => {
+      stopPlayback();
+      slices.length = 0;
+      for (const [s, e] of newRegions) slices.push({ s, e });
+      slices.sort((a, b) => a.s - b.s);
+      select(null);
+      redraw();
+    },
     destroy: () => {
       stopPlayback();
       window.removeEventListener("resize", redraw);

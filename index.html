@@ -52,12 +52,6 @@
     </div>
 
     <div class="topbar-right">
-      <!-- Source material. Meaningless in Stretch, where nothing is being cut, so it unmounts. -->
-      <div class="mode-picker chop-only" role="group" aria-label="Source material">
-        <button type="button" class="mode-btn mode-card mode-card--active" data-mode="phrases" title="Pulls natural phrases from pauses in solo horn performances">Horns</button>
-        <button type="button" class="mode-btn mode-card" data-mode="rhodes" title="Conservative - keeps whole chord progressions and passages together">Rhodes</button>
-        <button type="button" class="mode-btn mode-card" data-mode="drums" title="Break-sized loops snapped to the detected tempo, plus optional one-shot hits">Drums</button>
-      </div>
       <button type="button" id="settings-toggle" class="seg-btn seg-btn--solo" aria-expanded="false">Settings</button>
     </div>
   </header>
@@ -69,8 +63,30 @@
        appear depends on the current task. -->
   <div class="controls">
 
+    <!-- What/how am I processing? Lives here rather than in the topbar or above the results, both
+         of which used to reflow their whole layout the moment this appeared or changed. -->
+    <section class="mod" data-tasks="chop both">
+      <h2 class="mod-h">Source material</h2>
+      <div class="mode-picker" role="group" aria-label="Source material">
+        <button type="button" class="mode-btn mode-card mode-card--active" data-mode="phrases" title="Pulls natural phrases from pauses in solo horn performances">Horns</button>
+        <button type="button" class="mode-btn mode-card" data-mode="rhodes" title="Conservative - keeps whole chord progressions and passages together">Rhodes</button>
+        <button type="button" class="mode-btn mode-card" data-mode="drums" title="Break-sized loops snapped to the detected tempo, plus optional one-shot hits">Drums</button>
+      </div>
+      <div id="drum-options" class="mod-body" hidden>
+        <div class="field">
+          <label for="drum-bars-select">Chop length</label>
+          <select id="drum-bars-select"></select>
+        </div>
+        <label class="check">
+          <input id="one-shots-checkbox" type="checkbox" />
+          <span>Also extract one-shot hits</span>
+        </label>
+        <p class="mod-note">Bar length comes from the detected tempo, falling back to a fixed length if none is found.</p>
+      </div>
+    </section>
+
     <section class="mod" data-tasks="chop stretch both">
-      <h2 class="mod-h">Source</h2>
+      <h2 class="mod-h">Import</h2>
       <label class="check">
         <input id="split-subfolders-checkbox" type="checkbox" checked />
         <span>One batch per subfolder</span>
@@ -143,7 +159,8 @@
 
     <section class="mod" data-tasks="stretch both">
       <h2 class="mod-h">Time-stretch</h2>
-      <label class="check">
+      <p class="mod-note stretch-only">Stretching is the whole point of this task, so it's always on here.</p>
+      <label class="check both-only">
         <input id="timestretch-enable-checkbox" type="checkbox" />
         <span>Stretch on export</span>
       </label>
@@ -295,21 +312,6 @@
         <input id="legacy-files-input" type="file" multiple accept=".wav,.m4a,.aif,.aiff,.flac,.mp3" hidden />
 
         <div id="folder-list" class="folder-list"></div>
-
-        <!-- Sits with the source list rather than in the header: appearing up there shoved the
-             whole header onto a second line the moment you picked Drums. These two decide what
-             comes out of a break, so they stay out of the Advanced rail. -->
-        <div id="drum-options" class="essentials" hidden>
-          <div class="essentials-row">
-            <label for="drum-bars-select">Chop length</label>
-            <select id="drum-bars-select"></select>
-          </div>
-          <label class="check">
-            <input id="one-shots-checkbox" type="checkbox" />
-            <span>Also extract one-shot hits</span>
-          </label>
-          <p class="essentials-note">Bar length comes from the detected tempo, falling back to a fixed length if none is found.</p>
-        </div>
 
         <div id="results-panel" class="results-panel"></div>
       </main>

@@ -25,6 +25,8 @@ import {
   joinNameParts,
   buildKeyTempoTag,
   barsToSeconds,
+  findAudibleStart,
+  equalSliceRegions,
   bandEnergies,
   classifyHit,
   findOneShotWindows,
@@ -456,6 +458,34 @@ test("barsToSeconds: bars * beats-per-bar / bpm, null without a usable bpm", () 
   assert.equal(barsToSeconds(4, null), null);
   assert.equal(barsToSeconds(4, 0), null);
   assert.equal(barsToSeconds(0, 120), null);
+});
+
+// --- manual re-chop helpers --------------------------------------------
+
+test("findAudibleStart: reports the true start of audio after leading silence", () => {
+  const sig = concat(silence(2.0), tone(1.0, 300, 0.9));
+  const t = findAudibleStart(sig, SR);
+  assert.ok(Math.abs(t - 2.0) < 0.05, `expected ~2.0s, got ${t}`);
+});
+
+test("findAudibleStart: returns 0 for audio with no leading silence", () => {
+  const sig = tone(1.0, 300, 0.9);
+  assert.equal(findAudibleStart(sig, SR), 0);
+});
+
+test("equalSliceRegions: splits a range into evenly-sized, contiguous regions", () => {
+  const regions = equalSliceRegions(2, 10, 4);
+  assert.equal(regions.length, 4);
+  assert.deepEqual(regions[0], [2, 4]);
+  assert.deepEqual(regions[3], [8, 10]);
+  for (let i = 1; i < regions.length; i++) {
+    assert.ok(Math.abs(regions[i][0] - regions[i - 1][1]) < 1e-9, "regions should be contiguous");
+  }
+});
+
+test("equalSliceRegions: clamps count to at least 1", () => {
+  assert.deepEqual(equalSliceRegions(0, 5, 0), [[0, 5]]);
+  assert.deepEqual(equalSliceRegions(0, 5, -3), [[0, 5]]);
 });
 
 // --- mono / resample ---------------------------------------------------

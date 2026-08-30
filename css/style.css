@@ -148,16 +148,19 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
-.mode-picker { display: flex; gap: 3px; }
+/* Lives in the settings rail (see "Source material" in index.html) - a 3-column grid rather than
+   an auto-width row so it fits the rail's fixed width without wrapping oddly. */
+.mode-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
 
 .mode-btn {
   font: inherit;
   font-family: var(--font-display);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  padding: 7px 15px;
+  text-align: center;
+  padding: 7px 4px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-raised);
@@ -204,25 +207,6 @@ code {
   background: var(--accent);
   color: var(--on-accent);
 }
-
-/* ---------- essentials strip (both densities, drums only) ---------- */
-
-.essentials {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  flex-wrap: wrap;
-  padding: 10px 16px;
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
-}
-
-.essentials[hidden] { display: none; }
-
-.essentials-row { display: flex; align-items: center; gap: 9px; }
-.essentials-row label { font-size: 13px; color: var(--text-dim); }
-.essentials-note { margin: 0; font-size: 12px; color: var(--text-faint); }
 
 /* ---------- control modules (Advanced only) ---------- */
 
@@ -309,8 +293,6 @@ button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-
-.essentials-row select { width: auto; }
 
 input[type="checkbox"] { accent-color: var(--accent); }
 
@@ -631,18 +613,56 @@ input[type="range"]::-moz-range-thumb {
 
 .result-file-editor { display: block; }
 
+/* Informational + action row under the editor: edits are already canonical (see renderFileResult
+   in app.js), so this is no longer a "you have unsaved changes" warning - just a neutral strip. */
 .result-apply-row {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border: 1px solid var(--accent-dim);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: rgba(255, 75, 59, .07);
+  background: var(--bg-raised);
 }
 
 .result-apply-row[hidden] { display: none; }
-.result-apply-note { flex: 1; font-size: 12.5px; color: var(--text-dim); }
+.result-apply-note { flex: 1; font-size: 12.5px; color: var(--text-faint); }
+
+/* Re-chop: an intentionally destructive per-file action, so it's visually separated from the
+   editor toolbar above rather than blended into it. */
+.result-rechop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.result-rechop-row[hidden] { display: none; }
+
+.rechop-count-input {
+  width: 56px;
+  font: inherit;
+  font-size: 12.5px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+}
+
+.rechop-bars-select {
+  font: inherit;
+  font-size: 12.5px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  width: auto;
+}
 
 /* the row matching the slice selected on the waveform */
 .chop-row.is-selected {
@@ -751,8 +771,11 @@ input[type="range"]::-moz-range-thumb {
 [data-task="stretch"] .mod[data-tasks~="stretch"],
 [data-task="both"] .mod[data-tasks~="both"] { display: flex; }
 
-/* Source material only means something when something is being cut. */
-[data-task="stretch"] .chop-only { display: none; }
+/* Time-stretch: STRETCH's whole purpose is stretching, so its own enable checkbox (meaningful only
+   when stretching is optional, i.e. in BOTH) and the reciprocal "it's just on" note swap in/out
+   rather than both being shown at once. See updateStretchTaskVisibility() in app.js. */
+[data-task="stretch"] .both-only { display: none; }
+[data-task="both"] .stretch-only { display: none; }
 
 /* The rail is disclosure, independent of task. */
 [data-rail="closed"] .controls { display: none; }

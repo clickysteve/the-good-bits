@@ -18,6 +18,8 @@ import {
   computeRmsEnvelope,
   pickOnsets,
   computePeaks,
+  findAudibleStart,
+  equalSliceRegions,
 } from "./dsp.js";
 import { wsolaStretchChannels, ratioForTargetTempo } from "./timestretch.js";
 import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from "./outputstage.js";
@@ -95,7 +97,14 @@ function cachedAnalysis(folder, fileInfo) {
   return entry.signature === detectionSignature() ? entry : null;
 }
 
-/** Drops everything Preview worked out - the queue or a detection setting changed under it. */
+/**
+ * Drops everything Preview/Process worked out, including any manual edits sitting in it.
+ * Deliberately NOT called just because the folder queue changed (adding or removing a folder used
+ * to clear this wholesale, which meant adding a second folder after editing the first one's chops
+ * silently discarded those edits) - only an explicit "start over" action should reach for this.
+ * A settings change that actually affects detection doesn't need this either: cachedAnalysis()
+ * already treats an entry as stale the moment detectionSignature() no longer matches it.
+ */
 function invalidateAnalysis() {
   analysisCache.clear();
 }
@@ -206,6 +215,24 @@ function extOf(name) {
 /** The parameter set actually used for processing: defaults while Auto is on, live-edited values otherwise. */
 function activeParams() {
   return autoParams ? DEFAULT_PARAMS : params;
+}
+
+/**
+ * Break-sized drum regions for `bars` bars at `bpm` (falling back to drums-mode's fixed
+ * preferred/min/max length when bpm is unknown). Shared by the initial per-file detection pass and
+ * by the editor's "Re-chop by bars" action, so there's exactly one place that turns a bar count
+ * into drumRegions() parameters.
+ */
+function computeDrumRegions(mono, sampleRate, bars, bpm) {
+  const barsSec = barsToSeconds(bars, bpm);
+  const drumParams = { ...activeParams().drums };
+  if (barsSec) {
+    drumParams.preferred = barsSec;
+    drumParams.minLen = Math.max(0.4, barsSec * 0.5);
+    drumParams.maxLen = barsSec * 1.5;
+  } // else: no confident tempo - fall back to the fixed preferred/minLen/maxLen above
+  const snapBpm = drumParams.snapToTempo ? bpm : null;
+  return drumRegions(mono, sampleRate, drumParams, snapBpm).regions;
 }
 
 // ---------------------------------------------------------------------------
@@ -595,9 +622,27 @@ function updateTimestretchModeVisibility() {
   timestretchRatioRow.hidden = timestretchSettings.mode !== "fixed-ratio";
 }
 
+/**
+ * STRETCH's entire purpose is stretching, so the "Stretch on export" checkbox has nothing to gate
+ * there - stretch is inherently on, and its options should just be visible, not hidden behind a
+ * checkbox the user has to know to tick first. BOTH keeps the checkbox meaningful (stretch really
+ * is optional when you're also chopping); CHOP never shows this section at all. See
+ * stretchEffectivelyEnabled(), which resolveStretchRatio() uses instead of reading
+ * timestretchSettings.enabled directly, so this is a display-only override - it never mutates the
+ * underlying setting BOTH relies on.
+ */
+function updateStretchTaskVisibility() {
+  timestretchOptions.hidden = !(task === "stretch" || timestretchSettings.enabled);
+}
+
+/** Whether a stretch should actually run: always in STRETCH, the checkbox's own state in BOTH. */
+function stretchEffectivelyEnabled() {
+  return task === "stretch" || timestretchSettings.enabled;
+}
+
 timestretchEnableCheckbox.addEventListener("change", () => {
   timestretchSettings.enabled = timestretchEnableCheckbox.checked;
-  timestretchOptions.hidden = !timestretchSettings.enabled;
+  updateStretchTaskVisibility();
   saveSettings();
 });
 timestretchModeSelect.addEventListener("change", () => {
@@ -634,7 +679,7 @@ function effectsEnabled() {
 /** ratio to pass to wsolaStretchChannels for this file, or 1 (no-op) if stretching doesn't apply. */
 function resolveStretchRatio(detectedBpm) {
   if (!effectsEnabled()) return 1;
-  if (!timestretchSettings.enabled) return 1;
+  if (!stretchEffectivelyEnabled()) return 1;
   if (timestretchSettings.mode === "fixed-ratio") return timestretchSettings.ratio;
   return detectedBpm ? ratioForTargetTempo(detectedBpm, timestretchSettings.targetBpm) : 1;
 }
@@ -818,6 +863,7 @@ function applyTask(next, { persist = true } = {}) {
   });
   updateDrumOptionsVisibility();
   updateNamingPreview();
+  updateStretchTaskVisibility();
   if (persist) {
     try {
       localStorage.setItem(TASK_STORAGE_KEY, task);
@@ -841,9 +887,10 @@ taskSwitcherBtns.forEach((btn) => {
   btn.addEventListener("click", () => applyTask(btn.dataset.taskChoice));
 });
 
-// The settings rail is disclosure, kept separate from task. CHOP and STRETCH open with it closed
-// so the app is just "drop audio, go"; BOTH opens with it showing, since seeing everything at once
-// is the whole point of that task.
+// The settings rail is disclosure, kept separate from task. It opens by default for every task -
+// closing it used to be the default for CHOP/STRETCH, which hid controls (source material,
+// naming, export settings) a first-time visitor had no way to know were there. It's still just a
+// toggle: closing it is one click away, and the choice is remembered per-browser from then on.
 const RAIL_STORAGE_KEY = "good-bits-rail-v1";
 
 function applyRail(open, { persist = true } = {}) {
@@ -915,7 +962,7 @@ function applySettings(saved) {
   if (saved.timestretch) {
     Object.assign(timestretchSettings, saved.timestretch);
     timestretchEnableCheckbox.checked = timestretchSettings.enabled;
-    timestretchOptions.hidden = !timestretchSettings.enabled;
+    updateStretchTaskVisibility();
     timestretchModeSelect.value = timestretchSettings.mode;
     timestretchTargetBpmInput.value = timestretchTargetBpmNumber.value = String(timestretchSettings.targetBpm);
     timestretchRatioInput.value = timestretchRatioNumber.value = String(Math.round(timestretchSettings.ratio * 100));
@@ -960,7 +1007,6 @@ function applySettings(saved) {
 // ---------------------------------------------------------------------------
 
 function renderFolderList() {
-  invalidateAnalysis();
   folderList.innerHTML = "";
   if (sourceFolders.length === 0 && pendingReconnectFolders.length === 0) {
     const empty = document.createElement("div");
@@ -1030,6 +1076,7 @@ function renderFolderList() {
       try {
         const ok = await ensureReadWritePermission(pending.handle);
         if (ok) {
+          const wasEmpty = sourceFolders.length === 0;
           const idx = pendingReconnectFolders.indexOf(pending);
           if (idx >= 0) pendingReconnectFolders.splice(idx, 1);
           if (!folderAlreadyQueued(pending.name)) {
@@ -1038,6 +1085,7 @@ function renderFolderList() {
           }
           renderFolderList();
           updateProcessButton();
+          maybeAutoProcessInitialBatch(wasEmpty);
         } else {
           reconnectBtn.disabled = false;
           reconnectBtn.textContent = "Reconnect";
@@ -1074,6 +1122,20 @@ function updateProcessButton() {
   cancelBtn.hidden = !processing;
 }
 
+/**
+ * Runs a non-destructive Process pass the moment the batch goes from completely empty to holding
+ * its first audio, so a new user sees chops/waveforms without a separate "now click Process" step.
+ * Gated on `wasEmpty` (the queue's state *before* this add) rather than just "queue non-empty" so
+ * it only ever fires on that one transition - adding a second folder, or files to an
+ * already-processed batch, never re-triggers this, which is what keeps it from clobbering manual
+ * edits sitting in analysisCache/the editor for files already on screen. Safe by construction: with
+ * nothing in the queue before, there is by definition no analysis or editor state yet to lose.
+ */
+function maybeAutoProcessInitialBatch(wasEmpty) {
+  if (!wasEmpty || processing || sourceFolders.length === 0) return;
+  processBatch({ write: false });
+}
+
 function folderAlreadyQueued(name) {
   return sourceFolders.some((f) => f.kind === "fsa" && !f.isLoose && f.name === name);
 }
@@ -1086,8 +1148,11 @@ function clearPendingReconnect(name) {
 
 /** providedHandle: when set (a folder dropped via drag-and-drop), skip the picker and use this
  * handle directly, but first make sure it actually has readwrite permission - a handle obtained
- * from a drop starts read-only in some browsers, unlike one from showDirectoryPicker(). */
-async function addFolderFSA(providedHandle) {
+ * from a drop starts read-only in some browsers, unlike one from showDirectoryPicker(). autoProcess:
+ * false lets the drop handler suppress this function's own auto-process trigger so it can apply its
+ * own combined logic instead (see the drop handler - dropping into CHOP has its own long-standing
+ * "just do it" full export, which would otherwise race with this). */
+async function addFolderFSA(providedHandle, { autoProcess = true } = {}) {
   const handle = providedHandle || (await pickFolderFSA());
   if (!handle) return;
   if (providedHandle) {
@@ -1097,6 +1162,7 @@ async function addFolderFSA(providedHandle) {
       return;
     }
   }
+  const wasEmpty = sourceFolders.length === 0;
 
   if (splitSubfoldersCheckbox.checked) {
     const children = await discoverImmediateSourceChildren(handle);
@@ -1113,6 +1179,7 @@ async function addFolderFSA(providedHandle) {
       log(`Added ${added} subfolder(s) from "${handle.name}" as separate sources.`);
       renderFolderList();
       updateProcessButton();
+      if (autoProcess) maybeAutoProcessInitialBatch(wasEmpty);
       return;
     }
     // No qualifying subfolders - fall through and treat the picked folder itself as one source.
@@ -1128,6 +1195,7 @@ async function addFolderFSA(providedHandle) {
   clearPendingReconnect(handle.name);
   renderFolderList();
   updateProcessButton();
+  if (autoProcess) maybeAutoProcessInitialBatch(wasEmpty);
 }
 
 function addFolderLegacy() {
@@ -1136,17 +1204,20 @@ function addFolderLegacy() {
 }
 
 legacyFolderInput.addEventListener("change", () => {
+  const wasEmpty = sourceFolders.length === 0;
   const groups = collectAudioFilesLegacy(legacyFolderInput.files, { splitSubfolders: splitSubfoldersCheckbox.checked });
   for (const g of groups) {
     sourceFolders.push({ id: nextFolderId++, name: g.rootName, kind: "legacy", files: g.files });
   }
   renderFolderList();
   updateProcessButton();
+  maybeAutoProcessInitialBatch(wasEmpty);
 });
 
 /** providedHandles: when set (files dropped via drag-and-drop), skip the picker and use these
- * file handles directly - a dropped file's read permission is already implied by the drop itself. */
-async function addIndividualFilesFSA(providedHandles) {
+ * file handles directly - a dropped file's read permission is already implied by the drop itself.
+ * autoProcess: see addFolderFSA - false lets the drop handler apply its own combined logic. */
+async function addIndividualFilesFSA(providedHandles, { autoProcess = true } = {}) {
   const handles = providedHandles || (await pickFilesFSA());
   if (handles.length === 0) return;
 
@@ -1162,6 +1233,7 @@ async function addIndividualFilesFSA(providedHandles) {
     return;
   }
 
+  const wasEmpty = sourceFolders.length === 0;
   looseFileGroupCounter++;
   const files = handles.map((h) => ({ relativeDir: "", name: h.name, ext: extOf(h.name), fsaHandle: h }));
   sourceFolders.push({
@@ -1175,6 +1247,7 @@ async function addIndividualFilesFSA(providedHandles) {
   });
   renderFolderList();
   updateProcessButton();
+  if (autoProcess) maybeAutoProcessInitialBatch(wasEmpty);
 }
 
 function addIndividualFilesLegacy() {
@@ -1184,11 +1257,13 @@ function addIndividualFilesLegacy() {
 
 legacyFilesInput.addEventListener("change", () => {
   if (legacyFilesInput.files.length === 0) return;
+  const wasEmpty = sourceFolders.length === 0;
   looseFileGroupCounter++;
   const group = collectIndividualFilesLegacy(legacyFilesInput.files, `Individual files ${looseFileGroupCounter}`);
   sourceFolders.push({ id: nextFolderId++, name: group.rootName, kind: "legacy", isLoose: true, files: group.files });
   renderFolderList();
   updateProcessButton();
+  maybeAutoProcessInitialBatch(wasEmpty);
 });
 
 addFolderBtn.addEventListener("click", async () => {
@@ -1244,6 +1319,7 @@ folderDropZone.addEventListener("drop", async (ev) => {
 
   const items = ev.dataTransfer.items;
   if (!items || items.length === 0) return;
+  const wasEmpty = sourceFolders.length === 0;
 
   // Handles/entries must be grabbed synchronously from the live DataTransferItemList, before any
   // await - it can be invalidated once the event handler yields.
@@ -1265,10 +1341,12 @@ folderDropZone.addEventListener("drop", async (ev) => {
     if (anyFsaCapableItem) {
       const handles = (await Promise.all(fsaHandlePromises)).filter(Boolean);
       for (const dir of handles.filter((h) => h.kind === "directory")) {
-        await addFolderFSA(dir);
+        // autoProcess: false - this handler applies its own combined logic below, once every
+        // dropped item has been added, rather than each call racing to trigger it independently.
+        await addFolderFSA(dir, { autoProcess: false });
       }
       const fileHandles = handles.filter((h) => h.kind === "file");
-      if (fileHandles.length > 0) await addIndividualFilesFSA(fileHandles);
+      if (fileHandles.length > 0) await addIndividualFilesFSA(fileHandles, { autoProcess: false });
     } else if (legacyEntries.length > 0) {
       for (const dirEntry of legacyEntries.filter((e) => e.isDirectory)) {
         const groups = await collectDroppedFolderLegacy(dirEntry, { splitSubfolders: splitSubfoldersCheckbox.checked });
@@ -1294,10 +1372,14 @@ folderDropZone.addEventListener("drop", async (ev) => {
 
   // Simple mode's whole pitch is "drop it and it's done" - a drop (as opposed to the Add
   // buttons) commits to running right away, using whatever's currently in the batch queue.
-  // Dropping into CHOP is the "just do it" path, so it runs straight away. In STRETCH and BOTH
-  // you almost certainly want to set something up first, so those wait for you to hit Process.
+  // Dropping into CHOP is the "just do it" path, so it runs straight away (a full Export, not just
+  // a preview). Every other case - STRETCH/BOTH drops, and any drop that isn't the very first
+  // content this batch has seen - falls back to the same safe initial-Process-only behaviour as
+  // the Add buttons (see maybeAutoProcessInitialBatch).
   if (task === "chop" && !processing && sourceFolders.length > 0) {
     processBatch();
+  } else {
+    maybeAutoProcessInitialBatch(wasEmpty);
   }
 });
 
@@ -1306,6 +1388,7 @@ clearFoldersBtn.addEventListener("click", () => {
   pendingReconnectFolders.length = 0;
   looseDestinationHandle = null;
   forgetAllFolders();
+  invalidateAnalysis();
   renderFolderList();
   updateProcessButton();
 });
@@ -1514,28 +1597,25 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   let oneShotMarkers = [];
 
   let chopRegions = null;
+  let chopRegionsBaseline = null;
   let oneShotRegions = null;
+  let oneShotRegionsBaseline = null;
 
   if (chopIntoPieces) {
     const modeParams = activeParams();
     let regions;
     if (cached && cached.chopRegions) {
-      // Includes any adjustment made in the editor during the preview.
+      // The current canonical regions, including any manual edit or re-chop made since the last
+      // fresh detection - reused as-is rather than re-detected, and NOT a new baseline.
       regions = cached.chopRegions;
+      chopRegionsBaseline = cached.chopRegionsBaseline || regions.map((r) => [...r]);
     } else if (mode === "drums") {
-      const barsSec = barsToSeconds(drumBars, kt.bpm);
-      const drumParams = { ...modeParams.drums };
-      if (barsSec) {
-        drumParams.preferred = barsSec;
-        drumParams.minLen = Math.max(0.4, barsSec * 0.5);
-        drumParams.maxLen = barsSec * 1.5;
-      } // else: no confident tempo - fall back to the fixed preferred/minLen/maxLen above
-      const snapBpm = drumParams.snapToTempo ? kt.bpm : null;
-      regions = drumRegions(mono, buffer.sampleRate, drumParams, snapBpm).regions;
+      regions = computeDrumRegions(mono, buffer.sampleRate, drumBars, kt.bpm);
     } else {
       regions = phraseRegions(mono, buffer.sampleRate, modeParams[mode]).regions;
     }
     chopRegions = regions;
+    if (!chopRegionsBaseline) chopRegionsBaseline = regions.map((r) => [...r]);
 
     log(`    key: ${keyText} | tempo: ${bpmText} | ${regions.length} candidate phrase(s)`);
 
@@ -1559,7 +1639,13 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     // found nothing worth keeping on that particular break.
     const includeOneShots = !cached || cached.includeOneShots !== false;
     if (mode === "drums" && extractOneShots && includeOneShots) {
-      oneShotRegions = (cached && cached.oneShotRegions) || detectOneShotRegions(mono, buffer.sampleRate);
+      if (cached && cached.oneShotRegions) {
+        oneShotRegions = cached.oneShotRegions;
+        oneShotRegionsBaseline = cached.oneShotRegionsBaseline || oneShotRegions.map((r) => [...r]);
+      } else {
+        oneShotRegions = detectOneShotRegions(mono, buffer.sampleRate);
+        oneShotRegionsBaseline = oneShotRegions.map((r) => [...r]);
+      }
       const extracted = await writeOneShotRegions({
         folder,
         fileInfo,
@@ -1581,15 +1667,20 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     log(`    key: ${keyText} | tempo: ${bpmText} | chop into pieces is off - whole file processed`);
   }
 
-  // Remember what this run worked out, so a following Export skips detection and so the editor
-  // has somewhere to put an adjustment that Export will then honour.
+  // Remember what this run worked out. This is the canonical region state: the editor writes
+  // every edit straight back in here (see mountEditor's onChange in renderFileResult), so Export
+  // always cuts where the editor currently shows, with no separate "commit" step required.
+  // *RegionsBaseline is a separate, edit-proof snapshot of the last fresh detection/re-chop, kept
+  // only so Revert has something honest to revert to.
   const key = analysisKey(folder, fileInfo);
   const previous = analysisCache.get(key);
   analysisCache.set(key, {
     signature: detectionSignature(),
     kt,
     chopRegions,
+    chopRegionsBaseline,
     oneShotRegions: oneShotRegions || (previous && previous.oneShotRegions) || null,
+    oneShotRegionsBaseline: oneShotRegionsBaseline || (previous && previous.oneShotRegionsBaseline) || null,
     includeOneShots: previous ? previous.includeOneShots !== false : true,
   });
 
@@ -1718,6 +1809,63 @@ async function reExportSingleFile(editContext, editedRegions) {
   }
 
   return { chopRows, chopMarkers, peaks: computePeaks(mono, 400), duration: mono.length / buffer.sampleRate };
+}
+
+/**
+ * Exports exactly one chop at its current (possibly edited) boundaries, alongside whatever chops
+ * are already on disk, without deleting or rewriting the rest of the set. Deliberately does NOT
+ * call exportChopsForRegions - that helper clears the whole numbered chop directory first, which is
+ * correct for a full re-export but would silently wipe every other exported chop here. Instead it
+ * calls processRegionsHeavy directly: the same stretch/lo-fi/fade/encode path a full export uses,
+ * just for a single region, then writes straight to the position-correct filename so it overwrites
+ * only that one chop.
+ */
+async function exportSelectedChop(editContext, region, index) {
+  const { folder, fileInfo, stem, tag, taggedStem, detectedBpm } = editContext;
+  const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
+  const { buffer } = await decodeFile(file, fileInfo.ext);
+  const channels = bufferChannels(buffer);
+  const mono = toMono(channels);
+
+  const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
+  const fadeOutSamples = fadeInSamples;
+  const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
+  const stretchRatio = resolveStretchRatio(detectedBpm);
+
+  let startSample = Math.max(0, Math.round(region[0] * buffer.sampleRate));
+  let endSample = Math.min(mono.length, Math.round(region[1] * buffer.sampleRate));
+  if (zcWindow > 0) {
+    startSample = findNearestZeroCrossing(mono, startSample, zcWindow);
+    endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
+  }
+  if (endSample <= startSample) throw new Error("selected chop has no length");
+
+  const [{ blob }] = await processRegionsHeavy({
+    sampleRate: buffer.sampleRate,
+    bitDepth: exportSettings.bitDepth,
+    fadeInSamples,
+    fadeOutSamples,
+    stretchRatio,
+    character: timestretchSettings.character,
+    regions: [{ channels: sliceChannels(channels, startSample, endSample) }],
+  });
+
+  const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
+  const fileName = buildChopFileName(stem, tag, index + 1);
+
+  if (folder.kind === "fsa") {
+    const ok = await ensureReadWritePermission(folder.handle);
+    if (!ok) throw new Error("permission to write to this folder was denied");
+    await writeFileFSA(folder.handle, "chops", relPath, fileName, blob);
+  } else {
+    // No on-disk chops/ directory to slot into outside FSA - hand back a standalone download
+    // instead of silently doing nothing.
+    const singleZip = new ZipBatch();
+    singleZip.addFile(folder.name, "chops", relPath, fileName, blob);
+    await singleZip.downloadAs(`${taggedStem}_${fileName.replace(/\.wav$/i, "")}.zip`);
+  }
+
+  return { fileName, blob };
 }
 
 function renderSkippedFileResult(folderSection, fileName, reason) {
@@ -1946,7 +2094,16 @@ function repaintForTheme() {
  * clicks deep behind an Edit button, and the audition played the exported file, so hearing an edit
  * meant re-processing first. Now the waveform is live from the moment a file appears: select a
  * slice on it and the matching row below highlights, so "delete number six" doesn't involve
- * counting. Edits stay in memory until Apply, and nothing is written until Export.
+ * counting.
+ *
+ * Every edit - drag a boundary, add a slice, delete one, re-chop - writes straight into
+ * analysisCache as it happens, which is what Export reads. There is no separate commit step: what
+ * the waveform shows is what Export cuts, always. "Update previews" (formerly "Apply") only
+ * re-renders the audio players below the waveform so you can audition the exact edited audio
+ * in-browser; it has no bearing on what Export produces, since Export always re-slices from the
+ * live regions anyway. "Revert" discards edits back to the last fresh detection or re-chop, using
+ * the separate *RegionsBaseline snapshot in analysisCache (never overwritten by edits) - it cannot
+ * just reload analysisCache's current regions, because those ARE the edits.
  */
 function renderFileResult(state) {
   const { fileName, keyText, bpmText, chopRows, oneShotRows, duration, editContext, chopSkipped } = state;
@@ -1973,9 +2130,12 @@ function renderFileResult(state) {
   const actionsGroup = document.createElement("div");
   actionsGroup.className = "result-file-header-actions";
 
-  // Which set of slices the waveform edits. Only offered when there is a choice to make.
-  const hasChops = Boolean(editContext) && state.chopMarkers.length > 0;
-  const hasShots = Boolean(editContext) && state.oneShotMarkers.length > 0;
+  // Which set of slices the waveform edits. Gated on whether chopping/one-shot extraction was
+  // part of THIS file's scope (chopSkipped/hasOneShots), not on the current region COUNT - a
+  // manual "Clear (manual)" re-chop legitimately leaves 0 regions, and the editor needs to stay
+  // mounted (empty, ready for + Add) rather than disappearing the moment the count hits zero.
+  const hasChops = Boolean(editContext) && !chopSkipped;
+  const hasShots = Boolean(editContext) && !chopSkipped && state.hasOneShots;
   let editing = hasChops ? "chops" : hasShots ? "oneshots" : null;
 
   let setPicker = null;
@@ -2030,18 +2190,72 @@ function renderFileResult(state) {
   editorHost.className = "result-file-editor";
   block.appendChild(editorHost);
 
+  // Re-chop: an explicit, per-file, intentionally destructive way to throw away the current chop
+  // regions and generate a new set - see section 4 of the backlog. Chop-only: bars/count don't mean
+  // anything for a one-shot set, which has its own separate include/exclude toggle above.
+  const rechopRow = document.createElement("div");
+  rechopRow.className = "result-rechop-row";
+  const rechopCountInput = document.createElement("input");
+  rechopCountInput.type = "number";
+  rechopCountInput.min = "1";
+  rechopCountInput.max = "200";
+  rechopCountInput.value = "8";
+  rechopCountInput.className = "rechop-count-input";
+  rechopCountInput.title = "Target number of slices";
+  rechopCountInput.setAttribute("aria-label", "Target number of slices");
+  const rechopCountBtn = document.createElement("button");
+  rechopCountBtn.className = "btn btn--ghost btn--small";
+  rechopCountBtn.textContent = "Re-chop by count";
+  rechopCountBtn.title = "Replace every current chop with this many equal-length slices.";
+  const rechopBarsSelect = document.createElement("select");
+  rechopBarsSelect.className = "rechop-bars-select";
+  rechopBarsSelect.setAttribute("aria-label", "Bar length for re-chop");
+  for (const bars of BAR_OPTIONS) {
+    const opt = document.createElement("option");
+    opt.value = String(bars);
+    opt.textContent = `${bars} bar${bars === 1 ? "" : "s"}`;
+    rechopBarsSelect.appendChild(opt);
+  }
+  rechopBarsSelect.value = String(drumBars);
+  const rechopBarsBtn = document.createElement("button");
+  rechopBarsBtn.className = "btn btn--ghost btn--small";
+  rechopBarsBtn.textContent = "Re-chop by bars";
+  rechopBarsBtn.title = "Replace every current chop with break-sized loops of this bar length.";
+  const rechopAlignLabel = document.createElement("label");
+  rechopAlignLabel.className = "check check--inline";
+  const rechopAlignCheckbox = document.createElement("input");
+  rechopAlignCheckbox.type = "checkbox";
+  rechopAlignCheckbox.checked = true;
+  const rechopAlignText = document.createElement("span");
+  rechopAlignText.textContent = "align to audible start";
+  rechopAlignLabel.title = "Skip leading silence so the first slice starts where the audio actually begins.";
+  rechopAlignLabel.append(rechopAlignCheckbox, rechopAlignText);
+  const rechopClearBtn = document.createElement("button");
+  rechopClearBtn.className = "btn btn--ghost btn--small";
+  rechopClearBtn.textContent = "Clear (manual)";
+  rechopClearBtn.title = "Remove every chop so you can build your own from scratch with + Add.";
+  rechopRow.append(rechopCountInput, rechopCountBtn, rechopBarsSelect, rechopBarsBtn, rechopAlignLabel, rechopClearBtn);
+  block.appendChild(rechopRow);
+
   const applyRow = document.createElement("div");
   applyRow.className = "result-apply-row";
-  applyRow.hidden = true;
   const applyNote = document.createElement("span");
   applyNote.className = "result-apply-note";
+  applyNote.textContent = "Edits apply immediately - Export uses these boundaries.";
   const revertBtn = document.createElement("button");
   revertBtn.className = "btn btn--ghost btn--small";
-  revertBtn.textContent = "Revert";
+  revertBtn.textContent = "Revert to last chop";
+  revertBtn.title = "Discard edits and restore the regions from the last detection or re-chop.";
+  const exportSelectedBtn = document.createElement("button");
+  exportSelectedBtn.className = "btn btn--ghost btn--small";
+  exportSelectedBtn.textContent = "Export selected";
+  exportSelectedBtn.title = "Export just the selected chop, using its current boundaries.";
+  exportSelectedBtn.disabled = true;
   const applyBtn = document.createElement("button");
   applyBtn.className = "btn btn--primary btn--small";
-  applyBtn.textContent = "Apply";
-  applyRow.append(applyNote, revertBtn, applyBtn);
+  applyBtn.textContent = "Update previews";
+  applyBtn.title = "Re-render the audio players below from the current edits, so you can audition them here.";
+  applyRow.append(applyNote, revertBtn, exportSelectedBtn, applyBtn);
   block.appendChild(applyRow);
 
   const staticArea = document.createElement("div");
@@ -2061,6 +2275,10 @@ function renderFileResult(state) {
         row.classList.toggle("is-selected", active && i === idx);
       });
     }
+  }
+
+  function updateExportSelectedState() {
+    exportSelectedBtn.disabled = editing !== "chops" || !editor || editor.getSelected() == null;
   }
 
   function renderLists() {
@@ -2087,6 +2305,8 @@ function renderFileResult(state) {
     if (editor) editor.destroy();
     editorHost.innerHTML = "";
     editor = null;
+    rechopRow.hidden = editing !== "chops";
+    applyRow.hidden = !editing;
     if (!editing) return;
     editor = createEditableWaveform({
       mono: state.mono,
@@ -2096,54 +2316,147 @@ function renderFileResult(state) {
       noun: editing === "chops" ? "chop" : "one-shot",
       zcSearchMs: exportSettings.zcSearchMs,
       color: themeColor,
+      // The canonical region state lives in analysisCache, and it's updated the moment a slice
+      // changes - not on some later "Apply" click. This is what makes Export always cut where the
+      // waveform currently shows, whether or not "Update previews" was ever clicked.
       onChange: () => {
-        applyRow.hidden = false;
-        applyNote.textContent = `${editing === "chops" ? "Chop" : "One-shot"} edits not applied yet`;
+        const regions = editor.getRegions();
+        const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+        if (editing === "chops") {
+          if (entry) entry.chopRegions = regions;
+          state.chopMarkers = regions;
+        } else {
+          if (entry) entry.oneShotRegions = regions;
+          state.oneShotMarkers = regions;
+        }
       },
-      onSelect: highlightRow,
+      onSelect: (idx) => {
+        highlightRow(idx);
+        updateExportSelectedState();
+      },
     });
     editorHost.appendChild(editor.el);
     registerThemeRepaint(editor.el, () => editor && editor.redraw());
+    updateExportSelectedState();
+  }
+
+  /** Replaces the canonical chop regions wholesale (re-chop, or a manual clear-to-start-fresh). */
+  function applyNewChopRegions(newRegions) {
+    const cloned = newRegions.map((r) => [...r]);
+    const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+    if (entry) {
+      entry.chopRegions = cloned.map((r) => [...r]);
+      entry.chopRegionsBaseline = cloned.map((r) => [...r]);
+    }
+    state.chopMarkers = cloned;
+    if (editor && editing === "chops") {
+      editor.setRegions(cloned);
+      updateExportSelectedState();
+    }
   }
 
   revertBtn.addEventListener("click", () => {
-    applyRow.hidden = true;
-    mountEditor();
+    const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+    if (!entry) return;
+    if (editing === "chops") {
+      const baseline = (entry.chopRegionsBaseline || []).map((r) => [...r]);
+      entry.chopRegions = baseline.map((r) => [...r]);
+      state.chopMarkers = baseline;
+      if (editor) editor.setRegions(baseline);
+    } else {
+      const baseline = (entry.oneShotRegionsBaseline || []).map((r) => [...r]);
+      entry.oneShotRegions = baseline.map((r) => [...r]);
+      state.oneShotMarkers = baseline;
+      if (editor) editor.setRegions(baseline);
+    }
+    updateExportSelectedState();
+    log(`  ${state.fileName}: ${editing === "chops" ? "chops" : "one-shots"} reverted to the last detection/re-chop.`);
   });
 
-  // Apply regenerates this file's players from the edited boundaries and records the new slices
-  // against the file, so a later Export cuts where you said. It writes nothing.
-  applyBtn.addEventListener("click", async () => {
+  // Re-renders this file's audio players from the current (already-canonical) edited boundaries,
+  // purely so they can be auditioned here. Export doesn't need this - it always re-slices from the
+  // live regions in analysisCache regardless of whether this was ever clicked.
+  async function regeneratePreviews() {
     applyBtn.disabled = true;
     revertBtn.disabled = true;
-    applyBtn.textContent = "Applying…";
+    const previousLabel = applyBtn.textContent;
+    applyBtn.textContent = "Updating…";
     const wasDryRun = dryRun;
     dryRun = true;
     try {
       const regions = editor.getRegions();
-      const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
       if (editing === "chops") {
         const result = await reExportSingleFile(state.editContext, regions);
         state.chopRows = result.chopRows;
         state.chopMarkers = result.chopMarkers;
-        if (entry) entry.chopRegions = regions;
-        log(`  ${state.editContext.fileInfo.name}: ${result.chopRows.length} chop(s) updated. Hit Export to save.`);
+        log(`  ${state.editContext.fileInfo.name}: previewed ${result.chopRows.length} chop(s).`);
       } else {
         const result = await reExportOneShots(state.editContext, regions);
         state.oneShotRows = result.rows;
         state.oneShotMarkers = result.markers;
-        if (entry) entry.oneShotRegions = regions;
-        log(`  ${state.editContext.fileInfo.name}: ${result.rows.length} one-shot(s) updated. Hit Export to save.`);
+        log(`  ${state.editContext.fileInfo.name}: previewed ${result.rows.length} one-shot(s).`);
       }
       block.replaceWith(renderFileResult(state));
     } catch (err) {
-      log(`  ERROR updating ${state.editContext.fileInfo.name}: ${err.message || err}`);
+      log(`  ERROR updating previews for ${state.editContext.fileInfo.name}: ${err.message || err}`);
       console.error(err);
       applyBtn.disabled = false;
       revertBtn.disabled = false;
-      applyBtn.textContent = "Apply";
+      applyBtn.textContent = previousLabel;
     } finally {
       dryRun = wasDryRun;
+    }
+  }
+
+  applyBtn.addEventListener("click", () => regeneratePreviews());
+
+  rechopCountBtn.addEventListener("click", () => {
+    const n = Math.max(1, Math.min(200, parseInt(rechopCountInput.value, 10) || 1));
+    const offset = rechopAlignCheckbox.checked ? findAudibleStart(state.mono, state.sampleRate) : 0;
+    applyNewChopRegions(equalSliceRegions(offset, duration, n));
+    log(`  ${state.fileName}: re-chopped into ${n} equal slice(s)${offset > 0 ? " aligned to audible start" : ""}.`);
+    regeneratePreviews();
+  });
+
+  rechopBarsBtn.addEventListener("click", () => {
+    const bars = parseInt(rechopBarsSelect.value, 10);
+    const offset = rechopAlignCheckbox.checked ? findAudibleStart(state.mono, state.sampleRate) : 0;
+    const offsetSample = Math.round(offset * state.sampleRate);
+    const subMono = offsetSample > 0 ? state.mono.subarray(offsetSample) : state.mono;
+    const bpm = state.editContext ? state.editContext.detectedBpm : null;
+    const regions = computeDrumRegions(subMono, state.sampleRate, bars, bpm).map(([s, e]) => [s + offset, e + offset]);
+    applyNewChopRegions(regions);
+    log(`  ${state.fileName}: re-chopped by ${bars} bar(s)${offset > 0 ? " aligned to audible start" : ""}.`);
+    regeneratePreviews();
+  });
+
+  rechopClearBtn.addEventListener("click", () => {
+    applyNewChopRegions([]);
+    log(`  ${state.fileName}: chops cleared - build your own with + Add.`);
+    regeneratePreviews();
+  });
+
+  // Exports exactly the selected slice at its current (possibly edited) boundaries, alongside
+  // whatever's already on disk from a previous Export All, without touching or re-writing any
+  // other chop. Reuses the same DSP/render path as a full export (processRegionsHeavy) rather than
+  // exportChopsForRegions, since that helper clears and rewrites the WHOLE numbered chop set - fine
+  // for a full re-export, but it would silently delete every other already-exported chop here.
+  exportSelectedBtn.addEventListener("click", async () => {
+    const idx = editor ? editor.getSelected() : null;
+    if (idx == null) return;
+    const region = editor.getRegions()[idx];
+    exportSelectedBtn.disabled = true;
+    const previousLabel = exportSelectedBtn.textContent;
+    exportSelectedBtn.textContent = "Exporting…";
+    try {
+      const { fileName } = await exportSelectedChop(state.editContext, region, idx);
+      log(`  ${state.editContext.fileInfo.name}: exported ${fileName} (chop ${idx + 1} only).`);
+    } catch (err) {
+      log(`  ERROR exporting the selected chop: ${err.message || err}`);
+      console.error(err);
+    } finally {
+      exportSelectedBtn.textContent = previousLabel;
+      updateExportSelectedState();
     }
   });
 
@@ -2320,7 +2633,7 @@ function init() {
       return null;
     }
   })();
-  applyRail(savedRail ? savedRail === "open" : task === "both", { persist: false });
+  applyRail(savedRail ? savedRail === "open" : true, { persist: false });
   applySettings(loadSettings());
   updateNamingPreview(); // outside applySettings so it also runs for first-time visitors with nothing saved yet
 
@@ -2356,6 +2669,7 @@ function init() {
  */
 async function loadRememberedFolders() {
   if (!FSA_SUPPORTED) return;
+  const wasEmpty = sourceFolders.length === 0;
   const remembered = await listRememberedFolders();
   for (const { name, handle } of remembered) {
     if (folderAlreadyQueued(name)) continue;
@@ -2376,6 +2690,7 @@ async function loadRememberedFolders() {
   if (remembered.length) {
     renderFolderList();
     updateProcessButton();
+    maybeAutoProcessInitialBatch(wasEmpty);
   }
 }
 

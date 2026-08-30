@@ -520,6 +520,39 @@ export function barsToSeconds(bars, bpm, beatsPerBar = 4) {
 }
 
 // ---------------------------------------------------------------------------
+// Manual re-chop helpers (editor-triggered re-chopping, see createEditableWaveform's
+// consumer in app.js)
+// ---------------------------------------------------------------------------
+
+/**
+ * Time of the first sample whose short-time RMS clears the file's own noise floor by `marginDb`,
+ * i.e. where the audio actually starts. Used to align a re-chop's grid to the real content instead
+ * of counting leading silence as part of the first slice. Returns 0 if nothing clears the floor
+ * (silent file, or `marginDb` set higher than the loudest part of the file).
+ */
+export function findAudibleStart(mono, sampleRate, marginDb = 12) {
+  const { times, vals } = computeRmsEnvelope(mono, sampleRate, 20, 10);
+  if (!vals.length) return 0;
+  const thresholdDb = estimateNoiseFloorDb(vals) + marginDb;
+  for (let i = 0; i < vals.length; i++) {
+    if (linToDb(vals[i]) >= thresholdDb) return times[i];
+  }
+  return 0;
+}
+
+/** `count` equal-length [start,end] regions spanning [rangeStart, rangeEnd]. Minimum 1 region. */
+export function equalSliceRegions(rangeStart, rangeEnd, count) {
+  const n = Math.max(1, Math.round(count));
+  const span = Math.max(0, rangeEnd - rangeStart);
+  const step = span / n;
+  const regions = [];
+  for (let i = 0; i < n; i++) {
+    regions.push([rangeStart + i * step, i === n - 1 ? rangeEnd : rangeStart + (i + 1) * step]);
+  }
+  return regions;
+}
+
+// ---------------------------------------------------------------------------
 // One-shot hit extraction (drums)
 // ---------------------------------------------------------------------------
 //

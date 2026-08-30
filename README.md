@@ -46,8 +46,28 @@ site on GitHub Pages.
   drawn and dragged as a single shared boundary - stacking two identical
   handles on the same pixel made a drag look like it hadn't worked. Where
   slices genuinely don't touch (phrase mode leaves gaps) the edges stay
-  independent and carry a direction flag. Edits live in memory until
-  **Apply**; nothing is written until Export.
+  independent and carry a direction flag. Every edit - a drag, an add, a
+  delete, a re-chop - is canonical the instant it happens: Export always
+  cuts where the waveform currently shows, with no separate commit step.
+  **Update previews** just re-renders the audio players below the waveform
+  so you can audition the edited audio in-browser; it has no bearing on
+  what Export produces. **Revert** discards edits back to the last
+  detection or re-chop. Nothing touches disk until Export either way.
+- **Re-chop and manual chopping, from the editor.** Beyond dragging
+  boundaries, a file's card has an explicit (and deliberately destructive)
+  **re-chop**: replace every current chop with a target number of
+  equal-length slices, or with break-sized loops at a chosen bar length,
+  optionally aligned to the audio's actual audible start so leading
+  silence doesn't offset every slice. **Clear (manual)** empties the chop
+  list entirely so you can build one from scratch with **+ Add** - the
+  same editor either way, not a separate manual-chopping mode. A single
+  edited chop can also be exported on its own with **Export selected**,
+  without touching any other chop already on disk.
+- **The first batch processes itself.** Adding audio to an empty queue
+  (Add folder/files, or a drop) runs a Process pass automatically, so
+  there's something to look at without a separate "now click Process"
+  step. Adding more files later never re-triggers this, so it can't
+  clobber edits already sitting in the editor.
 - **Per-file one-shot opt-out.** Hit extraction is a heuristic and on some
   breaks it returns junk, so each file has an **export one-shots** tickbox:
   drop that file's hits and keep the rest of the batch.
@@ -205,14 +225,20 @@ Then open the URL it prints (typically `http://localhost:8000`).
 
 ## Using it
 
-Pick a task first: **Chop**, **Stretch** or **Both**. In Chop and Both,
-also pick the source material (Horns / Rhodes / Drums); in Stretch nothing
-is being cut, so that picker isn't shown.
+Pick a task first: **Chop**, **Stretch** or **Both**. Chop and Both add a
+**Source material** section to the Settings rail (Horns / Rhodes / Drums);
+Stretch never cuts anything, so that section unmounts entirely rather than
+sitting there disabled.
 
 Then either **Add folder** (repeatable, to build a multi-folder batch),
 **Add files** (pick one or more loose audio files), or drag a folder or
-audio files from your file manager and drop them anywhere on the page. In
-Chop, dropping something starts it immediately.
+audio files from your file manager and drop them anywhere on the page. The
+first audio you add to an empty batch, by any of those methods, processes
+itself automatically - no separate "now click Process" step. In Chop,
+dropping something into an already-populated batch runs a full Export
+straight away instead; every other case (Stretch, Both, or a batch that
+already has results on screen) just processes so you can look before you
+commit.
 
 From there it's two buttons:
 
@@ -221,17 +247,20 @@ From there it's two buttons:
 - **Process** does the same work and saves nothing. You get every waveform
   with its cuts marked, a player for every chop and one-shot, and a live
   editor. Drag boundaries, select a slice and hit Space to hear it, Delete to
-  remove it, double-click to add one, hit **Apply** to update that file,
-  untick **export one-shots** on any file whose hits came out badly, then hit
-  **Export** when you're happy. Export reuses what Process already worked
-  out, so it doesn't redetect.
+  remove it, double-click to add one - every edit is live the instant you
+  make it, so there's nothing to remember to commit before hitting
+  **Export**. Untick **export one-shots** on any file whose hits came out
+  badly, then hit **Export** when you're happy. Export reuses what Process
+  already worked out, so it doesn't redetect.
 
 Everything else is behind the **Settings** button, which opens a rail down
-the left. What's in it depends on the task: Chop gets source, naming,
-detection and export; Stretch gets source, naming, export, time-stretch and
-lo-fi; Both gets all of it plus processing scope. Auto detection is on by
-default, so you can go straight to Export - untick **Auto** in the Detection
-section if you want to adjust the parameters first.
+the left, open by default. What's in it depends on the task: Chop gets
+source material, naming, detection and export; Stretch gets naming, export,
+time-stretch and lo-fi (with stretch itself always on, since stretching is
+the entire point of that task); Both gets source material plus all of it,
+with time-stretch back to being optional. Auto detection is on by default,
+so you can go straight to Export - untick **Auto** in the Detection section
+if you want to adjust the parameters first.
 
 If a folder you add contains several session subfolders rather than audio
 files directly, tick **"Split into one batch per subfolder"** before
@@ -244,14 +273,13 @@ folder the first time (there's no way for a browser to write back next to a
 loose file without asking) - that choice is remembered for the rest of the
 session.
 
-Untick **"Chop into pieces"** under the mode cards if you don't want the
-file cut up at all - key/tempo detection, the `wav/` copy, and any
-time-stretch/lo-fi processing you've turned on still run, just nothing
-gets chopped. When it's on and Drums is the selected mode, an extra
-options block appears: a **chop length** in bars (converted to seconds
-from the detected tempo), and an opt-in checkbox to also pull out
-one-shot hits into a `one shots/` folder alongside the usual break-length
-chops.
+Pick **Stretch** instead of **Chop**/**Both** if you don't want the file cut
+up at all - key/tempo detection, the `wav/` copy, and any time-stretch/lo-fi
+processing you've turned on still run, just nothing gets chopped. In Chop
+or Both with Drums selected, the Source material section in the rail grows
+a **chop length** in bars (converted to seconds from the detected tempo)
+and an opt-in checkbox to also pull out one-shot hits into a `one shots/`
+folder alongside the usual break-length chops.
 
 The **Output naming** panel controls how chop files are named: type a
 pattern using `{name}`, `{tag}` and `{number}` tokens (e.g.
@@ -260,15 +288,21 @@ inside the auto-generated key/tempo tag, and a live preview underneath
 shows exactly what that'll produce. Independent of mode. Your choices
 (and most other settings) are remembered in this browser between visits.
 
-Once a file has processed, its result card shows an **Edit chops** and/or
-**Edit one-shots** button (whichever produced results) - click one to
-open that set of boundaries on the waveform: drag a handle to move a cut
+Once a file has processed, its result card shows its waveform live and
+ready to edit straight away - no separate edit mode to enter. A file with
+both chops and one-shots gets a **Chops** / **One-shots** switch above it;
+editing one set never disturbs the other. Drag a handle to move a cut
 point (it snaps to the nearest zero-crossing when released), scroll or
 use the Zoom in/out/Fit buttons to work at finer detail, drag the
-waveform itself to pan around once zoomed in, and hit a region chip's
-**▶** to hear it before you commit. **Apply** updates just that file's
-chops or one-shots with your edits, without touching the other set and
-without writing anything: Export is still what saves. The optional
+waveform itself to pan around once zoomed in, and hit **▶** to hear a
+selected chop before you commit. Below the waveform, **Revert** discards
+edits back to the last detection/re-chop, **Export selected** exports just
+the one selected chop without touching any others already on disk, and
+**Update previews** re-renders the audio players below with your edits (a
+convenience for auditioning in-browser - Export doesn't need it, since it
+always cuts from your current edits regardless). The **Re-chop** row lets
+you throw the current chops away and generate a fresh set by count or by
+bars, or clear them entirely to build your own from scratch. The optional
 **Time-stretch** and **Lo-fi character** sections
 (in the Settings rail) both apply to every export in the batch, not
 per-file: turn time-stretch on, pick a mode (match a target tempo, or a
