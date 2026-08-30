@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "good-bits",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["http-server", "-c-1", "-p", "8791", "."],
+      "port": 8791
+    }
+  ]
+}

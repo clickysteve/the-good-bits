@@ -8,7 +8,7 @@
 // the main thread (app.js), which slices the source audio and writes the results this worker hands
 // back. See runHeavyDsp() in app.js for the calling side, including the same-thread fallback used
 // if a worker can't be created at all (very old browsers, or a `file://` load).
-import { wsolaStretchChannels } from "./timestretch.js";
+import { stretchChannels } from "./timestretch.js";
 import { applyLofiChain } from "./outputstage.js";
 import { applyFades } from "./dsp.js";
 import { encodeWav } from "./audio-codec.js";
@@ -16,13 +16,13 @@ import { encodeWav } from "./audio-codec.js";
 self.onmessage = (ev) => {
   const msg = ev.data;
   if (msg.type !== "processRegions") return;
-  const { requestId, sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, lofi, regions } = msg;
+  const { requestId, sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, macroValues, seed, lofi, regions } = msg;
 
   try {
     const results = regions.map(({ channels }) => {
       let sliced = channels;
       if (stretchRatio && stretchRatio !== 1) {
-        sliced = wsolaStretchChannels(sliced, sampleRate, stretchRatio, character);
+        sliced = stretchChannels(sliced, sampleRate, stretchRatio, character, { macroValues, seed });
       }
       sliced = applyLofiChain(sliced, sampleRate, lofi);
       applyFades(sliced, fadeInSamples || 0, fadeOutSamples || 0);

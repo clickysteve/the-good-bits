@@ -1,7 +1,12 @@
-// Node-side unit tests for the WSOLA time-stretch module.
+// Node-side unit tests for js/timestretch.js, the backwards-compatible facade over the real
+// time-stretch system in js/dsp/stretch/ (see test/dsp-stretch.test.mjs for the full engine/
+// character matrix). This file focuses on exactly what a facade needs to prove: the old
+// wsolaStretchChannels(channels, sampleRate, ratio, character) call shape still works, byte-for-byte,
+// the way it did before the palette grew from one engine/five characters to seven engines/dozens.
 // Run with: node test/timestretch.test.mjs
 import assert from "node:assert/strict";
 import { wsolaStretchChannels, ratioForTargetTempo, CHARACTERS } from "../js/timestretch.js";
+import { stretchWsola } from "../js/dsp/stretch/wsola.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -50,8 +55,6 @@ test("wsolaStretchChannels: ratio 2 roughly doubles length, ratio 0.5 roughly ha
 
 test("wsolaStretchChannels: stereo channels stay phase-aligned (grain placement decided once)", () => {
   const mono = tone(0.6, 300);
-  // Identical signal on both channels; if grain placement diverged between channels, L and R would
-  // no longer match sample-for-sample after stretching.
   const [l, r] = wsolaStretchChannels([mono, mono], SR, 1.6, "clean");
   assert.equal(l.length, r.length);
   let maxDiff = 0;
@@ -67,11 +70,11 @@ test("wsolaStretchChannels: output stays within a sane amplitude range (no runaw
   assert.ok(peak < 1.5, `expected no runaway gain, peak was ${peak}`);
 });
 
-test("CHARACTERS: clean searches more / quantizes less than vintage, vintage more than glitch", () => {
-  assert.ok(CHARACTERS.clean.searchMs > CHARACTERS.vintage.searchMs);
-  assert.ok(CHARACTERS.vintage.searchMs >= CHARACTERS.glitch.searchMs);
-  assert.equal(CHARACTERS.clean.bitDepth, null);
-  assert.ok(CHARACTERS.vintage.bitDepth > CHARACTERS.glitch.bitDepth);
+test("CHARACTERS registry: clean searches more / quantizes less than vintage, vintage more than glitch", () => {
+  assert.ok(CHARACTERS.clean.params.searchMs > CHARACTERS.vintage.params.searchMs);
+  assert.ok(CHARACTERS.vintage.params.searchMs >= CHARACTERS.glitch.params.searchMs);
+  assert.equal(CHARACTERS.clean.params.bitDepth, null);
+  assert.ok(CHARACTERS.vintage.params.bitDepth > CHARACTERS.glitch.params.bitDepth);
 });
 
 test("wsolaStretchChannels: glitch character's bit-crush measurably reduces the number of distinct sample values", () => {
@@ -82,12 +85,12 @@ test("wsolaStretchChannels: glitch character's bit-crush measurably reduces the 
   assert.ok(distinct(glitch) < distinct(clean), `expected fewer distinct levels in glitch (${distinct(glitch)}) than clean (${distinct(clean)})`);
 });
 
-test("CHARACTERS: warped has the shortest window (choppiest splices) and no bit-crush, crushed has a wide window but heavy bit-crush", () => {
-  assert.ok(CHARACTERS.warped.windowMs < CHARACTERS.glitch.windowMs, "warped should use an even shorter grain than glitch");
-  assert.equal(CHARACTERS.warped.searchMs, 0);
-  assert.equal(CHARACTERS.warped.bitDepth, null);
-  assert.ok(CHARACTERS.crushed.windowMs > CHARACTERS.vintage.windowMs, "crushed should use a longer, smoother grain than vintage");
-  assert.ok(CHARACTERS.crushed.bitDepth < CHARACTERS.glitch.bitDepth, "crushed should quantize harder than glitch");
+test("CHARACTERS registry: warped has the shortest window (choppiest splices) and no bit-crush, crushed has a wide window but heavy bit-crush", () => {
+  assert.ok(CHARACTERS.warped.params.windowMs < CHARACTERS.glitch.params.windowMs, "warped should use an even shorter grain than glitch");
+  assert.equal(CHARACTERS.warped.params.searchMs, 0);
+  assert.equal(CHARACTERS.warped.params.bitDepth, null);
+  assert.ok(CHARACTERS.crushed.params.windowMs > CHARACTERS.vintage.params.windowMs, "crushed should use a longer, smoother grain than vintage");
+  assert.ok(CHARACTERS.crushed.params.bitDepth < CHARACTERS.glitch.params.bitDepth, "crushed should quantize harder than glitch");
 });
 
 test("wsolaStretchChannels: warped produces valid, finite, bounded output", () => {
@@ -107,6 +110,13 @@ test("wsolaStretchChannels: crushed's bit-crush reduces distinct sample values e
   const [crushed] = wsolaStretchChannels([input], SR, 1.3, "crushed");
   const distinct = (arr) => new Set(Array.from(arr).map((v) => v.toFixed(5))).size;
   assert.ok(distinct(crushed) < distinct(glitch), `expected fewer distinct levels in crushed (${distinct(crushed)}) than glitch (${distinct(glitch)})`);
+});
+
+test("wsolaStretchChannels: string-character form and direct-params form agree (facade resolves ids through the current registry)", () => {
+  const input = tone(0.5, 220, 0.7);
+  const [viaId] = wsolaStretchChannels([input], SR, 1.5, "vintage");
+  const [viaParams] = stretchWsola([input], SR, 1.5, CHARACTERS.vintage.params);
+  assert.deepEqual(Array.from(viaId), Array.from(viaParams));
 });
 
 console.log(`\n${passed} test(s) passed.`);

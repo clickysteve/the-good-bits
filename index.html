@@ -190,16 +190,33 @@
         </div>
         <div class="field">
           <label for="timestretch-character-select">Character</label>
-          <select id="timestretch-character-select">
-            <option value="clean">Clean</option>
-            <option value="vintage">Vintage - grainy, warbly, 90s sampler</option>
-            <option value="glitch">Glitch - metallic, low-bit</option>
-            <option value="warped">Warped - choppy grains, wobbly pitch</option>
-            <option value="crushed">Crushed - smooth grains, heavy crush</option>
-          </select>
+          <select id="timestretch-character-select"></select>
+          <p class="mod-note" id="timestretch-character-hint"></p>
+        </div>
+        <div class="field" id="timestretch-macro1-row" hidden>
+          <label for="timestretch-macro1-slider" id="timestretch-macro1-label">Amount</label>
+          <div class="slider-row">
+            <input id="timestretch-macro1-slider" type="range" min="0" max="100" step="1" value="50" />
+            <input id="timestretch-macro1-value" type="number" class="slider-number" min="0" max="100" step="1" value="50" />
+            <span class="slider-unit">%</span>
+          </div>
+          <p class="mod-note" id="timestretch-macro1-hint"></p>
+        </div>
+        <div class="field" id="timestretch-macro2-row" hidden>
+          <label for="timestretch-macro2-slider" id="timestretch-macro2-label">Amount</label>
+          <div class="slider-row">
+            <input id="timestretch-macro2-slider" type="range" min="0" max="100" step="1" value="50" />
+            <input id="timestretch-macro2-value" type="number" class="slider-number" min="0" max="100" step="1" value="50" />
+            <span class="slider-unit">%</span>
+          </div>
+          <p class="mod-note" id="timestretch-macro2-hint"></p>
+        </div>
+        <div class="field" id="timestretch-seed-row" hidden>
+          <label for="timestretch-seed-input">Variation seed</label>
+          <input id="timestretch-seed-input" type="number" min="0" max="999999" step="1" value="1" />
         </div>
       </div>
-      <p class="mod-note">Pitch preserved. No confident tempo means it exports unstretched.</p>
+      <p class="mod-note" id="timestretch-pitch-note">Pitch preserved. No confident tempo means it exports unstretched.</p>
     </section>
 
     <section class="mod" data-tasks="stretch both">

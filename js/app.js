@@ -21,7 +21,7 @@ import {
   findAudibleStart,
   equalSliceRegions,
 } from "./dsp.js";
-import { wsolaStretchChannels, ratioForTargetTempo } from "./timestretch.js";
+import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups, MACROS } from "./timestretch.js";
 import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from "./outputstage.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
@@ -166,7 +166,20 @@ const exportSettings = { bitDepth: 24, fadeMs: 5, zcSearchMs: 15 };
 const detectSettings = { key: true, tempo: true };
 
 // Applied to main chops and the full-file wav/ copy, but not one-shots, at export time.
-const timestretchSettings = { enabled: false, mode: "target-tempo", targetBpm: 120, ratio: 1.0, character: "clean" };
+// macroValues is a flat {texture, variation, smear, roughness} map - a character only reads the
+// macro(s) named in its own registry entry (js/dsp/stretch/characters.js), so values for macros a
+// character doesn't use just ride along unused rather than needing to be reset per-character.
+// seed drives every deterministic-random engine (granular jitter, phase/spectral randomisation,
+// repeat jitter) - same input + settings + seed always reproduces the same output.
+const timestretchSettings = {
+  enabled: false,
+  mode: "target-tempo",
+  targetBpm: 120,
+  ratio: 1.0,
+  character: "clean",
+  macroValues: { texture: 50, variation: 50, smear: 50, roughness: 50 },
+  seed: 1,
+};
 
 // Lo-fi processing chain (output-stage character -> drive -> crunch), applied in that order.
 // Same scope as time-stretch: main chops and the full-file wav/ copy, not one-shots.
@@ -282,6 +295,20 @@ const timestretchRatioRow = $("#timestretch-ratio-row");
 const timestretchRatioInput = $("#timestretch-ratio-input");
 const timestretchRatioNumber = $("#timestretch-ratio-value");
 const timestretchCharacterSelect = $("#timestretch-character-select");
+const timestretchCharacterHint = $("#timestretch-character-hint");
+const timestretchMacro1Row = $("#timestretch-macro1-row");
+const timestretchMacro1Label = $("#timestretch-macro1-label");
+const timestretchMacro1Slider = $("#timestretch-macro1-slider");
+const timestretchMacro1Number = $("#timestretch-macro1-value");
+const timestretchMacro1Hint = $("#timestretch-macro1-hint");
+const timestretchMacro2Row = $("#timestretch-macro2-row");
+const timestretchMacro2Label = $("#timestretch-macro2-label");
+const timestretchMacro2Slider = $("#timestretch-macro2-slider");
+const timestretchMacro2Number = $("#timestretch-macro2-value");
+const timestretchMacro2Hint = $("#timestretch-macro2-hint");
+const timestretchSeedRow = $("#timestretch-seed-row");
+const timestretchSeedInput = $("#timestretch-seed-input");
+const timestretchPitchNote = $("#timestretch-pitch-note");
 const detectionParamsPanel = $("#detection-params-panel");
 const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
 const outputstageOptions = $("#outputstage-options");
@@ -622,6 +649,78 @@ function updateTimestretchModeVisibility() {
   timestretchRatioRow.hidden = timestretchSettings.mode !== "fixed-ratio";
 }
 
+// Character <select> is populated here (data-driven, from js/dsp/stretch/characters.js) rather than
+// hand-written in index.html, the same pattern the output-stage select already uses (see the
+// OUTPUT_STAGES loop below) - a couple dozen characters across five groups would be an unmaintainable
+// wall of markup otherwise, and this way the palette and the UI can never drift out of sync.
+for (const group of characterGroups()) {
+  if (!group.characters.length) continue;
+  const optgroup = document.createElement("optgroup");
+  optgroup.label = group.label;
+  for (const c of group.characters) {
+    const opt = document.createElement("option");
+    opt.value = c.key;
+    opt.textContent = c.label;
+    opt.title = c.description;
+    optgroup.appendChild(opt);
+  }
+  timestretchCharacterSelect.appendChild(optgroup);
+}
+
+const MACRO_SLOTS = [
+  { row: timestretchMacro1Row, label: timestretchMacro1Label, slider: timestretchMacro1Slider, number: timestretchMacro1Number, hint: timestretchMacro1Hint },
+  { row: timestretchMacro2Row, label: timestretchMacro2Label, slider: timestretchMacro2Slider, number: timestretchMacro2Number, hint: timestretchMacro2Hint },
+];
+
+/**
+ * Shows/hides the character description, up to two macro-control sliders, and the seed field for
+ * whichever character is currently selected - only the controls that character's registry entry
+ * actually names (see js/dsp/stretch/characters.js) are shown, so switching characters can't leave a
+ * stale, meaningless slider on screen or silently carry a setting into an engine that ignores it.
+ */
+function updateCharacterUI() {
+  const character = resolveCharacter(timestretchSettings.character);
+  timestretchCharacterHint.textContent = character.description || "";
+
+  const macroKeys = character.macros || [];
+  MACRO_SLOTS.forEach((slot, i) => {
+    const key = macroKeys[i];
+    slot.row.hidden = !key;
+    if (!key) return;
+    const meta = MACROS[key];
+    slot.label.textContent = meta.label;
+    slot.hint.textContent = meta.hint || "";
+    const value = timestretchSettings.macroValues[key] ?? meta.default;
+    slot.slider.value = slot.number.value = String(value);
+    slot.slider.dataset.macroKey = key;
+    slot.number.dataset.macroKey = key;
+  });
+
+  timestretchSeedRow.hidden = !character.usesSeed;
+  timestretchSeedInput.value = String(timestretchSettings.seed ?? 1);
+
+  timestretchPitchNote.textContent =
+    character.preservesPitch === false
+      ? "Pitch follows speed - stretching also changes pitch, like tape or varispeed."
+      : "Pitch preserved. No confident tempo means it exports unstretched.";
+}
+
+for (const slot of MACRO_SLOTS) {
+  bindSliderNumber(slot.slider, slot.number, (v) => {
+    const key = slot.slider.dataset.macroKey;
+    if (!key) return;
+    timestretchSettings.macroValues[key] = v;
+    saveSettings();
+  });
+}
+
+timestretchSeedInput.addEventListener("change", () => {
+  const v = Math.max(0, Math.round(Number(timestretchSeedInput.value) || 0));
+  timestretchSettings.seed = v;
+  timestretchSeedInput.value = String(v);
+  saveSettings();
+});
+
 /**
  * STRETCH's entire purpose is stretching, so the "Stretch on export" checkbox has nothing to gate
  * there - stretch is inherently on, and its options should just be visible, not hidden behind a
@@ -660,6 +759,7 @@ bindSliderNumber(timestretchRatioInput, timestretchRatioNumber, (v) => {
 });
 timestretchCharacterSelect.addEventListener("change", () => {
   timestretchSettings.character = timestretchCharacterSelect.value;
+  updateCharacterUI();
   saveSettings();
 });
 
@@ -676,7 +776,7 @@ function effectsEnabled() {
   return task !== "chop";
 }
 
-/** ratio to pass to wsolaStretchChannels for this file, or 1 (no-op) if stretching doesn't apply. */
+/** ratio to pass to stretchChannels for this file, or 1 (no-op) if stretching doesn't apply. */
 function resolveStretchRatio(detectedBpm) {
   if (!effectsEnabled()) return 1;
   if (!stretchEffectivelyEnabled()) return 1;
@@ -967,7 +1067,16 @@ function applySettings(saved) {
     timestretchTargetBpmInput.value = timestretchTargetBpmNumber.value = String(timestretchSettings.targetBpm);
     timestretchRatioInput.value = timestretchRatioNumber.value = String(Math.round(timestretchSettings.ratio * 100));
     timestretchCharacterSelect.value = timestretchSettings.character;
+    // A character id this version no longer recognises (stale save, hand-edited localStorage) leaves
+    // the <select> with nothing chosen - fall back to "clean" in both the setting and the control
+    // rather than silently rendering an empty dropdown. resolveCharacter() already falls back the
+    // same way for the DSP side, so this just keeps the UI in sync with what would actually render.
+    if (timestretchCharacterSelect.value !== timestretchSettings.character) {
+      timestretchSettings.character = "clean";
+      timestretchCharacterSelect.value = "clean";
+    }
     updateTimestretchModeVisibility();
+    updateCharacterUI();
   }
   if (saved.outputStage) {
     Object.assign(outputStageSettings, saved.outputStage);
@@ -1467,7 +1576,7 @@ function getHeavyDspWorker() {
 }
 
 /** Runs the worker's processRegions op, or the same logic inline on the main thread as a fallback. */
-async function processRegionsHeavy({ sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, regions }) {
+async function processRegionsHeavy({ sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, macroValues, seed, regions }) {
   const lofi = lofiSettingsSnapshot();
   const worker = getHeavyDspWorker();
   if (worker) {
@@ -1476,7 +1585,7 @@ async function processRegionsHeavy({ sampleRate, bitDepth, fadeInSamples, fadeOu
       return await new Promise((resolve, reject) => {
         const requestId = ++heavyDspRequestId;
         heavyDspPending.set(requestId, { resolve, reject });
-        worker.postMessage({ type: "processRegions", requestId, sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, lofi, regions }, transferList);
+        worker.postMessage({ type: "processRegions", requestId, sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, macroValues, seed, lofi, regions }, transferList);
       });
     } catch (err) {
       console.error("heavy-dsp-worker failed, falling back to the main thread for the rest of this session:", err);
@@ -1489,7 +1598,7 @@ async function processRegionsHeavy({ sampleRate, bitDepth, fadeInSamples, fadeOu
   return regions.map(({ channels }) => {
     let sliced = channels;
     if (stretchRatio && stretchRatio !== 1) {
-      sliced = wsolaStretchChannels(sliced, sampleRate, stretchRatio, character);
+      sliced = stretchChannels(sliced, sampleRate, stretchRatio, character, { macroValues, seed });
     }
     sliced = applyLofiChainPure(sliced, sampleRate, lofi);
     applyFades(sliced, fadeInSamples || 0, fadeOutSamples || 0);
@@ -1583,6 +1692,8 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
       fadeOutSamples: 0,
       stretchRatio: fullStretchRatio,
       character: timestretchSettings.character,
+      macroValues: timestretchSettings.macroValues,
+      seed: timestretchSettings.seed,
       regions: [{ channels: channels.map((ch) => Float32Array.from(ch)) }],
     });
     const derivedName = `${taggedStem}${fullStretched ? " stretched" : ""}${fullLofi ? " lofi" : ""}.wav`;
@@ -1761,6 +1872,8 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
           fadeOutSamples,
           stretchRatio,
           character: timestretchSettings.character,
+          macroValues: timestretchSettings.macroValues,
+          seed: timestretchSettings.seed,
           regions: regionDefs,
         })
       : [];
@@ -1847,6 +1960,8 @@ async function exportSelectedChop(editContext, region, index) {
     fadeOutSamples,
     stretchRatio,
     character: timestretchSettings.character,
+    macroValues: timestretchSettings.macroValues,
+    seed: timestretchSettings.seed,
     regions: [{ channels: sliceChannels(channels, startSample, endSample) }],
   });
 
@@ -1958,6 +2073,8 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
       fadeOutSamples,
       stretchRatio,
       character: timestretchSettings.character,
+      macroValues: timestretchSettings.macroValues,
+      seed: timestretchSettings.seed,
       regions: regionDefs,
     });
   } else {
@@ -2636,6 +2753,7 @@ function init() {
   applyRail(savedRail ? savedRail === "open" : true, { persist: false });
   applySettings(loadSettings());
   updateNamingPreview(); // outside applySettings so it also runs for first-time visitors with nothing saved yet
+  updateCharacterUI(); // same - first-time visitors need the character hint/macros shown for the default character too
 
   outputBanner.textContent = FSA_SUPPORTED
     ? "Chops are saved straight into each folder's wav/ and chops/ subfolders."
