@@ -30,6 +30,7 @@ import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from
 import { isLofiActive, lofiSnapshotForTask, wantsCleanSecondary } from "./output-scope.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
+import { sanitizeSourceBpm, resolveEffectiveTempo, formatBpmText } from "./tempo-override.js";
 import { APP_VERSION } from "./version.js";
 import { createEditableWaveform } from "./editor-waveform.js";
 import { resolveRegions, replaceRegions, resolveSelection } from "./chop-regions.js";
@@ -115,6 +116,33 @@ function cachedAnalysis(folder, fileInfo) {
 function invalidateAnalysis() {
   analysisCache.clear();
 }
+
+/**
+ * User corrections to a source file's detected tempo, keyed by analysisKey() - ANALYSIS PROPOSES,
+ * USER OVERRIDES (see js/tempo-override.js for the pure resolve/validate rules). Deliberately a
+ * separate map from analysisCache rather than a field on its entries: every Process/Export run and
+ * every re-analysis replaces an analysisCache entry's object wholesale (see processOneFile() and
+ * ensureStretchSourceAnalyzed()), so a field living there would need every one of those call sites to
+ * remember to carry it forward. Keeping it here instead means a correction survives Process,
+ * re-analysis, mode switching and file include/exclude for free, and analyzeKeyAndTempo's raw result
+ * (kt.bpm, inside analysisCache) is never mutated - effectiveTempo() below is the one place a
+ * correction and the raw detection get reconciled into "the tempo a musical operation should use".
+ */
+const tempoOverrides = new Map();
+
+/** Sets or clears (bpm == null) `key`'s manual tempo correction. */
+function setTempoOverride(key, bpm) {
+  if (key == null) return;
+  if (bpm == null) tempoOverrides.delete(key);
+  else tempoOverrides.set(key, bpm);
+}
+
+/** The single answer to "what tempo should this source be treated as?" for `key` - see
+ * resolveEffectiveTempo() in js/tempo-override.js. */
+function effectiveTempo(key, kt) {
+  return resolveEffectiveTempo(key != null ? tempoOverrides.get(key) : null, kt && kt.bpm);
+}
+
 let cancelRequested = false;
 let nextFolderId = 1;
 let looseFileGroupCounter = 0;
@@ -810,38 +838,91 @@ const stretchWorkspace = createStretchWorkspace({
     scheduleStretchPreview(STRETCH_PREVIEW_DEBOUNCE_MS);
     saveSettings();
   },
+  // Source BPM correction - see effectiveTempo()/tempoOverrides near the top of this file. All four
+  // handlers share the same tail (onSourceTempoCorrected): refresh the Time/Target readouts, then
+  // let scheduleStretchPreview()'s own staleness check decide whether a re-render is actually needed
+  // (in fixed-ratio mode the stretch ratio doesn't depend on source tempo at all, so it won't be -
+  // see stretchRenderSignature()).
+  onSourceBpmChange: (v) => {
+    if (!stretchActiveKey) return;
+    const sanitized = sanitizeSourceBpm(v);
+    if (sanitized == null) {
+      refreshStretchStaleIndicator(); // invalid input - redraw the field back to its current value
+      return;
+    }
+    setTempoOverride(stretchActiveKey, sanitized);
+    onSourceTempoCorrected(STRETCH_PREVIEW_DEBOUNCE_MS);
+  },
+  onSourceHalve: () => adjustSourceTempo(0.5),
+  onSourceDouble: () => adjustSourceTempo(2),
+  onSourceReset: () => {
+    if (!stretchActiveKey) return;
+    setTempoOverride(stretchActiveKey, null);
+    onSourceTempoCorrected(STRETCH_PREVIEW_QUICK_MS);
+  },
 });
 
 let stretchActiveKey = null; // analysisKey() of the file shown in the workspace right now
 const stretchFileOrder = []; // [{key, folder, fileInfo}], rebuilt at the start of every stretch-task batch run
 
-/** Everything that affects what a stretch render sounds like - lofi included, since the workspace's Processed pane reflects the whole chain, not just the stretch stage. */
-function currentStretchSignature() {
-  return stretchRenderSignature(timestretchSettings, lofiSettingsSnapshot());
+/**
+ * Halves/doubles the active file's CURRENT EFFECTIVE source tempo into a fresh manual override - the
+ * fix for the classic half-time/double-time detection error. Reads through effectiveTempo() (so
+ * pressing ×2 twice compounds correctly on top of an existing override) and only ever writes
+ * tempoOverrides - the raw detected value in analysisCache is never touched.
+ */
+function adjustSourceTempo(factor) {
+  if (!stretchActiveKey) return;
+  const entry = analysisCache.get(stretchActiveKey);
+  const current = effectiveTempo(stretchActiveKey, entry && entry.kt);
+  if (current == null) return; // nothing detected or set yet - nothing to halve/double
+  const sanitized = sanitizeSourceBpm(current * factor);
+  if (sanitized == null) return;
+  setTempoOverride(stretchActiveKey, sanitized);
+  onSourceTempoCorrected(STRETCH_PREVIEW_QUICK_MS);
 }
 
-function stretchStaleFor(entry) {
-  return !!(entry && entry.stretchProcessed && isProcessedPreviewStale(entry.stretchProcessed.signature, timestretchSettings, lofiSettingsSnapshot()));
+/** Common tail for every source-tempo correction (typed entry, ½, ×2, Reset). */
+function onSourceTempoCorrected(previewDelayMs) {
+  refreshStretchStaleIndicator(); // cheap - refreshes the Source/Ratio readouts and the stale badge
+  scheduleStretchPreview(previewDelayMs);
+}
+
+/** Everything that affects what a stretch render sounds like - lofi included, since the workspace's Processed pane reflects the whole chain, not just the stretch stage. `sourceBpm` is the file's
+ * effective tempo, folded in only for target-tempo mode (see stretchRenderSignature()) since that's
+ * the only mode whose rendered ratio actually depends on it. */
+function currentStretchSignature(sourceBpm) {
+  return stretchRenderSignature(timestretchSettings, lofiSettingsSnapshot(), sourceBpm);
+}
+
+function stretchStaleFor(key, entry) {
+  const sourceBpm = entry ? effectiveTempo(key, entry.kt) : null;
+  return !!(entry && entry.stretchProcessed && isProcessedPreviewStale(entry.stretchProcessed.signature, timestretchSettings, lofiSettingsSnapshot(), sourceBpm));
 }
 
 /** Cheap - safe to call on every settings tweak (see saveSettings()). Never rebuilds a waveform. */
 function refreshStretchStaleIndicator() {
   if (task !== "stretch") return;
   const entry = stretchActiveKey ? analysisCache.get(stretchActiveKey) : null;
-  stretchWorkspace.setStale(stretchStaleFor(entry));
+  stretchWorkspace.setStale(stretchStaleFor(stretchActiveKey, entry));
   updateStretchTimeTarget();
 }
 
 /** Cheap - updates the Time/Target panel's mode/slider values and its Source/Ratio readouts. No rebuild. */
 function updateStretchTimeTarget() {
   const entry = stretchActiveKey ? analysisCache.get(stretchActiveKey) : null;
-  const bpm = entry && entry.kt ? entry.kt.bpm : null;
+  const detectedBpm = entry && entry.kt ? entry.kt.bpm : null;
+  const isManual = stretchActiveKey ? tempoOverrides.has(stretchActiveKey) : false;
+  const sourceBpm = stretchActiveKey ? effectiveTempo(stretchActiveKey, entry && entry.kt) : null;
   stretchWorkspace.setTimeTarget({
     mode: timestretchSettings.mode,
     targetBpm: timestretchSettings.targetBpm,
     ratioPct: Math.round(timestretchSettings.ratio * 100),
-    detectedBpmText: bpm ? `${Math.round(bpm)} BPM` : "–",
-    resolvedRatioText: entry ? `${resolveStretchRatio(bpm).toFixed(2)}x` : "–",
+    sourceBpm,
+    isManual,
+    detectedBpm,
+    canEdit: !!stretchActiveKey,
+    resolvedRatioText: entry ? `${resolveStretchRatio(sourceBpm).toFixed(2)}x` : "–",
   });
 }
 
@@ -892,7 +973,7 @@ function renderStretchFileStrip() {
 function renderStretchActivePanes() {
   const entry = stretchActiveKey ? analysisCache.get(stretchActiveKey) : null;
   stretchWorkspace.setOriginal(entry ? entry.stretchOriginal : null);
-  stretchWorkspace.setProcessed(entry ? entry.stretchProcessed : null, stretchStaleFor(entry));
+  stretchWorkspace.setProcessed(entry ? entry.stretchProcessed : null, stretchStaleFor(stretchActiveKey, entry));
   updateStretchTimeTarget();
 }
 
@@ -987,7 +1068,7 @@ function scheduleStretchPreview(delayMs) {
   if (task !== "stretch" || !stretchActiveKey) return;
   const entry = analysisCache.get(stretchActiveKey);
   // Already current (or already scheduled off the back of an earlier tick this same drag) - nothing to do.
-  if (entry && entry.stretchProcessed && !stretchStaleFor(entry)) return;
+  if (entry && entry.stretchProcessed && !stretchStaleFor(stretchActiveKey, entry)) return;
   clearTimeout(stretchPreviewTimer);
   stretchPreviewTimer = setTimeout(runStretchPreview, delayMs);
 }
@@ -1015,12 +1096,15 @@ async function runStretchPreview() {
     const { channels, sampleRate, kt } = await ensureStretchSourceAnalyzed(folder, fileInfo);
     if (!isCurrent()) return; // superseded while analyzing (a newer request, or the active file changed)
 
-    const ratio = resolveStretchRatio(kt.bpm);
+    // Effective, not raw: a manual correction made while this render was in flight must be reflected
+    // in the ratio the moment it lands, exactly as if it had been the detected value all along.
+    const sourceBpm = effectiveTempo(myKey, kt);
+    const ratio = resolveStretchRatio(sourceBpm);
     const blob = await renderStretchAudio(channels, sampleRate, ratio);
     if (!isCurrent()) return; // superseded while rendering
 
     const characterLabel = resolveCharacter(timestretchSettings.character).label;
-    const processed = await decodeStretchPreview(blob, characterLabel, ratio);
+    const processed = await decodeStretchPreview(blob, characterLabel, ratio, sourceBpm);
     if (!isCurrent()) return; // superseded while decoding the result back for playback
 
     const entry = analysisCache.get(myKey);
@@ -1093,12 +1177,14 @@ function stretchEnabled() {
   return task !== "chop";
 }
 
-/** ratio to pass to stretchChannels for this file, or 1 (no-op) if stretching doesn't apply. */
-function resolveStretchRatio(detectedBpm) {
+/** ratio to pass to stretchChannels for this file, or 1 (no-op) if stretching doesn't apply.
+ * `sourceBpm` should be the file's EFFECTIVE tempo (see effectiveTempo()), not necessarily what was
+ * detected - a manual correction must change this ratio exactly as if it had been detected that way. */
+function resolveStretchRatio(sourceBpm) {
   if (!stretchEnabled()) return 1;
   if (!stretchEffectivelyEnabled()) return 1;
   if (timestretchSettings.mode === "fixed-ratio") return timestretchSettings.ratio;
-  return detectedBpm ? ratioForTargetTempo(detectedBpm, timestretchSettings.targetBpm) : 1;
+  return sourceBpm ? ratioForTargetTempo(sourceBpm, timestretchSettings.targetBpm) : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1972,6 +2058,7 @@ clearFoldersBtn.addEventListener("click", () => {
   looseDestinationHandle = null;
   forgetAllFolders();
   invalidateAnalysis();
+  tempoOverrides.clear(); // no source files left to hold a correction for
   invalidateStretchPreview(); // nothing left to auto-process for
   // renderFolderList() also calls updateStretchWorkspaceVisibility() (stops any preview playback and
   // hides the workspace, since sourceFolders is now empty) and rebuildStretchFileOrder() (empties the
@@ -2109,8 +2196,10 @@ async function renderStretchAudio(channels, sampleRate, ratio) {
   return blob;
 }
 
-/** Decodes a renderStretchAudio() result back into the Stretch workspace's {mono, sampleRate, duration, ...} shape. */
-async function decodeStretchPreview(blob, characterLabel, ratio) {
+/** Decodes a renderStretchAudio() result back into the Stretch workspace's {mono, sampleRate, duration, ...} shape.
+ * `sourceBpm` is the file's effective tempo at render time, baked into the stored signature so a later
+ * BPM correction correctly marks this preview stale (see stretchStaleFor()/stretchRenderSignature()). */
+async function decodeStretchPreview(blob, characterLabel, ratio, sourceBpm) {
   const decoded = await getAudioContext().decodeAudioData(await blob.arrayBuffer());
   const processedChannels = bufferChannels(decoded);
   return {
@@ -2119,7 +2208,7 @@ async function decodeStretchPreview(blob, characterLabel, ratio) {
     duration: decoded.length / decoded.sampleRate,
     characterLabel,
     ratio,
-    signature: currentStretchSignature(),
+    signature: currentStretchSignature(sourceBpm),
   };
 }
 
@@ -2144,7 +2233,7 @@ async function ensureStretchSourceAnalyzed(folder, fileInfo) {
   const validCached = cachedAnalysis(folder, fileInfo);
   const kt = validCached ? validCached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: detectSettings.key, tempo: detectSettings.tempo });
   const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
-  const bpmText = kt.bpm ? `${Math.round(kt.bpm)} BPM` : kt.available ? "unclear" : "unavailable";
+  const bpmText = formatBpmText(effectiveTempo(key, kt), tempoOverrides.has(key), kt.available);
   analysisCache.set(key, {
     signature: detectionSignature(),
     kt,
@@ -2188,6 +2277,7 @@ async function writeOutput(folder, subdir, relDir, fileName, blob, zipBatch) {
 async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const stem = fileInfo.name.replace(/\.[^.]+$/, "");
+  const key = analysisKey(folder, fileInfo);
 
   log(`  ${fileInfo.name}`);
   const { buffer, method } = await decodeFile(file, fileInfo.ext);
@@ -2205,13 +2295,20 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   const wantTempo = detectSettings.tempo;
   const kt = cached ? cached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: wantKey, tempo: wantTempo });
   if (cached) log(`    reusing the analysis from the last run`);
-  const tag = buildKeyTempoTag(kt, namingSettings.separator);
+  // Every musical decision below - the tag, the {tempo} token, bar-based chop length, the stretch
+  // ratio - is asking "what tempo should this source be treated as?", which is effectiveBpm, not
+  // kt.bpm: the user's correction if one exists for this file, else raw detection. `kt` itself is
+  // never touched, so Reset to Detected always has the original detection to come back to.
+  const effectiveBpm = effectiveTempo(key, kt);
+  const isManualTempo = tempoOverrides.has(key);
+  const effectiveKt = { ...kt, bpm: effectiveBpm };
+  const tag = buildKeyTempoTag(effectiveKt, namingSettings.separator);
   const taggedStem = buildTaggedStem(stem, tag);
 
   const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
-  const bpmText = kt.bpm ? `${Math.round(kt.bpm)} BPM` : kt.available ? "unclear" : "unavailable";
+  const bpmText = formatBpmText(effectiveBpm, isManualTempo, kt.available);
 
-  if (chopIntoPieces && mode === "drums" && wantTempo && !kt.bpm) {
+  if (chopIntoPieces && mode === "drums" && wantTempo && !effectiveBpm) {
     const proceed = await resolveTempoWarning(fileInfo.name);
     if (!proceed) {
       log(`    skipped - no tempo detected`);
@@ -2233,7 +2330,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   // handy for dropping the whole recording into a sampler, or for using these stages standalone
   // with chopping turned off. Written regardless of source format or chopIntoPieces, since this is
   // a new derived file rather than a duplicate of the original.
-  const fullStretchRatio = resolveStretchRatio(kt.bpm);
+  const fullStretchRatio = resolveStretchRatio(effectiveBpm);
   const fullStretched = fullStretchRatio !== 1;
   const fullLofi = lofiActive();
   // STRETCH always needs this render for the workspace's Processed pane, even when it would end up
@@ -2249,11 +2346,14 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
       log(`    wrote a full-length ${[fullStretched && "time-stretched", fullLofi && "lo-fi"].filter(Boolean).join(" + ")} copy`);
     }
     if (task === "stretch") {
-      stretchProcessedForWorkspace = await decodeStretchPreview(derivedBlob, resolveCharacter(timestretchSettings.character).label, fullStretchRatio);
+      stretchProcessedForWorkspace = await decodeStretchPreview(derivedBlob, resolveCharacter(timestretchSettings.character).label, fullStretchRatio, effectiveBpm);
     }
   }
 
-  const editContext = { folder, fileInfo, stem, tag, taggedStem, detectedBpm: kt.bpm, kt };
+  // `kt` here is effectiveKt (bpm already corrected) - this context only ever feeds naming
+  // (buildChopFileName's {tempo}/{tag}) and resolveStretchRatio, both of which want the effective
+  // value; the raw detected bpm still lives untouched in analysisCache's own `kt` field below.
+  const editContext = { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt: effectiveKt };
   let chopRows = [];
   let chopMarkers = [];
   let oneShotRows = [];
@@ -2271,7 +2371,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     // affects detection went stale) - see js/chop-regions.js. Any manual edit or re-chop made since
     // the last fresh detection rides along in cached.chopRegions and comes back out untouched.
     const resolved = resolveRegions(cached && cached.chopRegions, cached && cached.chopRegionsBaseline, () =>
-      mode === "drums" ? computeDrumRegions(mono, buffer.sampleRate, drumBars, kt.bpm) : phraseRegions(mono, buffer.sampleRate, modeParams[mode]).regions
+      mode === "drums" ? computeDrumRegions(mono, buffer.sampleRate, drumBars, effectiveBpm) : phraseRegions(mono, buffer.sampleRate, modeParams[mode]).regions
     );
     const regions = resolved.regions;
     chopRegionsBaseline = resolved.baseline;
@@ -2290,8 +2390,8 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
       channels,
       mono,
       zipBatch,
-      detectedBpm: kt.bpm,
-      kt,
+      effectiveBpm,
+      kt: effectiveKt,
     }));
 
     log(`    created ${chopRows.length} chop(s)`);
@@ -2314,7 +2414,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
         mono,
         sampleRate: buffer.sampleRate,
         zipBatch,
-        detectedBpm: kt.bpm,
+        effectiveBpm,
       });
       oneShotRows = extracted.rows;
       oneShotMarkers = extracted.markers;
@@ -2331,11 +2431,10 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   // always cuts where the editor currently shows, with no separate "commit" step required.
   // *RegionsBaseline is a separate, edit-proof snapshot of the last fresh detection/re-chop, kept
   // only so Revert has something honest to revert to.
-  const key = analysisKey(folder, fileInfo);
   const previous = analysisCache.get(key);
   analysisCache.set(key, {
     signature: detectionSignature(),
-    kt,
+    kt, // raw detection, untouched by any tempoOverrides correction - see effectiveTempo()
     chopRegions,
     chopRegionsBaseline,
     oneShotRegions: oneShotRegions || (previous && previous.oneShotRegions) || null,
@@ -2400,12 +2499,12 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
  * zero-crossing snap, optional time-stretch (main chops only), and fades. Shared by the initial
  * auto-detected pass and by the manual chop editor's "Save & re-export".
  */
-async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, detectedBpm, kt }) {
+async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, effectiveBpm, kt }) {
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
   const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
   const fadeOutSamples = fadeInSamples;
   const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
-  const stretchRatio = resolveStretchRatio(detectedBpm);
+  const stretchRatio = resolveStretchRatio(effectiveBpm);
   // The primary/secondary export model (js/output-scope.js): Output Stage (or, in STRETCH/BOTH,
   // time-stretch too) OFF means the clean chop already IS the primary output, so a secondary clean
   // copy is never written regardless of the "also export clean" checkbox - see wantsCleanSecondary().
@@ -2477,7 +2576,7 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
 
 /** Re-decodes a source file and re-exports its main chops from a manually-edited region list. */
 async function reExportSingleFile(editContext, editedRegions) {
-  const { folder, fileInfo, stem, tag, taggedStem, detectedBpm, kt } = editContext;
+  const { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt } = editContext;
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
@@ -2495,7 +2594,7 @@ async function reExportSingleFile(editContext, editedRegions) {
     channels,
     mono,
     zipBatch,
-    detectedBpm,
+    effectiveBpm,
     kt,
   });
 
@@ -2516,7 +2615,7 @@ async function reExportSingleFile(editContext, editedRegions) {
  * only that one chop.
  */
 async function exportSelectedChop(editContext, region, index) {
-  const { folder, fileInfo, stem, tag, taggedStem, detectedBpm, kt } = editContext;
+  const { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt } = editContext;
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
@@ -2525,7 +2624,7 @@ async function exportSelectedChop(editContext, region, index) {
   const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
   const fadeOutSamples = fadeInSamples;
   const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
-  const stretchRatio = resolveStretchRatio(detectedBpm);
+  const stretchRatio = resolveStretchRatio(effectiveBpm);
 
   let startSample = Math.max(0, Math.round(region[0] * buffer.sampleRate));
   let endSample = Math.min(mono.length, Math.round(region[1] * buffer.sampleRate));
@@ -2607,13 +2706,13 @@ function detectOneShotRegions(mono, sampleRate) {
  * rough sort, not something reliable enough to bake into a filename. Shared by the initial
  * auto-detected pass and by the manual one-shot editor's "Save & re-export".
  */
-async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch, detectedBpm }) {
+async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch, effectiveBpm }) {
   if (regions.length === 0) return { rows: [], markers: [] };
 
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
   // One-shots are raw by default (untouched hits for a sampler) - the stretch/lo-fi chain only
   // touches them when the "also apply to one-shots" scope toggle is on.
-  const stretchRatio = applyProcessingToOneShots ? resolveStretchRatio(detectedBpm) : 1;
+  const stretchRatio = applyProcessingToOneShots ? resolveStretchRatio(effectiveBpm) : 1;
   const processingActive = applyProcessingToOneShots && (stretchRatio !== 1 || lofiActive());
   const wantCleanCopy = wantsCleanSecondary(processingActive, keepUnprocessedCopy);
 
@@ -2687,7 +2786,7 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
 
 /** Re-decodes a source file and re-exports its one-shots from a manually-edited region list. */
 async function reExportOneShots(editContext, editedRegions) {
-  const { folder, fileInfo, taggedStem, detectedBpm } = editContext;
+  const { folder, fileInfo, taggedStem, effectiveBpm } = editContext;
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
@@ -2703,7 +2802,7 @@ async function reExportOneShots(editContext, editedRegions) {
     mono,
     sampleRate: buffer.sampleRate,
     zipBatch,
-    detectedBpm,
+    effectiveBpm,
   });
 
   if (zipBatch) {
@@ -3140,7 +3239,7 @@ function renderFileResult(state) {
     const offset = rechopAlignCheckbox.checked ? findAudibleStart(state.mono, state.sampleRate) : 0;
     const offsetSample = Math.round(offset * state.sampleRate);
     const subMono = offsetSample > 0 ? state.mono.subarray(offsetSample) : state.mono;
-    const bpm = state.editContext ? state.editContext.detectedBpm : null;
+    const bpm = state.editContext ? state.editContext.effectiveBpm : null;
     const regions = computeDrumRegions(subMono, state.sampleRate, bars, bpm).map(([s, e]) => [s + offset, e + offset]);
     applyNewChopRegions(regions);
     log(`  ${state.fileName}: re-chopped by ${bars} bar(s)${offset > 0 ? " aligned to audible start" : ""}.`);

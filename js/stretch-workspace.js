@@ -30,8 +30,23 @@ function fmtSeconds(s) {
  * @param {(mode:string) => void} deps.onModeChange
  * @param {(v:number) => void} deps.onTargetBpmChange   BPM, already rounded/clamped by the caller
  * @param {(v:number) => void} deps.onRatioChange        percent (100 = 1.0x), already rounded/clamped
+ * @param {(v:number) => void} deps.onSourceBpmChange    a typed source-tempo correction, raw (app.js validates/sanitizes)
+ * @param {() => void} deps.onSourceHalve                halve the active file's current effective source tempo
+ * @param {() => void} deps.onSourceDouble               double the active file's current effective source tempo
+ * @param {() => void} deps.onSourceReset                clear the active file's manual correction, falling back to detection
  */
-export function createStretchWorkspace({ container, getAudioContext, color, onModeChange, onTargetBpmChange, onRatioChange }) {
+export function createStretchWorkspace({
+  container,
+  getAudioContext,
+  color,
+  onModeChange,
+  onTargetBpmChange,
+  onRatioChange,
+  onSourceBpmChange,
+  onSourceHalve,
+  onSourceDouble,
+  onSourceReset,
+}) {
   const fileStrip = document.createElement("div");
   fileStrip.className = "stretch-file-strip";
   container.appendChild(fileStrip);
@@ -88,7 +103,80 @@ export function createStretchWorkspace({ container, getAudioContext, color, onMo
     return strong;
   }
 
-  const sourceReadout = makeReadout("Source");
+  // ---- Source tempo (editable) -------------------------------------------
+  //
+  // Not a plain readout like Ratio below: detection can get halved/doubled or simply wrong, so the
+  // source tempo every downstream calculation uses needs to be correctable right here, inline, next
+  // to the ratio it feeds - see onSourceBpmChange/onSourceHalve/onSourceDouble/onSourceReset. Kept
+  // deliberately compact (a number field plus two tiny buttons) rather than a settings panel - the
+  // interaction this is built for is "oh, that's actually 140" - click, type, Enter, done.
+
+  const sourceField = document.createElement("div");
+  sourceField.className = "field stretch-source-field";
+  const sourceLabel = document.createElement("label");
+  sourceLabel.textContent = "Source";
+  sourceLabel.htmlFor = "stretch-source-bpm-input";
+  const sourceRow = document.createElement("div");
+  sourceRow.className = "slider-row stretch-source-row";
+  const sourceInput = document.createElement("input");
+  sourceInput.type = "number";
+  sourceInput.id = "stretch-source-bpm-input";
+  sourceInput.className = "slider-number stretch-source-input";
+  sourceInput.min = "0";
+  sourceInput.step = "1";
+  sourceInput.placeholder = "–";
+  const sourceUnit = document.createElement("span");
+  sourceUnit.className = "slider-unit";
+  sourceUnit.textContent = "BPM";
+  const halveBtn = document.createElement("button");
+  halveBtn.type = "button";
+  halveBtn.className = "btn btn--ghost stretch-source-mini-btn";
+  halveBtn.textContent = "½";
+  halveBtn.title = "Halve the source tempo - fixes a double-time detection error";
+  halveBtn.addEventListener("click", () => onSourceHalve());
+  const doubleBtn = document.createElement("button");
+  doubleBtn.type = "button";
+  doubleBtn.className = "btn btn--ghost stretch-source-mini-btn";
+  doubleBtn.textContent = "×2";
+  doubleBtn.title = "Double the source tempo - fixes a half-time detection error";
+  doubleBtn.addEventListener("click", () => onSourceDouble());
+  sourceRow.append(sourceInput, sourceUnit, halveBtn, doubleBtn);
+
+  const sourceSub = document.createElement("div");
+  sourceSub.className = "stretch-source-sub";
+  const sourceManualBadge = document.createElement("span");
+  sourceManualBadge.className = "stretch-source-manual-badge";
+  sourceManualBadge.textContent = "manual";
+  const sourceDetectedNote = document.createElement("span");
+  sourceDetectedNote.className = "stretch-source-detected";
+  const sourceResetBtn = document.createElement("button");
+  sourceResetBtn.type = "button";
+  sourceResetBtn.className = "btn-link stretch-source-reset";
+  sourceResetBtn.textContent = "reset to detected";
+  sourceResetBtn.addEventListener("click", () => onSourceReset());
+  sourceSub.append(sourceManualBadge, sourceDetectedNote, sourceResetBtn);
+
+  sourceField.append(sourceLabel, sourceRow, sourceSub);
+  timeGrid.appendChild(sourceField);
+
+  // Last value setTimeTarget() was told about, so committing an emptied/garbage edit can revert the
+  // input back to it without app.js having to round-trip a redraw just to undo a bad keystroke.
+  let currentSourceBpm = null;
+  function refreshSourceInput() {
+    sourceInput.value = currentSourceBpm != null ? String(Math.round(currentSourceBpm)) : "";
+  }
+  // Fires on blur/Enter, not per-keystroke - the same commit model every other typed field in this
+  // panel uses (see targetBpmField/ratioField below), which is what keeps an emptied-then-retyped
+  // field from corrupting state mid-edit: nothing reaches app.js until the value settles.
+  sourceInput.addEventListener("change", () => {
+    const raw = sourceInput.value.trim();
+    const v = Number(raw);
+    if (raw === "" || !Number.isFinite(v) || v <= 0) {
+      refreshSourceInput(); // invalid/empty - just redraw the last-known value, don't touch state
+      return;
+    }
+    onSourceBpmChange(v);
+  });
 
   function makeSliderField(labelText, { min, max, step, unit }) {
     const field = document.createElement("div");
@@ -142,14 +230,33 @@ export function createStretchWorkspace({ container, getAudioContext, color, onMo
   const ratioReadout = makeReadout("Ratio");
   container.appendChild(timeTarget);
 
-  /** Cheap: no rebuild, just reflects current settings - call on every settings/active-file change. */
-  function setTimeTarget({ mode, targetBpm, ratioPct, detectedBpmText, resolvedRatioText }) {
+  /**
+   * Cheap: no rebuild, just reflects current settings - call on every settings/active-file change.
+   * `sourceBpm` is the active file's EFFECTIVE tempo (detected, possibly overridden) - what the input
+   * displays and what ½/×2 operate on. `isManual` and `detectedBpm` (the raw, un-overridden value)
+   * drive the "manual"/"Detected: N BPM"/Reset sub-row. `canEdit` is false only when there's no active
+   * file at all to correct.
+   */
+  function setTimeTarget({ mode, targetBpm, ratioPct, sourceBpm, isManual, detectedBpm, canEdit, resolvedRatioText }) {
     modeSelect.value = mode;
     targetBpmField.field.hidden = mode !== "target-tempo";
     ratioField.field.hidden = mode !== "fixed-ratio";
     if (document.activeElement !== targetBpmField.number) targetBpmField.slider.value = targetBpmField.number.value = String(targetBpm);
     if (document.activeElement !== ratioField.number) ratioField.slider.value = ratioField.number.value = String(ratioPct);
-    sourceReadout.textContent = detectedBpmText;
+
+    currentSourceBpm = sourceBpm;
+    if (document.activeElement !== sourceInput) refreshSourceInput();
+    sourceInput.disabled = !canEdit;
+    halveBtn.disabled = doubleBtn.disabled = !canEdit || sourceBpm == null;
+    sourceField.classList.toggle("is-manual", !!isManual);
+    sourceSub.hidden = !isManual;
+    if (isManual) {
+      const canReset = detectedBpm != null;
+      sourceResetBtn.hidden = !canReset;
+      sourceDetectedNote.hidden = !canReset;
+      sourceDetectedNote.textContent = canReset ? `detected: ${Math.round(detectedBpm)} BPM` : "";
+    }
+
     ratioReadout.textContent = resolvedRatioText;
   }
 

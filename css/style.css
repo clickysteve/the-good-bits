@@ -853,6 +853,41 @@ input[type="range"]::-moz-range-thumb {
 .stretch-time-readout strong { font-size: 15px; }
 .stretch-time-slider-field { flex: 1 1 220px; min-width: 200px; }
 
+/* Source tempo - editable, unlike the plain Ratio readout beside it (see createStretchWorkspace()'s
+   "Source tempo (editable)" section). Kept to the same compact footprint as the other Time/Target
+   fields; the manual/detected sub-row only ever appears once there's actually a correction to show. */
+.stretch-source-field { flex: 0 0 auto; min-width: 152px; }
+.stretch-source-mini-btn {
+  padding: 3px 7px;
+  font-size: 12px;
+  line-height: 1;
+  min-width: 1.9rem;
+}
+.stretch-source-sub {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.stretch-source-sub[hidden] { display: none; }
+.stretch-source-manual-badge {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  background: rgba(255, 75, 59, .1);
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+  line-height: 1.5;
+}
+.stretch-source-detected { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.stretch-source-reset { font-size: 10.5px; padding: 0; }
+
 .stretch-ab { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
 
 .stretch-pane {

@@ -12,19 +12,27 @@
  * there's nothing to mark stale. Key order doesn't matter for correctness (JSON.stringify on a
  * plain object is deterministic for a given engine, and both sides of every comparison here are
  * produced by this same function), only that the same shape of input always produces the same string.
+ *
+ * `sourceBpm` (the source file's EFFECTIVE tempo - see effectiveTempo() in app.js) only ever affects
+ * the render in "target-tempo" mode, where it feeds the stretch ratio; "fixed-ratio" mode's ratio is
+ * user-set and doesn't depend on it at all. Folding it in unconditionally would mark a fixed-ratio
+ * preview stale (and force a byte-identical re-render) every time a source BPM correction happened to
+ * touch the active file, so it's only mixed into the signature for the mode where it actually matters.
  */
-export function stretchRenderSignature(timestretchSettings, lofiSnapshot) {
-  return JSON.stringify({ ts: timestretchSettings, lofi: lofiSnapshot });
+export function stretchRenderSignature(timestretchSettings, lofiSnapshot, sourceBpm) {
+  const bpm = timestretchSettings.mode === "target-tempo" ? sourceBpm ?? null : null;
+  return JSON.stringify({ ts: timestretchSettings, lofi: lofiSnapshot, bpm });
 }
 
 /**
  * Whether a previously-rendered "processed" preview (captured with `renderedSignature` at the time
- * it was computed) still matches the CURRENT settings. `null`/`undefined` renderedSignature (nothing
- * has been processed yet) is never stale - there's no stale preview on screen to warn about.
+ * it was computed) still matches the CURRENT settings (and, in target-tempo mode, the current source
+ * BPM). `null`/`undefined` renderedSignature (nothing has been processed yet) is never stale - there's
+ * no stale preview on screen to warn about.
  */
-export function isProcessedPreviewStale(renderedSignature, timestretchSettings, lofiSnapshot) {
+export function isProcessedPreviewStale(renderedSignature, timestretchSettings, lofiSnapshot, sourceBpm) {
   if (!renderedSignature) return false;
-  return renderedSignature !== stretchRenderSignature(timestretchSettings, lofiSnapshot);
+  return renderedSignature !== stretchRenderSignature(timestretchSettings, lofiSnapshot, sourceBpm);
 }
 
 /**

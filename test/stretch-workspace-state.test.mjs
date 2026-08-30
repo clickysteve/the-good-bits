@@ -45,6 +45,40 @@ test("isProcessedPreviewStale: matching signature is not stale, a settings chang
   assert.equal(isProcessedPreviewStale(rendered, changed, baseLofi), true);
 });
 
+// --- sourceBpm - user-correctable source tempo (ANALYSIS PROPOSES, USER OVERRIDES) --------------
+//
+// In "target-tempo" mode the rendered ratio is detectedBpm/targetBpm, so a source BPM correction
+// must change the render exactly like a target-tempo change would; in "fixed-ratio" mode the ratio
+// is user-set and doesn't depend on source tempo at all, so a correction there must NOT force a
+// re-render of otherwise-identical audio.
+
+test("stretchRenderSignature: in target-tempo mode, a different source BPM changes the signature", () => {
+  const a = stretchRenderSignature(baseSettings, baseLofi, 70);
+  const b = stretchRenderSignature(baseSettings, baseLofi, 140);
+  assert.notEqual(a, b);
+});
+
+test("stretchRenderSignature: in fixed-ratio mode, source BPM is irrelevant and never changes the signature", () => {
+  const fixedRatioSettings = { ...baseSettings, mode: "fixed-ratio" };
+  const a = stretchRenderSignature(fixedRatioSettings, baseLofi, 70);
+  const b = stretchRenderSignature(fixedRatioSettings, baseLofi, 140);
+  const none = stretchRenderSignature(fixedRatioSettings, baseLofi, null);
+  assert.equal(a, b);
+  assert.equal(a, none);
+});
+
+test("isProcessedPreviewStale: a source BPM correction (½/×2/typed/Reset) marks a target-tempo preview stale", () => {
+  const rendered = stretchRenderSignature(baseSettings, baseLofi, 70);
+  assert.equal(isProcessedPreviewStale(rendered, baseSettings, baseLofi, 70), false);
+  assert.equal(isProcessedPreviewStale(rendered, baseSettings, baseLofi, 140), true, "×2 (70 -> 140) must invalidate the cached preview");
+});
+
+test("isProcessedPreviewStale: the same correction is a no-op in fixed-ratio mode - no forced re-render where source BPM is irrelevant", () => {
+  const fixedRatioSettings = { ...baseSettings, mode: "fixed-ratio" };
+  const rendered = stretchRenderSignature(fixedRatioSettings, baseLofi, 70);
+  assert.equal(isProcessedPreviewStale(rendered, fixedRatioSettings, baseLofi, 140), false);
+});
+
 test("randomiseMacroValues: only touches the character's own macros, leaves other keys and the object identity untouched", () => {
   const character = { macros: ["texture", "variation"] };
   const current = { texture: 10, variation: 20, smear: 77, roughness: 5 };
