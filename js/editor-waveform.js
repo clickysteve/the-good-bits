@@ -383,7 +383,7 @@ export function createEditableWaveform({
       const anchorTime = xToTime(ev.clientX - rect.left, rect.width);
       const unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? rect.height : 1;
       const steps = Math.max(-4, Math.min(4, (ev.deltaY * unit) / 100));
-      zoomAt(anchorTime, Math.pow(1.12, -steps));
+      zoomAt(anchorTime, Math.pow(1.15, -steps));
     },
     { passive: false }
   );
