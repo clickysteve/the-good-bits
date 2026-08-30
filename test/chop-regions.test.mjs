@@ -1,7 +1,7 @@
 // Node-side unit tests for js/chop-regions.js - the pure decision logic behind "Process must
 // preserve user-edited chops". Run with: node test/chop-regions.test.mjs
 import assert from "node:assert/strict";
-import { resolveRegions, replaceRegions, resolveSelection } from "../js/chop-regions.js";
+import { resolveRegions, replaceRegions, resolveSelection, splitRegionAt } from "../js/chop-regions.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -97,6 +97,46 @@ test("resolveSelection: null/undefined previous selection stays unselected", () 
 
 test("resolveSelection: a negative index is never valid", () => {
   assert.equal(resolveSelection(-1, 5), null);
+});
+
+// --- splitRegionAt (double-click-to-split gesture) -------------------------------------------
+
+test("splitRegionAt: splits the containing region at a known time into two regions starting exactly there", () => {
+  const result = splitRegionAt([[0, 4]], 2.3, 0.03);
+  assert.ok(result);
+  assert.deepEqual(result.regions, [[0, 2.3], [2.3, 4]]);
+  assert.equal(result.newIndex, 1, "the new (second) half is the one that should become selected");
+});
+
+test("splitRegionAt: preserves every neighbouring region exactly, only touching the one that contains the split point", () => {
+  const before = [[0, 1], [1, 4], [4, 6]];
+  const result = splitRegionAt(before, 2.3, 0.03);
+  assert.deepEqual(result.regions, [[0, 1], [1, 2.3], [2.3, 4], [4, 6]]);
+  assert.deepEqual(before, [[0, 1], [1, 4], [4, 6]], "must not mutate the input array/regions");
+});
+
+test("splitRegionAt: refuses (returns null) when the split point is effectively on an existing boundary", () => {
+  assert.equal(splitRegionAt([[0, 4]], 0, 0.03), null, "exactly at the region's own start");
+  assert.equal(splitRegionAt([[0, 4]], 4, 0.03), null, "exactly at the region's own end");
+  assert.equal(splitRegionAt([[0, 1], [1, 4]], 1, 0.03), null, "exactly on a shared boundary between two regions");
+});
+
+test("splitRegionAt: refuses when the split point is too close to a neighbouring boundary to leave a valid region", () => {
+  assert.equal(splitRegionAt([[0, 4]], 0.02, 0.03), null, "0.02s from the start, under the 0.03s minimum");
+  assert.equal(splitRegionAt([[0, 4]], 3.99, 0.03), null, "0.01s from the end, under the 0.03s minimum");
+});
+
+test("splitRegionAt: never produces a zero-length or invalid-length region - every result respects the minimum", () => {
+  const result = splitRegionAt([[0, 4]], 0.03, 0.03);
+  assert.ok(result, "exactly at the minimum distance from the start is a valid split");
+  assert.deepEqual(result.regions, [[0, 0.03], [0.03, 4]]);
+  for (const [s, e] of result.regions) assert.ok(e - s >= 0.03, `region [${s}, ${e}] is shorter than the minimum`);
+});
+
+test("splitRegionAt: a time outside every region (e.g. a gap, or past the end) is refused rather than fabricating one", () => {
+  assert.equal(splitRegionAt([[0, 1], [2, 3]], 1.5, 0.03), null, "in the gap between two regions");
+  assert.equal(splitRegionAt([[0, 1]], 5, 0.03), null, "past the end of the only region");
+  assert.equal(splitRegionAt([], 0.5, 0.03), null, "no regions at all");
 });
 
 console.log(`\n${passed} test(s) passed.`);

@@ -2266,11 +2266,29 @@ async function writeOutput(folder, subdir, relDir, fileName, blob, zipBatch) {
   // nothing reaches the disk until Export. This is the only place the app writes audio, which
   // is what makes the dry run trustworthy rather than a best-effort imitation.
   if (dryRun) return;
+  // Records which subdir(s) (chops/wav/one shots) actually got written for this folder, so the
+  // post-export summary can show a real destination instead of guessing from settings - see
+  // describeFsaDestination() below. Reset at the top of processBatch() so a stale set from a
+  // previous run can't survive into a run that skips this folder entirely.
+  if (!folder.writtenSubdirs) folder.writtenSubdirs = new Set();
+  folder.writtenSubdirs.add(subdir);
   if (folder.kind === "fsa") {
     await writeFileFSA(folder.handle, subdir, relDir, fileName, blob);
   } else {
     zipBatch.addFile(folder.name, subdir, relDir, fileName, blob);
   }
+}
+
+/** The label to show for where a folder's output landed: the picker-chosen destination folder for
+ * loose individually-picked files, or the folder's own name otherwise. Not a full filesystem path -
+ * the File System Access API deliberately never exposes one - but it's the real name of the folder
+ * output was written directly into, which is the most useful truthful thing available. */
+function describeFsaDestination(folder) {
+  if (folder.kind !== "fsa") return null;
+  if (!folder.writtenSubdirs || folder.writtenSubdirs.size === 0) return null;
+  const label = folder.isLoose ? folder.destinationLabel : folder.name;
+  const subdirs = [...folder.writtenSubdirs].sort().map((d) => `${d}/`).join(", ");
+  return `"${label}" → ${subdirs}`;
 }
 
 /** Processes one source audio file: decode, analyze, export chops. Returns the number of chops made. */
@@ -3331,6 +3349,9 @@ async function processBatch({ write = true } = {}) {
   resultsPanel.innerHTML = "";
   drumTempoSkipPolicy = null;
   log(write ? "Exporting…" : "Processing. Nothing is saved until you hit Export.");
+  // Cleared up front, not just left to be overwritten - a folder skipped entirely this run (no
+  // included files, permission denied) must not keep showing a destination from a previous run.
+  for (const f of sourceFolders) f.writtenSubdirs = null;
 
   if (task === "stretch") {
     // Usually a no-op (renderFolderList() already keeps this current as files are added/removed) -
@@ -3403,7 +3424,18 @@ async function processBatch({ write = true } = {}) {
   if (zipBatch) {
     log(cancelRequested ? "Building ZIP for download (partial - batch was cancelled)…" : "Building ZIP for download…");
     await zipBatch.downloadAs("auto_sample_chopper_output.zip");
-    log("ZIP download started.");
+    // A browser download never exposes the resulting filesystem path to a page (deliberately, for
+    // sandboxing) - the truthful thing we can say is the filename and that it went to the browser's
+    // normal download destination.
+    log('Downloaded "auto_sample_chopper_output.zip" - saved to your browser\'s Downloads location (or wherever you chose, if it prompted).');
+  }
+
+  if (!dryRun) {
+    const destinations = sourceFolders.map(describeFsaDestination).filter(Boolean);
+    if (destinations.length > 0) {
+      log("Written directly into:");
+      for (const d of destinations) log(`  ${d}`);
+    }
   }
 
   if (task === "stretch") {

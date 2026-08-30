@@ -51,3 +51,26 @@ export function replaceRegions(newRegions) {
 export function resolveSelection(previousIndex, regionCount) {
   return previousIndex != null && previousIndex >= 0 && previousIndex < regionCount ? previousIndex : null;
 }
+
+/**
+ * The double-click-to-split gesture (js/editor-waveform.js): splits whichever canonical region
+ * contains `time` into two, right at that point, leaving every other region untouched. Refuses -
+ * returns null rather than clamping or fabricating an overlapping region - when there's no
+ * containing region, or `time` sits close enough to either of that region's own edges that one
+ * resulting half would be shorter than `minSliceSec`. That distance check is also what rejects a
+ * click that's effectively ON an existing boundary: a point that close to an edge can't be more
+ * than `minSliceSec` inside its region either.
+ * @param {[number,number][]} regions - canonical regions, sorted by start, non-overlapping
+ * @param {number} time
+ * @param {number} minSliceSec
+ * @returns {{regions:[number,number][], newIndex:number}|null}
+ */
+export function splitRegionAt(regions, time, minSliceSec) {
+  const idx = regions.findIndex(([s, e]) => time >= s && time <= e);
+  if (idx === -1) return null;
+  const [s, e] = regions[idx];
+  if (time - s < minSliceSec || e - time < minSliceSec) return null;
+  const next = regions.map((r) => [...r]);
+  next.splice(idx, 1, [s, time], [time, e]);
+  return { regions: next, newIndex: idx + 1 };
+}

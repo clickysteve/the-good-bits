@@ -3,7 +3,13 @@
 // data shaped like a FileList, so they're testable without a browser).
 // Run with: node test/io-fs.test.mjs
 import assert from "node:assert/strict";
-import { collectAudioFilesLegacy, collectIndividualFilesLegacy, clearOldNumberedFilesFSA, clearOldChopsFSA } from "../js/io-fs.js";
+import {
+  collectAudioFilesLegacy,
+  collectIndividualFilesLegacy,
+  clearOldNumberedFilesFSA,
+  clearOldChopsFSA,
+  collectAudioFilesFSA,
+} from "../js/io-fs.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -155,6 +161,49 @@ await asyncTest("clearOldChopsFSA: a first-ever export (no chops/ directory yet)
   const root = fakeDir();
   await assert.doesNotReject(() => clearOldChopsFSA(root, "", "take1"));
   assert.equal(root.dirs.has("chops"), false);
+});
+
+// --- collectAudioFilesFSA: recursive traversal of File System Access API directory handles ------
+// (fakeDir()'s entries() already yields nested directory handles the same shape a real
+// FileSystemDirectoryHandle does, so it exercises the real recursion in collectAudioFilesFSA.)
+
+await asyncTest("collectAudioFilesFSA: finds files nested arbitrarily deep, not just directly inside the picked folder", async () => {
+  const root = fakeDir(
+    { "drums.wav": true },
+    { Vocals: fakeDir({ "take1.wav": true }, { More: fakeDir({ "take2.wav": true }) }) }
+  );
+  const files = await collectAudioFilesFSA(root);
+  const found = files.map((f) => (f.relativeDir ? `${f.relativeDir}/${f.name}` : f.name)).sort();
+  assert.deepEqual(found, ["Vocals/More/take2.wav", "Vocals/take1.wav", "drums.wav"]);
+});
+
+await asyncTest("collectAudioFilesFSA: ignores unsupported file types found in a nested subfolder", async () => {
+  const root = fakeDir({}, { Sub: fakeDir({ "notes.txt": true, "take.wav": true, "cover.png": true }) });
+  const files = await collectAudioFilesFSA(root);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].name, "take.wav");
+});
+
+await asyncTest("collectAudioFilesFSA: same basename in two different nested subfolders stay distinct via relativeDir", async () => {
+  const root = fakeDir({}, {
+    A: fakeDir({ "loop.wav": true }),
+    B: fakeDir({ "loop.wav": true }),
+  });
+  const files = await collectAudioFilesFSA(root);
+  assert.equal(files.length, 2, "both files must be discovered, not deduped/collided into one");
+  const keys = files.map((f) => `${f.relativeDir}/${f.name}`).sort();
+  assert.deepEqual(keys, ["A/loop.wav", "B/loop.wav"]);
+  // Distinct handle identity too, not just distinct-looking descriptors aliasing the same handle.
+  assert.notStrictEqual(files[0].fsaHandle, files[1].fsaHandle);
+});
+
+await asyncTest("collectAudioFilesFSA: excludes a nested 'chops'/'wav' output segment, at any depth", async () => {
+  const root = fakeDir({}, {
+    Session: fakeDir({ "take1.wav": true }, { chops: fakeDir({ "01.wav": true }) }),
+  });
+  const files = await collectAudioFilesFSA(root);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].name, "take1.wav");
 });
 
 console.log(`\n${passed} test(s) passed.`);
