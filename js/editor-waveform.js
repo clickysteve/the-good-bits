@@ -429,7 +429,8 @@ export function createEditableWaveform({
     if (b) {
       dragging = { kind: "boundary", refs: b.refs };
       // selecting the slice this edge belongs to keeps the list highlight in step with the drag
-      select(b.refs[0].idx);
+      const startRef = b.refs.find((r) => r.which === "s");
+      select(startRef != null ? startRef.idx : b.refs[0].idx);
       canvas.classList.add("waveform-canvas--dragging");
       return;
     }
