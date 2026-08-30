@@ -69,6 +69,7 @@ export function createEditableWaveform({
   };
 
   const playBtn = mkBtn("▶ Play", `Play the selected ${noun} (Space)`);
+  const stopBtn = mkBtn("■ Stop", "Stop playback (Esc)");
   const addBtn = mkBtn("+ Add", `Add a ${noun} (or double-click the waveform)`);
   const deleteBtn = mkBtn("Delete", `Delete the selected ${noun} (Delete)`);
   const zoomOutBtn = mkBtn("−", "Zoom out");
@@ -76,7 +77,7 @@ export function createEditableWaveform({
   const fitBtn = mkBtn("Fit", "Zoom to fit");
   const zoomLabel = document.createElement("span");
   zoomLabel.className = "editable-waveform-zoom-label";
-  toolbar.append(playBtn, addBtn, deleteBtn, zoomOutBtn, zoomInBtn, fitBtn, zoomLabel);
+  toolbar.append(playBtn, stopBtn, addBtn, deleteBtn, zoomOutBtn, zoomInBtn, fitBtn, zoomLabel);
   wrap.appendChild(toolbar);
 
   const canvas = document.createElement("canvas");
@@ -347,6 +348,7 @@ export function createEditableWaveform({
   addBtn.addEventListener("click", () => addSliceAt(viewStart + viewDuration / 2));
   deleteBtn.addEventListener("click", deleteSelected);
   playBtn.addEventListener("click", playSelected);
+  stopBtn.addEventListener("click", stopPlayback);
   zoomInBtn.addEventListener("click", () => zoomAt(viewStart + viewDuration / 2, 1.6));
   zoomOutBtn.addEventListener("click", () => zoomAt(viewStart + viewDuration / 2, 1 / 1.6));
   fitBtn.addEventListener("click", () => setView(0, duration));
@@ -362,7 +364,8 @@ export function createEditableWaveform({
       if (currentSource) stopPlayback();
       else playSelected();
     } else if (ev.key === "Escape") {
-      select(null);
+      if (currentSource) stopPlayback();
+      else select(null);
     } else if (ev.key === "ArrowRight" || ev.key === "ArrowLeft") {
       if (!slices.length) return;
       ev.preventDefault();
@@ -498,6 +501,7 @@ export function createEditableWaveform({
     getSelected: () => selected,
     select,
     playSelected,
+    stopPlayback,
     redraw,
     destroy: () => {
       stopPlayback();
