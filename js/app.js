@@ -35,7 +35,17 @@ import { sanitizeSourceBpm, resolveEffectiveTempo, formatBpmText } from "./tempo
 import { APP_VERSION } from "./version.js";
 import { createEditableWaveform } from "./editor-waveform.js";
 import { resolveRegions, replaceRegions, resolveSelection } from "./chop-regions.js";
-import { isIncluded, normalizeIncludedFiles, includedFiles, setAllIncluded, noFilesIncluded, resolveActiveKey } from "./file-inclusion.js";
+import {
+  isIncluded,
+  normalizeIncludedFiles,
+  includedFiles,
+  setAllIncluded,
+  noFilesIncluded,
+  resolveActiveKey,
+  isExportIncluded,
+  normalizeExportIncludedFiles,
+  noFilesExportIncluded,
+} from "./file-inclusion.js";
 import {
   AUDIO_EXTS,
   supportsFileSystemAccess,
@@ -153,13 +163,14 @@ const sourceFolders = []; // {id, name, kind:'fsa'|'legacy', handle?, isLoose?, 
 /**
  * The single place a folder descriptor enters sourceFolders, so every source path (an FSA folder
  * pick, the split-subfolders branch, legacy webkitdirectory, drag-and-drop, individually-picked
- * files, a reconnect) stamps `included: true` onto its files the same way - see js/file-inclusion.js.
- * A file discovered this way is eligible for Process/Export until the picker's checkbox says
- * otherwise; nothing downstream (processBatch, the STRETCH file strip, updateProcessButton) needs to
- * know how the file got here, only whether `.included` is currently false.
+ * files, a reconnect) stamps `included: true` AND `exportIncluded: true` onto its files the same way -
+ * see js/file-inclusion.js for what each flag means and why they're kept separate. A file discovered
+ * this way is eligible for Process until the picker's checkbox says otherwise, and eligible for
+ * Export until its own per-file card's "include in export" toggle says otherwise; nothing downstream
+ * needs to know how the file got here, only whether `.included`/`.exportIncluded` are currently false.
  */
 function pushSourceFolder(descriptor) {
-  descriptor.files = normalizeIncludedFiles(descriptor.files);
+  descriptor.files = normalizeExportIncludedFiles(normalizeIncludedFiles(descriptor.files));
   sourceFolders.push(descriptor);
 }
 
@@ -1801,10 +1812,24 @@ function updateProcessButton() {
   // noFilesIncluded() (js/file-inclusion.js) covers both "nothing added yet" and "everything added
   // was unchecked in the file picker" - Process/Export must refuse to run in either case rather than
   // silently doing nothing or throwing on an empty batch.
-  const disabled = processing || sourceFolders.length === 0 || noFilesIncluded(sourceFolders);
-  processBtn.disabled = disabled;
-  previewBtn.disabled = disabled;
+  const noJobFiles = sourceFolders.length === 0 || noFilesIncluded(sourceFolders);
+  previewBtn.disabled = processing || noJobFiles;
+  // Export (processBtn - see the id/label mismatch noted where it's declared) additionally refuses to
+  // run when every job-included file has "Include in export" off. Process stays enabled regardless -
+  // that decision is deliberately export-only, so a user can keep previewing/editing/auditioning
+  // after excluding every source from export, right up until they flip one back on. See
+  // noFilesExportIncluded() (js/file-inclusion.js) and processBatch()'s own zero-exportable-files
+  // guard, which handles the case where this got stale between renders.
+  processBtn.disabled = processing || noJobFiles || noFilesExportIncluded(sourceFolders);
   cancelBtn.hidden = !processing;
+}
+
+/** Fired when a per-file "include in export" toggle changes (the file card, or the per-folder bulk
+ * Include all/Exclude all links) - lighter than onFileInclusionChanged() above since export
+ * inclusion doesn't affect the picker list or the STRETCH file strip, only whether the Export button
+ * itself is currently usable. */
+function onExportInclusionChanged() {
+  updateProcessButton();
 }
 
 /**
@@ -2276,12 +2301,18 @@ function sliceChannels(channels, startSample, endSample) {
   return channels.map((ch) => ch.slice(startSample, endSample));
 }
 
-async function writeOutput(folder, subdir, relDir, fileName, blob, zipBatch) {
+async function writeOutput(folder, subdir, relDir, fileName, blob, zipBatch, fileInfo) {
   // Preview runs the entire pipeline and skips exactly one thing: this. Every blob is still
   // produced, so the results panel gets real audio to audition and real waveforms to edit -
   // nothing reaches the disk until Export. This is the only place the app writes audio, which
   // is what makes the dry run trustworthy rather than a best-effort imitation.
   if (dryRun) return;
+  // The single choke point for the "Include in export" toggle (js/file-inclusion.js): every export
+  // write in the app passes through here, so gating it in this one place - rather than in every
+  // caller - automatically covers chops, one-shots, their clean copies, the wav/ full-track copy, and
+  // the slice-marker WAV alike. Processing itself already ran regardless (this is called after the
+  // audio was rendered) - only the disk/zip write for this specific source is skipped.
+  if (!isExportIncluded(fileInfo)) return;
   // Records which subdir(s) (chops/wav/one shots) actually got written for this folder, so the
   // post-export summary can show a real destination instead of guessing from settings - see
   // describeFsaDestination() below. Reset at the top of processBatch() so a stale set from a
@@ -2355,7 +2386,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   // analyzed and chopped in place, with nothing duplicated into wav/.
   if (fileInfo.ext !== ".wav") {
     const wavBlob = encodeWav(channels, buffer.sampleRate, 24);
-    await writeOutput(folder, "wav", fileInfo.relativeDir, `${taggedStem}.wav`, wavBlob, zipBatch);
+    await writeOutput(folder, "wav", fileInfo.relativeDir, `${taggedStem}.wav`, wavBlob, zipBatch, fileInfo);
     log(`    converted to WAV (${method})`);
   }
 
@@ -2376,8 +2407,12 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     const derivedBlob = await renderStretchAudio(channels, buffer.sampleRate, fullStretchRatio);
     if (fullStretched || fullLofi) {
       const derivedName = `${taggedStem}${fullStretched ? " stretched" : ""}${fullLofi ? " lofi" : ""}.wav`;
-      await writeOutput(folder, "wav", fileInfo.relativeDir, derivedName, derivedBlob, zipBatch);
-      log(`    wrote a full-length ${[fullStretched && "time-stretched", fullLofi && "lo-fi"].filter(Boolean).join(" + ")} copy`);
+      await writeOutput(folder, "wav", fileInfo.relativeDir, derivedName, derivedBlob, zipBatch, fileInfo);
+      // Same "don't claim a write that writeOutput() actually skipped" rule as exportMarkerWavForFile -
+      // only relevant for a real Export (dryRun already means nothing was ever going to be written).
+      if (dryRun || isExportIncluded(fileInfo)) {
+        log(`    wrote a full-length ${[fullStretched && "time-stretched", fullLofi && "lo-fi"].filter(Boolean).join(" + ")} copy`);
+      }
     }
     if (task === "stretch") {
       stretchProcessedForWorkspace = await decodeStretchPreview(derivedBlob, resolveCharacter(timestretchSettings.character).label, fullStretchRatio, effectiveBpm);
@@ -2532,7 +2567,10 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   };
   const block = renderFileResult(state);
   folderResultsEl.appendChild(block);
-  return chopRows.length;
+  // During Preview (dryRun) chopRows.length is exactly right: "how many chops are there to review".
+  // During a real Export, an export-disabled source wrote nothing, so it must not add to the
+  // "Exported N chop(s)" summary just because its chops were still rendered for audition.
+  return dryRun || isExportIncluded(fileInfo) ? chopRows.length : 0;
 }
 
 /**
@@ -2561,7 +2599,10 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
   // Deleting the previous run's chops is a write too, so a preview must not do it either. Skipped
   // entirely in markers mode: this run isn't writing chops/ at all, so it has no business deleting
   // whatever individual chops happen to already be sitting there from an earlier "Individual WAVs" run.
-  if (writeIndividualFiles && folder.kind === "fsa" && !dryRun) {
+  // Also skipped when this source's "Include in export" is off - an export-disabled source must be
+  // left completely untouched on disk this run, not have its previous (still-valid) export deleted
+  // out from under it just because this particular run isn't allowed to write a fresh one.
+  if (writeIndividualFiles && isExportIncluded(fileInfo) && folder.kind === "fsa" && !dryRun) {
     await clearOldChopsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
     // Cleared unconditionally (same idempotent-rerun logic as above) so a "chops clean/" left
     // behind from a previous run with the toggle on doesn't linger once it's turned off.
@@ -2614,9 +2655,9 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
     const { blob, seconds } = heavyResults[i];
     const fileName = buildChopFileName(stem, tag, i + 1, kt);
     if (writeIndividualFiles) {
-      await writeOutput(folder, "chops", relPath, fileName, blob, zipBatch);
+      await writeOutput(folder, "chops", relPath, fileName, blob, zipBatch, fileInfo);
       if (wantCleanCopy) {
-        await writeOutput(folder, "chops clean", relPath, fileName, cleanBlobs[i], zipBatch);
+        await writeOutput(folder, "chops clean", relPath, fileName, cleanBlobs[i], zipBatch, fileInfo);
       }
     }
     chopRows.push({ fileName, blob, seconds });
@@ -2650,7 +2691,12 @@ async function exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions, c
   const { ok, count, limit } = checkM8MarkerLimit(cueFrames.length);
   const blob = encodeWav(channels, sampleRate, exportSettings.bitDepth, { cuePoints: cueFrames });
   const fileName = `${taggedStem} slices.wav`;
-  await writeOutput(folder, "wav", fileInfo.relativeDir, fileName, blob, zipBatch);
+  await writeOutput(folder, "wav", fileInfo.relativeDir, fileName, blob, zipBatch, fileInfo);
+  // A real Export (not a dry-run Preview) with this source's "Include in export" off means
+  // writeOutput() above silently skipped the write - the per-file toggle already logged that this
+  // source is excluded, so don't also claim a marker WAV was written (or warn about its marker count)
+  // for a file that has none.
+  if (!dryRun && !isExportIncluded(fileInfo)) return;
   if (ok) {
     log(`    wrote ${fileName} with ${count} slice marker(s) (M8-compatible)`);
   } else {
@@ -2811,7 +2857,8 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
   const processingActive = applyProcessingToOneShots && (stretchRatio !== 1 || lofiActive());
   const wantCleanCopy = wantsCleanSecondary(processingActive, keepUnprocessedCopy);
 
-  if (folder.kind === "fsa" && !dryRun) {
+  // Same "leave an export-disabled source's disk state alone" rule as exportChopsForRegions above.
+  if (isExportIncluded(fileInfo) && folder.kind === "fsa" && !dryRun) {
     await clearOldOneShotsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
     await clearOldNumberedFilesFSA(folder.handle, "one shots clean", fileInfo.relativeDir, taggedStem);
   }
@@ -2868,9 +2915,9 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
     const { startSample, endSample } = regionDefs[i];
     const { blob, seconds } = heavyResults[i];
     const fileName = `${String(i + 1).padStart(2, "0")}.wav`;
-    await writeOutput(folder, "one shots", relPath, fileName, blob, zipBatch);
+    await writeOutput(folder, "one shots", relPath, fileName, blob, zipBatch, fileInfo);
     if (wantCleanCopy) {
-      await writeOutput(folder, "one shots clean", relPath, fileName, cleanBlobs[i], zipBatch);
+      await writeOutput(folder, "one shots clean", relPath, fileName, cleanBlobs[i], zipBatch, fileInfo);
     }
     rows.push({ fileName, blob, seconds });
     markers.push([startSample / sampleRate, endSample / sampleRate]);
@@ -2911,12 +2958,55 @@ async function reExportOneShots(editContext, editedRegions) {
 // Results UI (audition panel)
 // ---------------------------------------------------------------------------
 
+/**
+ * Bulk "include in export"/"exclude from export" links for one folder's result section. Scoped to
+ * whichever file cards already exist under `section` at click time (it's a live DOM node - file
+ * cards keep getting appended to it as processOneFile runs, so this reaches every card that's there
+ * by the time the user actually clicks it, i.e. once the batch has finished and review has started).
+ * A job-excluded file never gets a card at all, so it has no toggle here to touch either way - its
+ * own `included` flag already keeps it out of export regardless of `exportIncluded`.
+ *
+ * Reuses each card's own checkbox `change` handler (dispatching a real event) rather than mutating
+ * fileInfo.exportIncluded directly, so the per-file class toggle, log line, and Export-Selected-state
+ * refresh all happen exactly once, in exactly one place.
+ */
+function setFolderSectionExportIncluded(section, included) {
+  for (const box of section.querySelectorAll(".result-export-toggle input")) {
+    if (box.checked !== included) {
+      box.checked = included;
+      box.dispatchEvent(new Event("change"));
+    }
+  }
+}
+
 function renderFolderResultSection(folder) {
   const section = document.createElement("div");
   section.className = "result-folder";
+
+  const headingRow = document.createElement("div");
+  headingRow.className = "result-folder-heading-row";
   const heading = document.createElement("h3");
   heading.textContent = folder.name;
-  section.appendChild(heading);
+  headingRow.appendChild(heading);
+
+  const bulkExportRow = document.createElement("div");
+  bulkExportRow.className = "result-folder-export-bulk";
+  const includeAllBtn = document.createElement("button");
+  includeAllBtn.type = "button";
+  includeAllBtn.className = "btn-link";
+  includeAllBtn.textContent = "Include all in export";
+  includeAllBtn.title = "Turn “include in export” on for every source shown in this folder";
+  includeAllBtn.addEventListener("click", () => setFolderSectionExportIncluded(section, true));
+  const excludeAllBtn = document.createElement("button");
+  excludeAllBtn.type = "button";
+  excludeAllBtn.className = "btn-link";
+  excludeAllBtn.textContent = "Exclude all from export";
+  excludeAllBtn.title = "Turn “include in export” off for every source shown in this folder";
+  excludeAllBtn.addEventListener("click", () => setFolderSectionExportIncluded(section, false));
+  bulkExportRow.append(includeAllBtn, excludeAllBtn);
+  headingRow.appendChild(bulkExportRow);
+
+  section.appendChild(headingRow);
   resultsPanel.appendChild(section);
   return section;
 }
@@ -3022,6 +3112,34 @@ function renderFileResult(state) {
 
   const actionsGroup = document.createElement("div");
   actionsGroup.className = "result-file-header-actions";
+
+  // File-level export eligibility (js/file-inclusion.js) - separate from, and evaluated after,
+  // whichever chop/one-shot is selected below. Turning this off never touches processing, the
+  // waveform, chops, playback, or canonical regions - it only stops writeOutput() (app.js, the single
+  // choke point every export write passes through) from producing anything for this source. The
+  // block-level modifier class is a restrained "not exporting" cue, not a disabled/unavailable look:
+  // every control on this card stays fully interactive either way.
+  if (editContext) {
+    const exportLabel = document.createElement("label");
+    exportLabel.className = "check check--inline result-export-toggle";
+    exportLabel.title = "Untick to leave this source out of Export entirely - processing, editing and playback are unaffected.";
+    const exportBox = document.createElement("input");
+    exportBox.type = "checkbox";
+    exportBox.checked = isExportIncluded(editContext.fileInfo);
+    const exportText = document.createElement("span");
+    exportText.textContent = "include in export";
+    exportLabel.appendChild(exportBox);
+    exportLabel.appendChild(exportText);
+    block.classList.toggle("result-file--export-off", !exportBox.checked);
+    exportBox.addEventListener("change", () => {
+      editContext.fileInfo.exportIncluded = exportBox.checked;
+      block.classList.toggle("result-file--export-off", !exportBox.checked);
+      log(`  ${fileName}: ${exportBox.checked ? "included in" : "excluded from"} export.`);
+      updateExportSelectedState();
+      onExportInclusionChanged();
+    });
+    actionsGroup.appendChild(exportLabel);
+  }
 
   // Which set of slices the waveform edits. Gated on whether chopping/one-shot extraction was
   // part of THIS file's scope (chopSkipped/hasOneShots), not on the current region COUNT - a
@@ -3171,7 +3289,7 @@ function renderFileResult(state) {
   }
 
   function updateExportSelectedState() {
-    exportSelectedBtn.disabled = editing !== "chops" || !editor || editor.getSelected() == null;
+    exportSelectedBtn.disabled = editing !== "chops" || !editor || editor.getSelected() == null || !isExportIncluded(editContext.fileInfo);
   }
 
   function renderLists() {
@@ -3362,6 +3480,13 @@ function renderFileResult(state) {
       log(`  ${state.editContext.fileInfo.name} is excluded - not exporting.`);
       return;
     }
+    // "Include in export" OFF means "do not export this source", full stop - a file-level decision
+    // that a still-selected chop must not silently bypass. Export Selected always was and remains an
+    // individual-chop operation otherwise; this is the one thing that overrides it.
+    if (!isExportIncluded(state.editContext.fileInfo)) {
+      log(`  ${state.editContext.fileInfo.name} is excluded from export - not exporting.`);
+      return;
+    }
     const region = editor.getRegions()[idx];
     exportSelectedBtn.disabled = true;
     const previousLabel = exportSelectedBtn.textContent;
@@ -3416,6 +3541,17 @@ function updateProgress(done, total, label) {
 
 /** Runs the batch. `write: false` is Preview - identical work, nothing saved. */
 async function processBatch({ write = true } = {}) {
+  // Zero-exportable-files guard (js/file-inclusion.js): Export-only, never Preview - Process must
+  // keep working even when every source has "include in export" off (see onExportInclusionChanged()
+  // and updateProcessButton(), which already disable the Export button for this same reason; this is
+  // the defensive re-check for whatever got here anyway). Bails out before touching `processing`,
+  // the results panel, or the progress bar - a plain "nothing to do" message, not a run that quietly
+  // does nothing while looking like it worked, and never a zip/folder built with nothing in it.
+  if (write && noFilesExportIncluded(sourceFolders)) {
+    clearLog();
+    log('No files included in export. Turn "include in export" on for at least one source, then try again.');
+    return;
+  }
   processing = true;
   dryRun = !write;
   cancelRequested = false;

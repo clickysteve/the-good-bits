@@ -643,6 +643,9 @@ input[type="range"]::-moz-range-thumb {
   font-weight: 500;
 }
 
+.result-folder-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.result-folder-export-bulk { display: flex; align-items: center; gap: 10px; }
+
 .result-file {
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -662,6 +665,11 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .result-file--skipped .result-file-meta { color: var(--warn); }
+
+/* Restrained "not exporting" cue - never a disabled/unavailable look. Every control on the card
+   (waveform, chops, playback, editing) stays exactly as usable as when export is on. */
+.result-file--export-off { border-style: dashed; }
+.result-file--export-off .result-file-name { color: var(--text-dim); }
 
 .result-file-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .result-file-title-group { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
@@ -1100,6 +1108,9 @@ input[type="range"]::-moz-range-thumb {
 
 .result-oneshot-toggle { gap: 6px; align-items: center; cursor: pointer; }
 .result-oneshot-toggle input { margin: 0; }
+
+.result-export-toggle { gap: 6px; align-items: center; cursor: pointer; }
+.result-export-toggle input { margin: 0; }
 
 .progress-row { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 120px; }
 .progress-row[hidden] { display: none; }
