@@ -262,20 +262,40 @@ export function createEditableWaveform({
   }
 
   // ---- audition -------------------------------------------------------------
+  //
+  // The playing source is built once per Play from a single persistent buffer covering the WHOLE
+  // file, started at an absolute offset into it - never a small per-slice copy. That's what lets a
+  // boundary drag update the audition in place: loopStart/loopEnd are plain attributes the audio
+  // thread re-reads continuously, so mutating them live-retargets a playing loop with no stop/start
+  // at all, and a non-looping pass is bounded by a *scheduled* stop() that can be rescheduled (or
+  // brought forward to "now") as often as the current end boundary changes. Recreating the source on
+  // every boundary edit was tried and produces audible stutter; this never recreates it mid-play.
 
   let audioCtx = null;
+  let fullBuffer = null; // one AudioBuffer over the whole `mono` array, built once and reused
   let currentSource = null;
   let rafId = 0;
   let loopEnabled = false;
-  let playingIdx = null; // index of the slice currentSource was built from
-  let playStartedAt = 0; // audioCtx.currentTime when currentSource.start() was called
-  let loopRebuildRafId = 0; // coalesces rebuilds while a boundary drag is in progress
+  let playingIdx = null; // index of the slice currentSource is auditioning
+  let passAnchorTime = 0; // audioCtx.currentTime at which file playback was at passAnchorFilePos
+  let passAnchorFilePos = 0; // file-time position (seconds) at passAnchorTime
+
+  function getFullBuffer() {
+    if (!fullBuffer) {
+      fullBuffer = audioCtx.createBuffer(1, mono.length, sampleRate);
+      fullBuffer.getChannelData(0).set(mono);
+    }
+    return fullBuffer;
+  }
+
+  /** Current playback position in file-time, derived from the pass anchor - no polling the node. */
+  function currentFilePos() {
+    return passAnchorFilePos + (audioCtx.currentTime - passAnchorTime);
+  }
 
   function stopPlayback() {
     if (rafId) cancelAnimationFrame(rafId);
     rafId = 0;
-    if (loopRebuildRafId) cancelAnimationFrame(loopRebuildRafId);
-    loopRebuildRafId = 0;
     if (currentSource) {
       try {
         currentSource.stop();
@@ -292,45 +312,32 @@ export function createEditableWaveform({
     playBtn.classList.remove("is-playing");
   }
 
-  /** Builds a fresh source+buffer for the given {s,e} region, applying the current loop state. */
-  function createSourceForRegion(r) {
-    const a = Math.max(0, Math.round(r.s * sampleRate));
-    const b = Math.min(mono.length, Math.round(r.e * sampleRate));
-    if (b <= a) return null;
-    const buf = audioCtx.createBuffer(1, b - a, sampleRate);
-    buf.getChannelData(0).set(mono.subarray(a, b));
-    const src = audioCtx.createBufferSource();
-    src.buffer = buf;
-    src.connect(audioCtx.destination);
-    if (loopEnabled) {
-      src.loop = true;
-      src.loopStart = 0;
-      src.loopEnd = buf.duration;
-    }
-    return src;
-  }
-
-  /**
-   * Drives the playhead for `src` against `region`, wrapping visually on every loop pass. Reads
-   * src.loop live each frame so toggling Loop off mid-flight lets the current pass finish and
-   * report its true position instead of being clamped to the region end.
-   */
-  function startTick(src, region) {
-    const regionDuration = region.e - region.s;
-    let passStartedAt = playStartedAt;
+  /** Drives the visual playhead against the slice's LIVE bounds, re-anchoring on every wrap. */
+  function startTick(src) {
     const tick = () => {
       if (currentSource !== src) return;
-      let elapsed = audioCtx.currentTime - passStartedAt;
-      if (regionDuration > 0 && elapsed >= regionDuration) {
-        if (src.loop) {
-          const wraps = Math.floor(elapsed / regionDuration);
-          passStartedAt += wraps * regionDuration;
-          elapsed -= wraps * regionDuration;
-        } else {
-          elapsed = regionDuration;
-        }
+      const r = playingIdx != null ? slices[playingIdx] : null;
+      if (!r) {
+        stopPlayback();
+        return;
       }
-      playhead = region.s + elapsed;
+      const now = audioCtx.currentTime;
+      let filePos = passAnchorFilePos + (now - passAnchorTime);
+      if (src.loop) {
+        const len = r.e - r.s;
+        if (len > 0) {
+          let rel = filePos - r.s;
+          if (rel >= len || rel < 0) {
+            rel = ((rel % len) + len) % len;
+            passAnchorFilePos = r.s;
+            passAnchorTime = now - rel;
+          }
+          filePos = r.s + rel;
+        }
+      } else if (filePos > r.e) {
+        filePos = r.e; // native stop() is already scheduled for right about now
+      }
+      playhead = filePos;
       redraw();
       rafId = requestAnimationFrame(tick);
     };
@@ -346,59 +353,52 @@ export function createEditableWaveform({
       return; // no Web Audio here; the button just does nothing rather than throwing
     }
     const idx = selected;
-    const region = { s: slices[idx].s, e: slices[idx].e };
-    const src = createSourceForRegion(region);
-    if (!src) return;
-    src.onended = () => {
-      if (currentSource === src) stopPlayback();
-    };
-    src.start();
-    currentSource = src;
-    playingIdx = idx;
-    playStartedAt = audioCtx.currentTime;
-    playBtn.classList.add("is-playing");
-    startTick(src, region);
-  }
-
-  /** True while a boundary drag on `refs` should live-update the currently looping audition. */
-  function loopRebuildApplies(refs) {
-    return (
-      loopEnabled &&
-      playingIdx != null &&
-      selected === playingIdx &&
-      !!currentSource &&
-      refs.some((r) => r.idx === playingIdx)
-    );
-  }
-
-  /** Rebuilds currentSource from the slice's live bounds, preserving loop/selection/UI state. */
-  function rebuildPlayingSource() {
-    if (playingIdx == null || !currentSource) return;
-    const region = { s: slices[playingIdx].s, e: slices[playingIdx].e };
-    const src = createSourceForRegion(region);
-    if (!src) return;
-    if (rafId) cancelAnimationFrame(rafId);
-    try {
-      currentSource.stop();
-    } catch (_) {
-      /* already stopped */
+    const r = slices[idx];
+    if (r.e <= r.s) return;
+    const src = audioCtx.createBufferSource();
+    src.buffer = getFullBuffer();
+    src.connect(audioCtx.destination);
+    if (loopEnabled) {
+      src.loop = true;
+      src.loopStart = r.s;
+      src.loopEnd = r.e;
     }
     src.onended = () => {
       if (currentSource === src) stopPlayback();
     };
-    src.start();
+    const now = audioCtx.currentTime;
+    src.start(now, r.s);
+    if (!loopEnabled) src.stop(now + (r.e - r.s));
     currentSource = src;
-    playStartedAt = audioCtx.currentTime;
-    startTick(src, region);
+    playingIdx = idx;
+    passAnchorTime = now;
+    passAnchorFilePos = r.s;
+    playBtn.classList.add("is-playing");
+    startTick(src);
   }
 
-  /** Throttles rebuildPlayingSource to at most once per animation frame during a drag. */
-  function scheduleLoopRebuild(refs) {
-    if (!loopRebuildApplies(refs) || loopRebuildRafId) return;
-    loopRebuildRafId = requestAnimationFrame(() => {
-      loopRebuildRafId = 0;
-      rebuildPlayingSource();
-    });
+  /** True when a boundary drag on `refs` touches the slice currently loaded into currentSource. */
+  function boundaryTouchesPlayingSlice(refs) {
+    return playingIdx != null && refs.some((r) => r.idx === playingIdx);
+  }
+
+  /**
+   * Re-targets the live audition after the selected+playing slice's bounds changed. Looping just
+   * needs its native loop points nudged - the audio thread picks that up with no glitch. A
+   * non-looping pass has no native notion of "the current end", so its scheduled stop is what we
+   * move; if the new end already lies behind the live playback position, the pass is over now.
+   */
+  function applyLiveBoundaryUpdate() {
+    if (playingIdx == null || !currentSource || selected !== playingIdx) return;
+    const r = slices[playingIdx];
+    if (currentSource.loop) {
+      currentSource.loopStart = r.s;
+      currentSource.loopEnd = r.e;
+    } else {
+      const remaining = r.e - currentFilePos();
+      if (remaining <= 0) stopPlayback();
+      else currentSource.stop(audioCtx.currentTime + remaining);
+    }
   }
 
   // ---- mutation -------------------------------------------------------------
@@ -436,11 +436,20 @@ export function createEditableWaveform({
     loopEnabled = !loopEnabled;
     loopBtn.classList.toggle("is-active", loopEnabled);
     // Mutate the live source directly - toggling Loop must never restart playback.
-    if (currentSource) {
-      currentSource.loop = loopEnabled;
+    if (currentSource && playingIdx != null) {
+      const r = slices[playingIdx];
       if (loopEnabled) {
-        currentSource.loopStart = 0;
-        currentSource.loopEnd = currentSource.buffer.duration;
+        currentSource.loop = true;
+        currentSource.loopStart = r.s;
+        currentSource.loopEnd = r.e;
+        // Going non-looping -> looping leaves behind the stop() scheduled for the old pass end;
+        // push it far out since there's no way to un-schedule a stop() once one has been called.
+        currentSource.stop(audioCtx.currentTime + 24 * 3600);
+      } else {
+        currentSource.loop = false;
+        const remaining = slices[playingIdx].e - currentFilePos();
+        if (remaining <= 0) stopPlayback();
+        else currentSource.stop(audioCtx.currentTime + remaining);
       }
     }
   });
@@ -576,7 +585,7 @@ export function createEditableWaveform({
     if (dragging.kind === "boundary") {
       moveBoundary(dragging.refs, xToTime(ev.clientX - rect.left, rect.width));
       redraw();
-      scheduleLoopRebuild(dragging.refs);
+      if (boundaryTouchesPlayingSlice(dragging.refs)) applyLiveBoundaryUpdate();
     } else if (dragging.kind === "pan") {
       const dxPx = ev.clientX - dragging.startClientX;
       setView(dragging.startViewStart - (dxPx / Math.max(1, rect.width)) * viewDuration, viewDuration);
@@ -615,11 +624,7 @@ export function createEditableWaveform({
       slices.sort((a, b) => a.s - b.s);
       redraw();
       onChange();
-      if (loopRebuildRafId) {
-        cancelAnimationFrame(loopRebuildRafId);
-        loopRebuildRafId = 0;
-      }
-      if (loopRebuildApplies(refs)) rebuildPlayingSource();
+      if (boundaryTouchesPlayingSlice(refs)) applyLiveBoundaryUpdate();
     } else if (kind === "pan") {
       canvas.classList.remove("waveform-canvas--dragging");
     }
