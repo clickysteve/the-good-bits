@@ -628,8 +628,26 @@ export function createEditableWaveform({
   canvas.addEventListener("pointerup", endDrag);
   canvas.addEventListener("pointercancel", endDrag);
 
+  // redraw() sizes the canvas off canvas.getBoundingClientRect().width, which is 0 right now -
+  // `wrap` isn't attached to the document yet; the caller (app.js) appends editor.el straight
+  // after this function returns. That 0 falls back to a hardcoded 600px, so this first pass draws
+  // for a 600px-wide buffer while CSS immediately stretches the canvas to its real (usually much
+  // wider) container width, visually compressing every marker/label until something else happens
+  // to call redraw() with the real size - which is why any interaction "fixes" it.
+  //
+  // A ResizeObserver on the canvas is the deterministic fix: it fires as soon as the canvas is
+  // actually laid out (right after this returns and app.js attaches it) with its real size, and
+  // again on every genuine size change afterwards (rail toggle, window resize, density change) -
+  // a superset of the plain window "resize" listener this replaces, since a sidebar/rail toggle
+  // changes this element's size without the window itself resizing.
   redraw();
-  window.addEventListener("resize", redraw);
+  let resizeObserver = null;
+  if (typeof ResizeObserver === "function") {
+    resizeObserver = new ResizeObserver(() => redraw());
+    resizeObserver.observe(canvas);
+  } else {
+    window.addEventListener("resize", redraw);
+  }
 
   return {
     el: wrap,
@@ -655,7 +673,8 @@ export function createEditableWaveform({
     },
     destroy: () => {
       stopPlayback();
-      window.removeEventListener("resize", redraw);
+      if (resizeObserver) resizeObserver.disconnect();
+      else window.removeEventListener("resize", redraw);
     },
   };
 }
