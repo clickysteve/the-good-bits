@@ -108,9 +108,11 @@ export function createEditableWaveform({
   }
 
   function zoomAt(anchorTime, factor) {
-    const newDuration = viewDuration / factor;
+    const requestedDuration = viewDuration / factor;
+    const clampedDuration = Math.max(MIN_VIEW_SEC, Math.min(duration, requestedDuration));
+    if (clampedDuration === viewDuration) return;
     const ratio = viewDuration > 0 ? (anchorTime - viewStart) / viewDuration : 0.5;
-    setView(anchorTime - ratio * newDuration, newDuration);
+    setView(anchorTime - ratio * clampedDuration, clampedDuration);
   }
 
   function snap(t) {
@@ -381,12 +383,20 @@ export function createEditableWaveform({
     "wheel",
     (ev) => {
       if (!mono || duration <= 0) return;
-      ev.preventDefault();
       const rect = canvas.getBoundingClientRect();
       const anchorTime = xToTime(ev.clientX - rect.left, rect.width);
       const unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? rect.height : 1;
-      const steps = Math.max(-4, Math.min(4, (ev.deltaY * unit) / 100));
-      zoomAt(anchorTime, Math.pow(1.15, -steps));
+      const deltaMag = (ev.deltaY * unit) ** 2 + (ev.deltaX * unit) ** 2;
+      if (ev.deltaY !== 0 && (ev.deltaY * unit) ** 2 >= deltaMag * 0.5) {
+        ev.preventDefault();
+        const steps = Math.max(-4, Math.min(4, (ev.deltaY * unit) / 100));
+        zoomAt(anchorTime, Math.pow(1.15, -steps));
+      } else if (ev.deltaX !== 0 && (ev.deltaX * unit) ** 2 >= deltaMag * 0.5) {
+        ev.preventDefault();
+        const unitX = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? rect.height : 1;
+        const panAmount = (ev.deltaX * unitX / rect.width) * viewDuration;
+        setView(Math.max(0, Math.min(Math.max(0, duration - viewDuration), viewStart + panAmount)), viewDuration);
+      }
     },
     { passive: false }
   );
