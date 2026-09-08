@@ -122,10 +122,32 @@ export function createEditableWaveform({
   const xToTime = (xRel, w) => viewXToTime(xRel, w, viewStart, viewDuration);
   const timeToX = (t, w) => (viewDuration > 0 ? ((t - viewStart) / viewDuration) * w : 0);
 
+  // redraw() is called on every frame of the playhead's 60fps rAF tick during playback, and on
+  // every pointermove while dragging a boundary - both potentially many times a second. Coalescing
+  // those into at most one redraw per animation frame (rather than one per event/tick call) keeps a
+  // fast trackpad drag or a long file's playhead from queuing more full redraws than the display can
+  // actually present. Callers that only fire once per user gesture (endDrag, setRegions, the initial
+  // mount) still call redraw() directly - no need to defer a single call by a frame.
+  let redrawRafId = 0;
+  // computePeaksInRange scans every sample in the current view (O(view width in samples)), so
+  // recomputing it on every redraw - including the playhead's 60fps tick and every pointermove of a
+  // boundary drag, neither of which changes what's in view - re-scans potentially millions of
+  // samples just to move a 1.5px line. Cached by view range and invalidated only when the view
+  // actually changes (a pan/zoom always produces a different key, so those still get fresh peaks).
+  let cachedPeaks = null;
+  let cachedPeaksKey = "";
+  function scheduleRedraw() {
+    if (redrawRafId) return;
+    redrawRafId = requestAnimationFrame(() => {
+      redrawRafId = 0;
+      redraw();
+    });
+  }
+
   function setView(newStart, newDuration) {
     viewDuration = Math.max(MIN_VIEW_SEC, Math.min(duration, newDuration));
     viewStart = Math.max(0, Math.min(Math.max(0, duration - viewDuration), newStart));
-    redraw();
+    scheduleRedraw();
   }
 
   function zoomAt(anchorTime, factor) {
@@ -167,8 +189,15 @@ export function createEditableWaveform({
     const rectWidth = Math.max(200, Math.round(canvas.getBoundingClientRect().width || 600));
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const cssH = 108;
-    canvas.width = Math.round(rectWidth * dpr);
-    canvas.height = Math.round(cssH * dpr);
+    // Assigning canvas.width/height reallocates its backing bitmap even when set to its current
+    // value, so guard it - this function runs up to 60x/sec during playback and on every
+    // pointermove of a boundary drag, and neither actually resizes the canvas.
+    const pxWidth = Math.round(rectWidth * dpr);
+    const pxHeight = Math.round(cssH * dpr);
+    if (canvas.width !== pxWidth || canvas.height !== pxHeight) {
+      canvas.width = pxWidth;
+      canvas.height = pxHeight;
+    }
     const ctx = canvas.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const w = rectWidth;
@@ -192,7 +221,14 @@ export function createEditableWaveform({
       }
     }
 
-    const peaks = mono ? computePeaksInRange(mono, viewStart * sampleRate, (viewStart + viewDuration) * sampleRate, BIN_COUNT) : null;
+    if (mono) {
+      const peaksKey = `${viewStart}|${viewDuration}`;
+      if (peaksKey !== cachedPeaksKey) {
+        cachedPeaks = computePeaksInRange(mono, viewStart * sampleRate, (viewStart + viewDuration) * sampleRate, BIN_COUNT);
+        cachedPeaksKey = peaksKey;
+      }
+    }
+    const peaks = mono ? cachedPeaks : null;
     if (peaks) {
       const barWidth = w / peaks.length;
       ctx.fillStyle = color("--wave-fill", "#5b6670");
@@ -693,7 +729,7 @@ export function createEditableWaveform({
     }
     if (dragging.kind === "boundary") {
       moveBoundary(dragging.refs, xToTime(ev.clientX - rect.left, rect.width));
-      redraw();
+      scheduleRedraw();
       if (boundaryTouchesPlayingSlice(dragging.refs)) applyLiveBoundaryUpdate();
     } else if (dragging.kind === "pan") {
       const dxPx = ev.clientX - dragging.startClientX;
@@ -757,10 +793,10 @@ export function createEditableWaveform({
   redraw();
   let resizeObserver = null;
   if (typeof ResizeObserver === "function") {
-    resizeObserver = new ResizeObserver(() => redraw());
+    resizeObserver = new ResizeObserver(() => scheduleRedraw());
     resizeObserver.observe(canvas);
   } else {
-    window.addEventListener("resize", redraw);
+    window.addEventListener("resize", scheduleRedraw);
   }
 
   return {
@@ -793,8 +829,10 @@ export function createEditableWaveform({
     },
     destroy: () => {
       stopPlayback();
+      if (redrawRafId) cancelAnimationFrame(redrawRafId);
+      redrawRafId = 0;
       if (resizeObserver) resizeObserver.disconnect();
-      else window.removeEventListener("resize", redraw);
+      else window.removeEventListener("resize", scheduleRedraw);
     },
   };
 }

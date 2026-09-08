@@ -58,14 +58,27 @@ function spectralFlux(mag, prevMag, half) {
   return flux;
 }
 
+/**
+ * Runs analyzeFrame across every frame of `reference` up front. Returned alongside the flags so a
+ * mono input (where `reference` IS the same array as the single channel the synthesis loop below
+ * processes - see stretchPhaseVocoder) can reuse these already-computed spectra instead of running
+ * an identical second FFT pass per frame for that channel. For stereo, `reference` is the mono
+ * downmix - a different signal from either channel - so there's nothing to reuse there and this
+ * costs the same as before.
+ */
+function analyzeReferenceFrames(reference, fftSize, hop, window, half, numFrames) {
+  const frames = new Array(numFrames);
+  for (let m = 0; m < numFrames; m++) frames[m] = analyzeFrame(reference, m * hop, fftSize, window, half);
+  return frames;
+}
+
 /** Frame indices (shared across channels) whose spectral flux is a sharp outlier vs. the running average. */
-function detectTransientFrames(reference, fftSize, hop, window, half, numFrames, sensitivity) {
+function transientFlagsFromFrames(frames, half, numFrames, sensitivity) {
   const fluxes = new Float64Array(numFrames);
   let prevMag = null;
   for (let m = 0; m < numFrames; m++) {
-    const { mag } = analyzeFrame(reference, m * hop, fftSize, window, half);
-    fluxes[m] = spectralFlux(mag, prevMag, half);
-    prevMag = mag;
+    fluxes[m] = spectralFlux(frames[m].mag, prevMag, half);
+    prevMag = frames[m].mag;
   }
   const mean = fluxes.reduce((a, b) => a + b, 0) / Math.max(1, numFrames);
   const threshold = mean * (2.2 - 1.2 * sensitivity); // higher sensitivity -> lower threshold -> more resets
@@ -95,7 +108,8 @@ export function stretchPhaseVocoder(channels, sampleRate, ratio, params, seed) {
   const outLen = Math.max(fftSize, Math.round(inputLen * ratio));
   const numFrames = Math.max(1, Math.ceil(inputLen / Ha) + 1);
 
-  const transientFlags = transientReset ? detectTransientFrames(reference, fftSize, Ha, window, half, numFrames, transientSensitivity) : null;
+  const referenceFrames = transientReset ? analyzeReferenceFrames(reference, fftSize, Ha, window, half, numFrames) : null;
+  const transientFlags = transientReset ? transientFlagsFromFrames(referenceFrames, half, numFrames, transientSensitivity) : null;
 
   const expectedAdvance = new Float64Array(half + 1);
   for (let k = 0; k <= half; k++) expectedAdvance[k] = (2 * Math.PI * k * Ha) / fftSize;
@@ -119,7 +133,9 @@ export function stretchPhaseVocoder(channels, sampleRate, ratio, params, seed) {
       const synthesisPos = m * Hs;
       if (synthesisPos > outLen + fftSize) break;
 
-      const { mag, phase } = analyzeFrame(chan, analysisPos, fftSize, window, half);
+      // Mono input: `chan` IS `reference` (same array), so the transient-detection pass above
+      // already analysed this exact frame - reuse it instead of running an identical FFT again.
+      const { mag, phase } = chan === reference && referenceFrames ? referenceFrames[m] : analyzeFrame(chan, analysisPos, fftSize, window, half);
       const isTransient = transientFlags ? !!transientFlags[m] : false;
 
       if (!havePrev) {

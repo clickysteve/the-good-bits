@@ -1058,7 +1058,9 @@ function renderStretchActivePanes() {
 function setStretchActiveFile(key) {
   if (stretchActiveKey === key) return;
   stretchWorkspace.stopAllPlayback();
+  const previousActiveKey = stretchActiveKey;
   stretchActiveKey = key;
+  evictInactiveStretchChannels(previousActiveKey); // no longer the active file - see its own doc comment
   renderStretchFileStrip();
   renderStretchActivePanes();
   // The newly active file might already be stale (its cached preview was rendered under different
@@ -2431,6 +2433,25 @@ async function decodeStretchPreview(blob, characterLabel, ratio, sourceBpm) {
 }
 
 /**
+ * Drops a STRETCH cache entry's full multi-channel decode once it's not (or no longer) the active
+ * workspace file - only the active file needs `channels` for a live macro/character re-render (see
+ * ensureStretchSourceAnalyzed, which transparently re-decodes on demand if this ran). Without this,
+ * every file a STRETCH batch processes keeps its full decode in memory for the rest of the session
+ * even though only one file's worth is ever actually in use at a time - on a large batch of long
+ * files that's exactly the unbounded growth the rest of the app avoids by re-decoding on demand (see
+ * processOneFile's own "Export still re-decodes... holding every decoded buffer would blow up
+ * memory" reasoning). Keeps mono/duration/bpm/key text, which are cheap and still needed for the
+ * file strip's "processed" indicator and for instant display if the user switches back.
+ */
+function evictInactiveStretchChannels(key) {
+  if (!key || key === stretchActiveKey) return;
+  const entry = analysisCache.get(key);
+  if (entry && entry.stretchOriginal && entry.stretchOriginal.channels) {
+    entry.stretchOriginal = { ...entry.stretchOriginal, channels: null };
+  }
+}
+
+/**
  * Ensures analysisCache has a decoded stretchOriginal (mono + full multi-channel audio) for this
  * file, decoding and running key/tempo detection ONLY if nothing usable is cached yet - the
  * "SOURCE ANALYSIS" half of the old inline block, and the reason clicking a different Character
@@ -2737,6 +2758,10 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
     // No chop-oriented card for this task any more - the workspace (file strip + Original/Processed)
     // is the whole UI. See js/stretch-workspace.js and the "Stretch workspace" section above.
     if (!stretchActiveKey) stretchActiveKey = key;
+    // A batch processes every file in order but only the first ever becomes active (above), so
+    // every other file processed here would otherwise sit on a full multi-channel decode for the
+    // rest of the session for no reason - see evictInactiveStretchChannels's own doc comment.
+    evictInactiveStretchChannels(key);
     renderStretchFileStrip();
     if (stretchActiveKey === key) renderStretchActivePanes();
     return 0;

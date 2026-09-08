@@ -10,19 +10,35 @@
 import { toMono } from "../../dsp.js";
 import { hannWindow } from "./windows.js";
 
-/** Normalized cross-correlation between a reference window and a candidate window, for splice-point search. */
-function similarity(ref, cand, candOff, len) {
+/** A window's own energy (sum of squares) - split out of similarity() below so the search loop can
+ * compute it once per grain instead of redundantly recomputing the same value for every candidate
+ * offset scored against that grain's fixed reference window. */
+function energy(ref, len) {
+  let sum = 0;
+  for (let i = 0; i < len; i++) {
+    const x = ref[i] || 0;
+    sum += x * x;
+  }
+  return sum;
+}
+
+/**
+ * Normalized cross-correlation between a reference window and a candidate window, for splice-point
+ * search. `refEnergy` is `energy(ref, len)`, passed in rather than recomputed here: this is called
+ * once per candidate offset in the search loop below (up to ~searchRadius*2 times per grain) against
+ * the SAME reference window every time, so hoisting that one term out is a pure, exact win - it's
+ * the same value, just computed once per grain instead of once per candidate.
+ */
+function similarity(ref, refEnergy, cand, candOff, len) {
   let dot = 0;
-  let nr = 0;
   let nc = 0;
   for (let i = 0; i < len; i++) {
     const x = ref[i] || 0;
     const y = cand[candOff + i] || 0;
     dot += x * y;
-    nr += x * x;
     nc += y * y;
   }
-  const denom = Math.sqrt(nr * nc);
+  const denom = Math.sqrt(refEnergy * nc);
   return denom > 1e-9 ? dot / denom : 0;
 }
 
@@ -71,10 +87,11 @@ export function stretchWsola(channels, sampleRate, ratio, params) {
     if (searchRadius > 0 && prevTail) {
       let bestScore = -Infinity;
       const overlapLen = Math.min(windowSize, prevTail.length);
+      const refEnergy = energy(prevTail, overlapLen);
       const lo = Math.max(0, analysisPos - searchRadius);
       const hi = Math.min(Math.max(lo, inputLen - windowSize), analysisPos + searchRadius);
       for (let cand = lo; cand <= hi; cand++) {
-        const score = similarity(prevTail, reference, cand, overlapLen);
+        const score = similarity(prevTail, refEnergy, reference, cand, overlapLen);
         if (score > bestScore) {
           bestScore = score;
           bestOffset = cand - analysisPos;
