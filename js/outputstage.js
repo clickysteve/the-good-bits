@@ -162,7 +162,17 @@ function makeEnvFollower(fs, attMs, relMs) {
   };
 }
 
-/** xorshift32 RNG, seeded per call so re-processing the same audio is reproducible within one run. */
+/**
+ * xorshift32 RNG, seeded per call so re-processing the same audio is reproducible within one run.
+ * A second, deliberately separate implementation from js/dsp/stretch/rng.js's mulberry32-based
+ * makeRng(): that one drives the stretch engines' {next,signed,range,int,bool} API from a
+ * number-or-string seed shared across a whole engine call, while this one is called per SAMPLE in
+ * hot loops below (wow/flutter/hiss/click generation, potentially millions of calls per file) and
+ * only ever needs two cheap accessors. Not merged into one implementation: since the two use
+ * different underlying algorithms, unifying them would silently change the exact noise sequence -
+ * and therefore the audible lo-fi output - for every existing seed, which isn't a change to make as
+ * a side effect of deduplication.
+ */
 function makeRng(seed) {
   let s = seed >>> 0 || 0xcafe15b0;
   function next() {

@@ -10,6 +10,11 @@
 // short reference snippet) - reimplemented here from the well-known
 // construction rather than copied from any particular source file. Not
 // cryptographic; plenty good for audio jitter.
+//
+// js/outputstage.js has its own second RNG (xorshift32), deliberately not unified with this one -
+// see that file's makeRng() for why: different call-frequency profile (per-sample hot loop there vs.
+// per-engine-call here), and merging them would change the exact noise sequence for every existing
+// seed there.
 
 function mulberry32(seed) {
   let a = seed >>> 0;

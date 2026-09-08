@@ -66,6 +66,8 @@ import {
   formatSourcePath,
 } from "./io-fs.js";
 import { rememberFolder, listRememberedFolders, forgetFolder, forgetAllFolders } from "./folder-store.js";
+import { showConfirmDialog } from "./confirm-dialog.js";
+import { readJSON, writeJSON, readString, writeString } from "./local-storage.js";
 
 // ---------------------------------------------------------------------------
 // State
@@ -475,61 +477,8 @@ function clearLog() {
 }
 
 // ---------------------------------------------------------------------------
-// Confirm dialog (themed replacement for window.confirm, since a blocking
-// native dialog would clash with the rest of the UI)
+// Confirm dialog - see js/confirm-dialog.js (showConfirmDialog, imported above)
 // ---------------------------------------------------------------------------
-
-function showConfirmDialog({ title, body, confirmLabel = "Continue", cancelLabel = "Cancel", showRemember = false }) {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className = "modal-overlay";
-
-    const modal = document.createElement("div");
-    modal.className = "modal";
-
-    const h = document.createElement("h3");
-    h.textContent = title;
-    modal.appendChild(h);
-
-    const p = document.createElement("p");
-    p.textContent = body;
-    modal.appendChild(p);
-
-    let rememberCheckbox = null;
-    if (showRemember) {
-      const label = document.createElement("label");
-      label.className = "checkbox-label modal-remember";
-      rememberCheckbox = document.createElement("input");
-      rememberCheckbox.type = "checkbox";
-      label.appendChild(rememberCheckbox);
-      label.append(" Use this choice for the rest of this batch");
-      modal.appendChild(label);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "modal-actions";
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "btn btn--ghost";
-    cancelBtn.textContent = cancelLabel;
-    const confirmBtn = document.createElement("button");
-    confirmBtn.className = "btn btn--primary";
-    confirmBtn.textContent = confirmLabel;
-    actions.appendChild(cancelBtn);
-    actions.appendChild(confirmBtn);
-    modal.appendChild(actions);
-
-    overlay.appendChild(modal);
-    document.body.appendChild(overlay);
-    confirmBtn.focus();
-
-    function close(confirmed) {
-      overlay.remove();
-      resolve({ confirmed, remember: rememberCheckbox ? rememberCheckbox.checked : false });
-    }
-    cancelBtn.addEventListener("click", () => close(false));
-    confirmBtn.addEventListener("click", () => close(true));
-  });
-}
 
 /** Gate for drums-mode files where tempo detection was attempted but came back empty. */
 async function resolveTempoWarning(fileName) {
@@ -1408,30 +1357,23 @@ function saveSettings() {
 function flushSaveSettings() {
   clearTimeout(saveSettingsTimer);
   saveSettingsTimer = null;
-  try {
-    localStorage.setItem(
-      SETTINGS_STORAGE_KEY,
-      JSON.stringify({
-        mode,
-        autoParams,
-        drumBars,
-        extractOneShots,
-        chopIntoPieces,
-        naming: namingSettings,
-        exportSettings,
-        chopExportFormat,
-        timestretch: timestretchSettings,
-        outputStage: outputStageSettings,
-        drive: driveSettings,
-        crunch: crunchSettings,
-        applyProcessingToOneShots,
-        keepUnprocessedCopy,
-        splitSubfolders: splitSubfoldersCheckbox.checked,
-      })
-    );
-  } catch (_) {
-    /* best-effort only - private browsing, storage disabled, quota, etc. */
-  }
+  writeJSON(SETTINGS_STORAGE_KEY, {
+    mode,
+    autoParams,
+    drumBars,
+    extractOneShots,
+    chopIntoPieces,
+    naming: namingSettings,
+    exportSettings,
+    chopExportFormat,
+    timestretch: timestretchSettings,
+    outputStage: outputStageSettings,
+    drive: driveSettings,
+    crunch: crunchSettings,
+    applyProcessingToOneShots,
+    keepUnprocessedCopy,
+    splitSubfolders: splitSubfoldersCheckbox.checked,
+  });
 }
 
 // A debounced write must not silently lose the last change if the tab closes/backgrounds before its
@@ -1442,12 +1384,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 function loadSettings() {
-  try {
-    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (_) {
-    return null;
-  }
+  return readJSON(SETTINGS_STORAGE_KEY);
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,23 +1435,13 @@ function applyTask(next, { persist = true } = {}) {
     stretchWorkspace.stopAllPlayback();
     invalidateStretchPreview();
   }
-  if (persist) {
-    try {
-      localStorage.setItem(TASK_STORAGE_KEY, task);
-    } catch (_) {
-      /* best-effort only */
-    }
-  }
+  if (persist) writeString(TASK_STORAGE_KEY, task);
   // Canvas-drawn waveforms don't reflow for free when the layout around them changes.
   requestAnimationFrame(repaintForTheme);
 }
 
 function loadTask() {
-  try {
-    return localStorage.getItem(TASK_STORAGE_KEY) || "chop";
-  } catch (_) {
-    return "chop";
-  }
+  return readString(TASK_STORAGE_KEY) || "chop";
 }
 
 taskSwitcherBtns.forEach((btn) => {
@@ -1531,13 +1458,7 @@ function applyRail(open, { persist = true } = {}) {
   document.documentElement.setAttribute("data-rail", open ? "open" : "closed");
   settingsToggleBtn.classList.toggle("is-active", open);
   settingsToggleBtn.setAttribute("aria-expanded", open ? "true" : "false");
-  if (persist) {
-    try {
-      localStorage.setItem(RAIL_STORAGE_KEY, open ? "open" : "closed");
-    } catch (_) {
-      /* best-effort only */
-    }
-  }
+  if (persist) writeString(RAIL_STORAGE_KEY, open ? "open" : "closed");
   requestAnimationFrame(repaintForTheme);
 }
 
@@ -2504,6 +2425,47 @@ function sliceChannels(channels, startSample, endSample) {
   return channels.map((ch) => ch.slice(startSample, endSample));
 }
 
+/**
+ * Snaps each [s,e] second-pair region to the nearest zero-crossing (in samples) and slices
+ * `channels` into per-region working buffers - the common first step every export path (main
+ * chops, one-shots, "Export selected") takes before handing regions to processRegionsHeavy. A
+ * region that collapses to zero/negative length after snapping is silently dropped, same as every
+ * caller already did inline before this was pulled out.
+ *
+ * With `wantCleanCopy`, also produces a "clean" (unprocessed, faded) WAV blob per surviving region
+ * for the "keep an unprocessed copy" secondary output, using its own fade lengths - chops use the
+ * full symmetric fade, one-shots use a short tail-only fade (no fade-in, so as not to blunt the
+ * transient) - hence `cleanFadeInSamples`/`cleanFadeOutSamples` being separate from whatever fade
+ * processRegionsHeavy is later asked to apply to the main (processed) render.
+ *
+ * Regions are sorted by start first, since callers don't guarantee their regions arrive in order
+ * (manual edits, especially, don't).
+ */
+function prepareExportRegions(regions, { mono, channels, sampleRate, zcWindow, wantCleanCopy = false, cleanFadeInSamples = 0, cleanFadeOutSamples = 0, bitDepth }) {
+  const sortedRegions = [...regions].sort((a, b) => a[0] - b[0]);
+  const regionDefs = [];
+  const cleanBlobs = wantCleanCopy ? [] : null;
+  for (const [s, e] of sortedRegions) {
+    let startSample = Math.max(0, Math.round(s * sampleRate));
+    let endSample = Math.min(mono.length, Math.round(e * sampleRate));
+    if (zcWindow > 0) {
+      startSample = findNearestZeroCrossing(mono, startSample, zcWindow);
+      endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
+    }
+    if (endSample <= startSample) continue;
+    // sliceChannels always allocates fresh buffers, so slicing the same region twice (once for the
+    // worker, which may transfer/detach its copy, once for the untouched "clean" copy here) never
+    // lets the two alias each other.
+    regionDefs.push({ startSample, endSample, channels: sliceChannels(channels, startSample, endSample) });
+    if (wantCleanCopy) {
+      const rawSliced = sliceChannels(channels, startSample, endSample);
+      applyFades(rawSliced, cleanFadeInSamples, cleanFadeOutSamples);
+      cleanBlobs.push(encodeWav(rawSliced, sampleRate, bitDepth));
+    }
+  }
+  return { regionDefs, cleanBlobs };
+}
+
 async function writeOutput(folder, subdir, relDir, fileName, blob, zipBatch, fileInfo, dryRun) {
   // Preview runs the entire pipeline and skips exactly one thing: this. Every blob is still
   // produced, so the results panel gets real audio to audition and real waveforms to edit -
@@ -2830,29 +2792,18 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
     await clearOldNumberedFilesFSA(folder.handle, "chops clean", fileInfo.relativeDir, taggedStem);
   }
 
-  const sortedRegions = [...regions].sort((a, b) => a[0] - b[0]);
   // Snap boundaries first (cheap, main-thread) so the worker only ever sees the heavy part:
   // WSOLA stretch, the lo-fi chain, fades, and WAV encoding for each already-sliced region.
-  const regionDefs = [];
-  const cleanBlobs = wantCleanCopy ? [] : null;
-  for (const [s, e] of sortedRegions) {
-    let startSample = Math.max(0, Math.round(s * buffer.sampleRate));
-    let endSample = Math.min(mono.length, Math.round(e * buffer.sampleRate));
-    if (zcWindow > 0) {
-      startSample = findNearestZeroCrossing(mono, startSample, zcWindow);
-      endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
-    }
-    if (endSample <= startSample) continue;
-    // sliceChannels always allocates fresh buffers, so slicing the same region twice (once for
-    // the worker, which may transfer/detach its copy, once for the untouched "clean" copy here)
-    // never lets the two alias each other.
-    regionDefs.push({ startSample, endSample, channels: sliceChannels(channels, startSample, endSample) });
-    if (wantCleanCopy) {
-      const rawSliced = sliceChannels(channels, startSample, endSample);
-      applyFades(rawSliced, fadeInSamples, fadeOutSamples);
-      cleanBlobs.push(encodeWav(rawSliced, buffer.sampleRate, exportSettings.bitDepth));
-    }
-  }
+  const { regionDefs, cleanBlobs } = prepareExportRegions(regions, {
+    mono,
+    channels,
+    sampleRate: buffer.sampleRate,
+    zcWindow,
+    wantCleanCopy,
+    cleanFadeInSamples: fadeInSamples,
+    cleanFadeOutSamples: fadeOutSamples,
+    bitDepth: exportSettings.bitDepth,
+  });
 
   const heavyResults =
     regionDefs.length > 0
@@ -2993,13 +2944,8 @@ async function exportSelectedChop(editContext, region, index) {
   const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
   const stretchRatio = resolveStretchRatio(effectiveBpm);
 
-  let startSample = Math.max(0, Math.round(region[0] * buffer.sampleRate));
-  let endSample = Math.min(mono.length, Math.round(region[1] * buffer.sampleRate));
-  if (zcWindow > 0) {
-    startSample = findNearestZeroCrossing(mono, startSample, zcWindow);
-    endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
-  }
-  if (endSample <= startSample) throw new Error("selected chop has no length");
+  const { regionDefs } = prepareExportRegions([region], { mono, channels, sampleRate: buffer.sampleRate, zcWindow });
+  if (regionDefs.length === 0) throw new Error("selected chop has no length");
 
   const [{ blob }] = await processRegionsHeavy({
     sampleRate: buffer.sampleRate,
@@ -3010,7 +2956,7 @@ async function exportSelectedChop(editContext, region, index) {
     character: timestretchSettings.character,
     macroValues: timestretchSettings.macroValues,
     seed: timestretchSettings.seed,
-    regions: [{ channels: sliceChannels(channels, startSample, endSample) }],
+    regions: regionDefs,
   });
 
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
@@ -3091,27 +3037,18 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
 
   const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * sampleRate);
   const fadeOutSamples = Math.round(0.008 * sampleRate); // short tail fade only - a full fade-in would blunt the transient
-  const sortedRegions = [...regions].sort((a, b) => a[0] - b[0]);
   const rows = [];
   const markers = [];
-  const regionDefs = [];
-  const cleanBlobs = wantCleanCopy ? [] : null;
-
-  for (const [s, e] of sortedRegions) {
-    let startSample = Math.max(0, Math.round(s * sampleRate));
-    let endSample = Math.min(mono.length, Math.round(e * sampleRate));
-    if (zcWindow > 0) {
-      startSample = findNearestZeroCrossing(mono, startSample, zcWindow);
-      endSample = findNearestZeroCrossing(mono, endSample, zcWindow);
-    }
-    if (endSample <= startSample) continue;
-    regionDefs.push({ startSample, endSample, channels: sliceChannels(channels, startSample, endSample) });
-    if (wantCleanCopy) {
-      const rawSliced = sliceChannels(channels, startSample, endSample);
-      applyFades(rawSliced, 0, fadeOutSamples);
-      cleanBlobs.push(encodeWav(rawSliced, sampleRate, exportSettings.bitDepth));
-    }
-  }
+  const { regionDefs, cleanBlobs } = prepareExportRegions(regions, {
+    mono,
+    channels,
+    sampleRate,
+    zcWindow,
+    wantCleanCopy,
+    cleanFadeInSamples: 0,
+    cleanFadeOutSamples: fadeOutSamples,
+    bitDepth: exportSettings.bitDepth,
+  });
 
   let heavyResults;
   if (applyProcessingToOneShots && regionDefs.length > 0) {
@@ -4156,13 +4093,7 @@ splitSubfoldersCheckbox.addEventListener("change", saveSettings);
 function init() {
   versionBadge.textContent = `v${APP_VERSION}`;
   applyTask(loadTask(), { persist: false });
-  const savedRail = (() => {
-    try {
-      return localStorage.getItem(RAIL_STORAGE_KEY);
-    } catch (_) {
-      return null;
-    }
-  })();
+  const savedRail = readString(RAIL_STORAGE_KEY);
   applyRail(savedRail ? savedRail === "open" : true, { persist: false });
   applySettings(loadSettings());
   updateNamingPreview(); // outside applySettings so it also runs for first-time visitors with nothing saved yet
