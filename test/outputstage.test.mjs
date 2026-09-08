@@ -1,7 +1,7 @@
 // Node-side unit tests for the output-stage lo-fi processing module.
 // Run with: node test/outputstage.test.mjs
 import assert from "node:assert/strict";
-import { OUTPUT_STAGES, DRIVE_TYPES, applyOutputStage, applyDrive, applyCrunch } from "../js/outputstage.js";
+import { OUTPUT_STAGES, DRIVE_TYPES, applyOutputStage, applyDrive, applyCrunch, applyLofiChain, deriveRegionSeed } from "../js/outputstage.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -125,6 +125,43 @@ test("applyOutputStage: mix blends between dry and full-wet linearly at the endp
     const expected = dry[i] + (full[i] - dry[i]) * 0.5;
     assert.ok(Math.abs(half[i] - expected) < 1e-6, `sample ${i}: ${half[i]} vs expected ${expected}`);
   }
+});
+
+// --- deriveRegionSeed / applyLofiChain seeding ----------------------------
+
+test("deriveRegionSeed: same base seed + index is reproducible", () => {
+  assert.equal(deriveRegionSeed(1, 3), deriveRegionSeed(1, 3));
+});
+
+test("deriveRegionSeed: different index under the same base seed gives a different seed", () => {
+  assert.notEqual(deriveRegionSeed(1, 0), deriveRegionSeed(1, 1));
+  assert.notEqual(deriveRegionSeed(1, 1), deriveRegionSeed(1, 2));
+});
+
+test("deriveRegionSeed: different base seed gives a different seed for the same index", () => {
+  assert.notEqual(deriveRegionSeed(1, 0), deriveRegionSeed(2, 0));
+});
+
+test("applyLofiChain: two same-length regions in a batch no longer get identical output-stage noise", () => {
+  // This is the regression case for the "twin" artifact: same-length regions previously fell back
+  // to applyOutputStage's length-only default seed, so every region the same size in a batch
+  // rendered byte-identical wow/hiss/click noise. Passing a per-region seed (deriveRegionSeed) is
+  // what the real export pipeline does now - see processRegionsHeavy in app.js and
+  // heavy-dsp-worker.js's onmessage handler.
+  const settings = { outputStage: { enabled: true, mode: "cassette", mixPct: 100, intensityPct: 80 } };
+  const regionA = tone(0.4, 220, 0.5);
+  const regionB = tone(0.4, 220, 0.5); // same length and content as regionA
+  const [outA] = applyLofiChain([regionA], SR, settings, deriveRegionSeed(1, 0));
+  const [outB] = applyLofiChain([regionB], SR, settings, deriveRegionSeed(1, 1));
+  assert.ok(rmsDiff(outA, outB) > 0, "same-length regions with different derived seeds should differ");
+});
+
+test("applyLofiChain: the same seed still reproduces identically (determinism preserved)", () => {
+  const settings = { outputStage: { enabled: true, mode: "vinyl", mixPct: 100, intensityPct: 80 } };
+  const region = tone(0.4, 220, 0.5);
+  const [a] = applyLofiChain([region], SR, settings, deriveRegionSeed(5, 2));
+  const [b] = applyLofiChain([region], SR, settings, deriveRegionSeed(5, 2));
+  assert.deepEqual(Array.from(a), Array.from(b));
 });
 
 // --- applyDrive ----------------------------------------------------------

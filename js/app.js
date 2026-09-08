@@ -25,7 +25,7 @@ import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, 
 import { createStretchWorkspace } from "./stretch-workspace.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
 import { resolveNamePattern, resolveFolderName } from "./naming-tokens.js";
-import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure } from "./outputstage.js";
+import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure, deriveRegionSeed } from "./outputstage.js";
 import { isLofiActive, lofiSnapshotForTask, wantsCleanSecondary } from "./output-scope.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { regionStartsToCueFrames, checkM8MarkerLimit } from "./slice-markers.js";
@@ -75,8 +75,13 @@ let mode = "phrases"; // 'phrases' | 'rhodes' | 'drums'
 let processing = false;
 
 // Preview and Export are the same run with one difference: whether writeOutput() is allowed to
-// touch the disk. See writeOutput().
-let dryRun = false;
+// touch the disk. See writeOutput(). Deliberately threaded as an explicit parameter through the
+// whole export call chain (processOneFile -> exportChopsForRegions/writeOneShotRegions/
+// exportMarkerWavForFile -> writeOutput) rather than kept as shared mutable state here: a module-level
+// flag would be read concurrently by a real batch export (processBatch) and by an unrelated card's
+// "Update previews"/Re-chop/Revert action (regeneratePreviews, always preview-only), which - since
+// both are async and interleave on the microtask queue - could flip mid-export and cause writeOutput()
+// to silently skip real disk writes for files the batch is still exporting.
 
 /**
  * What Preview worked out, so Export doesn't have to work it out again.
@@ -1378,7 +1383,29 @@ function applyLofiChain(channels, sampleRate) {
 // Settings persistence (this browser only - a light convenience, not sync)
 // ---------------------------------------------------------------------------
 
+let saveSettingsTimer = null;
+
+/**
+ * Persists current settings to localStorage. Every settings mutation in this file funnels through
+ * here, which makes this the one place that needs to know "did something that would change a
+ * stretch render just happen" - see refreshStretchStaleIndicator() below, run synchronously and
+ * unconditionally on every call (it's cheap - a string compare, no waveform rebuild - and a no-op
+ * outside the STRETCH task) so the stale-preview indicator never lags behind a change the way the
+ * write itself deliberately does: the actual localStorage write is debounced, since a slider drag
+ * fires this on every `input` event (see bindSliderNumber) - many times a second while dragging -
+ * and a synchronous JSON.stringify + localStorage.setItem on every pixel moved is pure waste when
+ * only the value at rest actually matters. flushSaveSettings() below guards against losing whatever
+ * changed in the last debounce window if the page closes before the timer fires.
+ */
 function saveSettings() {
+  refreshStretchStaleIndicator();
+  clearTimeout(saveSettingsTimer);
+  saveSettingsTimer = setTimeout(flushSaveSettings, 400);
+}
+
+function flushSaveSettings() {
+  clearTimeout(saveSettingsTimer);
+  saveSettingsTimer = null;
   try {
     localStorage.setItem(
       SETTINGS_STORAGE_KEY,
@@ -1403,12 +1430,14 @@ function saveSettings() {
   } catch (_) {
     /* best-effort only - private browsing, storage disabled, quota, etc. */
   }
-  // Every settings mutation in this file funnels through here, which makes this the one place that
-  // needs to know "did something that would change a stretch render just happen" - see
-  // refreshStretchStaleIndicator(). Cheap (a string compare, no waveform rebuild) and a no-op
-  // outside the STRETCH task.
-  refreshStretchStaleIndicator();
 }
+
+// A debounced write must not silently lose the last change if the tab closes/backgrounds before its
+// timer fires - flush immediately whenever the page might not get another chance to.
+window.addEventListener("pagehide", flushSaveSettings);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushSaveSettings();
+});
 
 function loadSettings() {
   try {
@@ -1768,7 +1797,7 @@ function renderFolderList() {
     removeBtn.addEventListener("click", () => {
       const idx = sourceFolders.indexOf(folder);
       if (idx >= 0) sourceFolders.splice(idx, 1);
-      if (folder.kind === "fsa" && !folder.isLoose) forgetFolder(folder.name);
+      if (folder.kind === "fsa" && !folder.isLoose) forgetFolder(folder.name, folder.handle);
       expandedFolderIds.delete(folder.id);
       renderFolderList();
       updateProcessButton();
@@ -1840,7 +1869,7 @@ function renderFolderList() {
     forgetBtn.addEventListener("click", () => {
       const idx = pendingReconnectFolders.indexOf(pending);
       if (idx >= 0) pendingReconnectFolders.splice(idx, 1);
-      forgetFolder(pending.name);
+      forgetFolder(pending.name, pending.handle);
       renderFolderList();
     });
     actions.appendChild(reconnectBtn);
@@ -2203,7 +2232,6 @@ async function newSession() {
   sessionEpoch++; // processBatch() re-checks this before every write - see its declaration above
   cancelRequested = true; // belt-and-braces: also trips a running batch's own Cancel-style check
   processing = false;
-  dryRun = false;
   progressRow.hidden = true;
   stopAllFileEditorPlayback();
   mountedFileEditors.clear();
@@ -2265,6 +2293,20 @@ let heavyDspWorkerBroken = false;
 let heavyDspRequestId = 0;
 const heavyDspPending = new Map();
 
+// A stuck worker message (an infinite loop in some DSP path, on some pathological input) must not
+// hang a batch forever with no recovery but a page reload - see processRegionsHeavy's timeout below.
+// One processRegionsHeavy call can cover a whole file's worth of chops at once (exportChopsForRegions
+// passes every region in one call), so the budget scales with how many regions this call represents
+// rather than being a single fixed ceiling.
+const HEAVY_DSP_TIMEOUT_BASE_MS = 30000;
+const HEAVY_DSP_TIMEOUT_PER_REGION_MS = 10000;
+
+function terminateHeavyDspWorker() {
+  if (heavyDspWorker) heavyDspWorker.terminate();
+  heavyDspWorker = null;
+  heavyDspWorkerBroken = true;
+}
+
 function getHeavyDspWorker() {
   if (heavyDspWorker || heavyDspWorkerBroken) return heavyDspWorker;
   try {
@@ -2282,8 +2324,7 @@ function getHeavyDspWorker() {
       // outstanding, then this whole session falls back to the main thread from here on.
       for (const pending of heavyDspPending.values()) pending.reject(new Error(ev.message || "worker error"));
       heavyDspPending.clear();
-      heavyDspWorkerBroken = true;
-      heavyDspWorker = null;
+      terminateHeavyDspWorker();
     });
   } catch (err) {
     heavyDspWorkerBroken = true;
@@ -2297,27 +2338,52 @@ async function processRegionsHeavy({ sampleRate, bitDepth, fadeInSamples, fadeOu
   const lofi = lofiSettingsSnapshot();
   const worker = getHeavyDspWorker();
   if (worker) {
+    const transferList = regions.flatMap((r) => r.channels.map((ch) => ch.buffer));
+    const timeoutMs = HEAVY_DSP_TIMEOUT_BASE_MS + regions.length * HEAVY_DSP_TIMEOUT_PER_REGION_MS;
     try {
-      const transferList = regions.flatMap((r) => r.channels.map((ch) => ch.buffer));
       return await new Promise((resolve, reject) => {
         const requestId = ++heavyDspRequestId;
-        heavyDspPending.set(requestId, { resolve, reject });
+        const timer = setTimeout(() => {
+          heavyDspPending.delete(requestId);
+          reject(new Error(`heavy-dsp-worker did not respond within ${Math.round(timeoutMs / 1000)}s - it may be stuck`));
+        }, timeoutMs);
+        heavyDspPending.set(requestId, {
+          resolve: (v) => {
+            clearTimeout(timer);
+            resolve(v);
+          },
+          reject: (e) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+        });
         worker.postMessage({ type: "processRegions", requestId, sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, macroValues, seed, lofi, regions }, transferList);
       });
     } catch (err) {
+      // regions' channel buffers were transferred to the worker above - postMessage's transfer list
+      // detaches them synchronously in THIS thread the moment it's called, whether or not the worker
+      // ever responds - so they can't be safely reused for a main-thread retry of this same call:
+      // that would silently encode empty/garbage audio instead of throwing. Terminate the worker (a
+      // timeout means it may genuinely still be stuck processing this job) and let this one call
+      // fail; every caller already treats a thrown error here as "this file/chop failed, log it and
+      // move on" rather than aborting the whole batch. Every later call in this session goes through
+      // the (correctly buffer-owning) main-thread fallback below instead, since getHeavyDspWorker()
+      // now returns null.
       console.error("heavy-dsp-worker failed, falling back to the main thread for the rest of this session:", err);
-      heavyDspWorkerBroken = true;
-      heavyDspWorker = null;
+      terminateHeavyDspWorker();
+      throw err;
     }
   }
 
   // Main-thread fallback - identical logic to heavy-dsp-worker.js's onmessage handler.
-  return regions.map(({ channels }) => {
+  return regions.map(({ channels }, i) => {
     let sliced = channels;
     if (stretchRatio && stretchRatio !== 1) {
       sliced = stretchChannels(sliced, sampleRate, stretchRatio, character, { macroValues, seed });
     }
-    sliced = applyLofiChainPure(sliced, sampleRate, lofi);
+    // Per-region seed (not the raw batch seed) - see deriveRegionSeed's own doc comment for why a
+    // shared seed across every region of the same length would otherwise sound identical.
+    sliced = applyLofiChainPure(sliced, sampleRate, lofi, deriveRegionSeed(seed, i));
     applyFades(sliced, fadeInSamples || 0, fadeOutSamples || 0);
     const blob = encodeWav(sliced, sampleRate, bitDepth);
     return { blob, seconds: sliced[0].length / sampleRate };
@@ -2417,7 +2483,7 @@ function sliceChannels(channels, startSample, endSample) {
   return channels.map((ch) => ch.slice(startSample, endSample));
 }
 
-async function writeOutput(folder, subdir, relDir, fileName, blob, zipBatch, fileInfo) {
+async function writeOutput(folder, subdir, relDir, fileName, blob, zipBatch, fileInfo, dryRun) {
   // Preview runs the entire pipeline and skips exactly one thing: this. Every blob is still
   // produced, so the results panel gets real audio to audition and real waveforms to edit -
   // nothing reaches the disk until Export. This is the only place the app writes audio, which
@@ -2455,7 +2521,7 @@ function describeFsaDestination(folder) {
 }
 
 /** Processes one source audio file: decode, analyze, export chops. Returns the number of chops made. */
-async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
+async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRun) {
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const stem = fileInfo.name.replace(/\.[^.]+$/, "");
   const key = analysisKey(folder, fileInfo);
@@ -2507,7 +2573,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
   // analyzed and chopped in place, with nothing duplicated into wav/.
   if (fileInfo.ext !== ".wav") {
     const wavBlob = encodeWav(channels, buffer.sampleRate, 24);
-    await writeOutput(folder, "wav", fileInfo.relativeDir, `${taggedStem}.wav`, wavBlob, zipBatch, fileInfo);
+    await writeOutput(folder, "wav", fileInfo.relativeDir, `${taggedStem}.wav`, wavBlob, zipBatch, fileInfo, dryRun);
     log(`    converted to WAV (${method})`);
   }
 
@@ -2528,7 +2594,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
     const derivedBlob = await renderStretchAudio(channels, buffer.sampleRate, fullStretchRatio);
     if (fullStretched || fullLofi) {
       const derivedName = `${taggedStem}${fullStretched ? " stretched" : ""}${fullLofi ? " lofi" : ""}.wav`;
-      await writeOutput(folder, "wav", fileInfo.relativeDir, derivedName, derivedBlob, zipBatch, fileInfo);
+      await writeOutput(folder, "wav", fileInfo.relativeDir, derivedName, derivedBlob, zipBatch, fileInfo, dryRun);
       // Same "don't claim a write that writeOutput() actually skipped" rule as exportMarkerWavForFile -
       // only relevant for a real Export (dryRun already means nothing was ever going to be written).
       if (dryRun || isExportIncluded(fileInfo)) {
@@ -2584,13 +2650,14 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
       effectiveBpm,
       kt: effectiveKt,
       writeIndividualFiles,
+      dryRun,
     }));
 
     if (writeIndividualFiles) {
       log(`    created ${chopRows.length} chop(s)`);
     } else {
       log(`    ${chopRows.length} chop boundary/boundaries ready for audition (exporting as one continuous WAV with slice markers, not individual files)`);
-      await exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions, channels, sampleRate: buffer.sampleRate, zipBatch });
+      await exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions, channels, sampleRate: buffer.sampleRate, zipBatch, dryRun });
     }
 
     // A file's one-shots can be dropped individually from the preview, for when the extraction
@@ -2612,6 +2679,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
         sampleRate: buffer.sampleRate,
         zipBatch,
         effectiveBpm,
+        dryRun,
       });
       oneShotRows = extracted.rows;
       oneShotMarkers = extracted.markers;
@@ -2712,7 +2780,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl) {
  * with Slice Markers" mode skips writing the numbered per-chop files while exportMarkerWavForFile()
  * writes the one continuous file that replaces them for that run.
  */
-async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, effectiveBpm, kt, writeIndividualFiles = true }) {
+async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, effectiveBpm, kt, writeIndividualFiles = true, dryRun }) {
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
   const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
   const fadeOutSamples = fadeInSamples;
@@ -2783,9 +2851,9 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
     const { blob, seconds } = heavyResults[i];
     const fileName = buildChopFileName(stem, tag, i + 1, kt);
     if (writeIndividualFiles) {
-      await writeOutput(folder, "chops", relPath, fileName, blob, zipBatch, fileInfo);
+      await writeOutput(folder, "chops", relPath, fileName, blob, zipBatch, fileInfo, dryRun);
       if (wantCleanCopy) {
-        await writeOutput(folder, "chops clean", relPath, fileName, cleanBlobs[i], zipBatch, fileInfo);
+        await writeOutput(folder, "chops clean", relPath, fileName, cleanBlobs[i], zipBatch, fileInfo, dryRun);
       }
     }
     chopRows.push({ fileName, blob, seconds });
@@ -2809,7 +2877,7 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
  * sidesteps both problems by never processing the continuous source - see the "Chop output" panel's
  * note in index.html, which tells the user this up front.
  */
-async function exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions, channels, sampleRate, zipBatch }) {
+async function exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions, channels, sampleRate, zipBatch, dryRun }) {
   if (!regions || regions.length === 0) {
     log(`    no chop regions to mark - skipped WAV with Slice Markers export`);
     return;
@@ -2819,7 +2887,7 @@ async function exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions, c
   const { ok, count, limit } = checkM8MarkerLimit(cueFrames.length);
   const blob = encodeWav(channels, sampleRate, exportSettings.bitDepth, { cuePoints: cueFrames });
   const fileName = `${taggedStem} slices.wav`;
-  await writeOutput(folder, "wav", fileInfo.relativeDir, fileName, blob, zipBatch, fileInfo);
+  await writeOutput(folder, "wav", fileInfo.relativeDir, fileName, blob, zipBatch, fileInfo, dryRun);
   // A real Export (not a dry-run Preview) with this source's "Include in export" off means
   // writeOutput() above silently skipped the write - the per-file toggle already logged that this
   // source is excluded, so don't also claim a marker WAV was written (or warn about its marker count)
@@ -2834,13 +2902,17 @@ async function exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions, c
   }
 }
 
-/** Re-decodes a source file and re-exports its main chops from a manually-edited region list. */
+/** Re-decodes a source file and re-exports its main chops from a manually-edited region list.
+ * Always a preview render - only ever called from regeneratePreviews() ("Update previews", and the
+ * Re-chop/Revert paths that call it afterwards), never from a real Export - so dryRun is fixed true
+ * here rather than threaded in from a caller. */
 async function reExportSingleFile(editContext, editedRegions) {
   const { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt } = editContext;
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
   const mono = toMono(channels);
+  const dryRun = true;
   const zipBatch = folder.kind === "fsa" || dryRun ? null : new ZipBatch();
   const writeIndividualFiles = chopExportFormat !== "markers";
 
@@ -2858,13 +2930,14 @@ async function reExportSingleFile(editContext, editedRegions) {
     effectiveBpm,
     kt,
     writeIndividualFiles,
+    dryRun,
   });
 
   // Editing regions and re-exporting must keep producing whatever format Export would currently
   // write for this file - otherwise switching to markers mode, tweaking a boundary, and clicking
   // "Update previews" would silently leave the on-disk marker WAV stale relative to the edit.
   if (!writeIndividualFiles) {
-    await exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions: editedRegions, channels, sampleRate: buffer.sampleRate, zipBatch });
+    await exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions: editedRegions, channels, sampleRate: buffer.sampleRate, zipBatch, dryRun });
   }
 
   if (zipBatch) {
@@ -2975,7 +3048,7 @@ function detectOneShotRegions(mono, sampleRate) {
  * rough sort, not something reliable enough to bake into a filename. Shared by the initial
  * auto-detected pass and by the manual one-shot editor's "Save & re-export".
  */
-async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch, effectiveBpm }) {
+async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, channels, mono, sampleRate, zipBatch, effectiveBpm, dryRun }) {
   if (regions.length === 0) return { rows: [], markers: [] };
 
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
@@ -3043,9 +3116,9 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
     const { startSample, endSample } = regionDefs[i];
     const { blob, seconds } = heavyResults[i];
     const fileName = `${String(i + 1).padStart(2, "0")}.wav`;
-    await writeOutput(folder, "one shots", relPath, fileName, blob, zipBatch, fileInfo);
+    await writeOutput(folder, "one shots", relPath, fileName, blob, zipBatch, fileInfo, dryRun);
     if (wantCleanCopy) {
-      await writeOutput(folder, "one shots clean", relPath, fileName, cleanBlobs[i], zipBatch, fileInfo);
+      await writeOutput(folder, "one shots clean", relPath, fileName, cleanBlobs[i], zipBatch, fileInfo, dryRun);
     }
     rows.push({ fileName, blob, seconds });
     markers.push([startSample / sampleRate, endSample / sampleRate]);
@@ -3054,13 +3127,16 @@ async function writeOneShotRegions({ folder, fileInfo, taggedStem, regions, chan
 }
 
 
-/** Re-decodes a source file and re-exports its one-shots from a manually-edited region list. */
+/** Re-decodes a source file and re-exports its one-shots from a manually-edited region list.
+ * Always a preview render - only ever called from regeneratePreviews(), never from a real Export -
+ * so dryRun is fixed true here rather than threaded in from a caller. */
 async function reExportOneShots(editContext, editedRegions) {
   const { folder, fileInfo, taggedStem, effectiveBpm } = editContext;
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
   const mono = toMono(channels);
+  const dryRun = true;
   const zipBatch = folder.kind === "fsa" || dryRun ? null : new ZipBatch();
 
   const { rows, markers } = await writeOneShotRegions({
@@ -3073,6 +3149,7 @@ async function reExportOneShots(editContext, editedRegions) {
     sampleRate: buffer.sampleRate,
     zipBatch,
     effectiveBpm,
+    dryRun,
   });
 
   if (zipBatch) {
@@ -3707,8 +3784,6 @@ function renderFileResult(state) {
     revertBtn.disabled = true;
     const previousLabel = applyBtn.textContent;
     applyBtn.textContent = "Updating…";
-    const wasDryRun = dryRun;
-    dryRun = true;
     try {
       const regions = editor.getRegions();
       if (editing === "chops") {
@@ -3729,8 +3804,6 @@ function renderFileResult(state) {
       applyBtn.disabled = false;
       revertBtn.disabled = false;
       applyBtn.textContent = previousLabel;
-    } finally {
-      dryRun = wasDryRun;
     }
   }
 
@@ -3857,8 +3930,12 @@ async function processBatch({ write = true } = {}) {
   // already in flight notices and stops quietly, rather than continuing to populate a session that
   // already moved on.
   const myEpoch = sessionEpoch;
+  // Local to this run, not shared module state - see the dryRun parameter thread through
+  // processOneFile/exportChopsForRegions/writeOneShotRegions/exportMarkerWavForFile/writeOutput.
+  // A shared flag here would race with an unrelated card's "Update previews"/Re-chop action running
+  // concurrently (those always preview - see reExportSingleFile/reExportOneShots).
+  const dryRun = !write;
   processing = true;
-  dryRun = !write;
   cancelRequested = false;
   cancelBtn.disabled = false;
   cancelBtn.textContent = "Cancel";
@@ -3936,7 +4013,7 @@ async function processBatch({ write = true } = {}) {
       if (!isIncluded(fileInfo)) continue;
       updateProgress(filesDone, totalFiles, `${fileInfo.name} (${filesDone + 1}/${totalFiles})`);
       try {
-        totalChops += await processOneFile(folder, fileInfo, zipBatch, folderSection);
+        totalChops += await processOneFile(folder, fileInfo, zipBatch, folderSection, dryRun);
       } catch (err) {
         log(`  ERROR on ${fileInfo.name}: ${err.message || err} - skipping this file, batch continues`);
         console.error(err);
@@ -3956,7 +4033,6 @@ async function processBatch({ write = true } = {}) {
     // old batch's zip download/destination summary/"Done" line against a session that already moved
     // on (see newSession()). No log line either: the new session's own log was already started fresh.
     processing = false;
-    dryRun = false;
     cancelRequested = false;
     progressRow.hidden = true;
     return;
@@ -4005,7 +4081,6 @@ async function processBatch({ write = true } = {}) {
     logSuccess(`Done. Exported ${totalChops} chop(s) from ${processedFolders} folder(s).`);
   }
   processing = false;
-  dryRun = false;
   cancelRequested = false;
   updateProcessButton();
   progressRow.hidden = true;
@@ -4115,7 +4190,7 @@ async function loadRememberedFolders() {
     } catch (err) {
       // The handle references a folder that's gone (moved/deleted) or something else broke -
       // stop remembering it rather than showing a permanently-broken reconnect row.
-      forgetFolder(name);
+      forgetFolder(name, handle);
     }
   }
   if (remembered.length) {

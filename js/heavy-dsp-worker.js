@@ -9,7 +9,7 @@
 // back. See runHeavyDsp() in app.js for the calling side, including the same-thread fallback used
 // if a worker can't be created at all (very old browsers, or a `file://` load).
 import { stretchChannels } from "./timestretch.js";
-import { applyLofiChain } from "./outputstage.js";
+import { applyLofiChain, deriveRegionSeed } from "./outputstage.js";
 import { applyFades } from "./dsp.js";
 import { encodeWav } from "./audio-codec.js";
 
@@ -19,12 +19,13 @@ self.onmessage = (ev) => {
   const { requestId, sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, macroValues, seed, lofi, regions } = msg;
 
   try {
-    const results = regions.map(({ channels }) => {
+    const results = regions.map(({ channels }, i) => {
       let sliced = channels;
       if (stretchRatio && stretchRatio !== 1) {
         sliced = stretchChannels(sliced, sampleRate, stretchRatio, character, { macroValues, seed });
       }
-      sliced = applyLofiChain(sliced, sampleRate, lofi);
+      // Per-region seed (not the raw batch seed) - see deriveRegionSeed's own doc comment.
+      sliced = applyLofiChain(sliced, sampleRate, lofi, deriveRegionSeed(seed, i));
       applyFades(sliced, fadeInSamples || 0, fadeOutSamples || 0);
       const blob = encodeWav(sliced, sampleRate, bitDepth);
       return { blob, seconds: sliced[0].length / sampleRate };

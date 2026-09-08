@@ -470,6 +470,19 @@ const MODE_FACTORIES = {
 };
 
 /**
+ * Derives a distinct, deterministic seed for the Nth region of a batch export from the batch's own
+ * seed (timestretchSettings.seed - reused here even when time-stretch itself is off, since it's
+ * already the one per-export "randomness" knob the UI exposes). Needed because applyOutputStage's
+ * own seed fallback (below) is derived only from the region's sample length: every one-shot/chop of
+ * the same length in a batch would otherwise get byte-identical wow/hiss/click noise, an audible
+ * "twin" artifact across a folder of same-length hits.
+ */
+export function deriveRegionSeed(baseSeed, index) {
+  const base = (baseSeed ?? 1) >>> 0;
+  return (base ^ Math.imul(index + 1, 2654435761)) >>> 0;
+}
+
+/**
  * Applies an output-stage character preset to every channel in lockstep (stereo L/R if present,
  * otherwise the single channel is treated as both). `mixPct`/`intensityPct` are 0-100: intensity
  * scales how strongly the mode's own processing differs from the dry signal, mix is the final
@@ -554,12 +567,16 @@ export function applyDrive(channels, driveKey, amountPct = 0) {
  * no-op unless its `enabled` flag is set. `settings` is a plain, structured-cloneable object
  * ({outputStage, drive, crunch}, each matching the shape of the app's *Settings objects), so this
  * same function runs identically on the main thread (app.js) and inside heavy-dsp-worker.js.
+ * `seed`, if given, is passed straight through to the output-stage's own RNG (see
+ * applyOutputStage/deriveRegionSeed above) - callers processing more than one region per export
+ * should pass a distinct seed per region rather than leaving it undefined for every call, or every
+ * same-length region gets identical "random" noise/wow.
  */
-export function applyLofiChain(channels, sampleRate, settings = {}) {
+export function applyLofiChain(channels, sampleRate, settings = {}, seed) {
   let out = channels;
   const { outputStage, drive, crunch } = settings;
   if (outputStage && outputStage.enabled) {
-    out = applyOutputStage(out, sampleRate, outputStage.mode, outputStage.mixPct, outputStage.intensityPct);
+    out = applyOutputStage(out, sampleRate, outputStage.mode, outputStage.mixPct, outputStage.intensityPct, seed);
   }
   if (drive && drive.enabled) {
     out = applyDrive(out, drive.type, drive.amountPct);

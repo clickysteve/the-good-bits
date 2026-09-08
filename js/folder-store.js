@@ -13,6 +13,15 @@
 // browsers, storage disabled) or a stored handle can go stale (the folder was moved/deleted), and
 // none of that should ever break the rest of the app - failures are swallowed and callers get an
 // empty/no-op result instead of a thrown error.
+//
+// Keyed by folder name, but a name is NOT a unique identity - browsers expose no filesystem path to
+// this app at all (see io-fs.js's formatSourcePath), so two entirely different folders can
+// legitimately share the same display name (two projects each with a "Drums" subfolder, say).
+// Records therefore hold a *list* of handles per name rather than one, so remembering a
+// same-named-but-different folder can't silently clobber (overwrite, or accidentally forget) one
+// already remembered - see normalizeHandles()/sameEntry() below, which also read the older
+// single-`handle`-per-name shape this store used before, so existing users' already-remembered
+// folders keep working with no migration step.
 
 const DB_NAME = "good-bits-folders";
 const DB_VERSION = 1;
@@ -46,38 +55,107 @@ function runTx(db, mode, run) {
   });
 }
 
-/** Remembers a folder handle by name (overwrites any existing entry with the same name). */
+function getRecord(db, name) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const req = tx.objectStore(STORE_NAME).get(name);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** A record's handle list, reading either this store's current shape ({name, handles: [...]}) or
+ * the single-handle shape it used before ({name, handle}) - so a folder remembered by an older
+ * version of this module still comes back correctly rather than being silently dropped. */
+function normalizeHandles(record) {
+  if (!record) return [];
+  if (Array.isArray(record.handles)) return record.handles;
+  return record.handle ? [record.handle] : [];
+}
+
+/** Whether two FileSystemDirectoryHandles reference the same underlying folder. Swallows the error
+ * isSameEntry() can throw for a handle that's gone stale, treating that as "not the same folder"
+ * rather than letting it break the remember/forget call around it. */
+async function sameEntry(a, b) {
+  try {
+    return await a.isSameEntry(b);
+  } catch (_) {
+    return false;
+  }
+}
+
+/** Remembers a folder handle by name. If a handle for the same underlying folder (isSameEntry) is
+ * already remembered under this name, its stored entry is just refreshed in place; otherwise it's
+ * added alongside whatever else is already remembered under this name rather than overwriting it -
+ * see the module doc comment above for why two remembered entries can share a name. */
 export async function rememberFolder(name, handle) {
   try {
     const db = await openDb();
-    await runTx(db, "readwrite", (store) => store.put({ name, handle }));
+    const existing = normalizeHandles(await getRecord(db, name));
+    let matched = false;
+    for (let i = 0; i < existing.length; i++) {
+      if (await sameEntry(existing[i], handle)) {
+        existing[i] = handle;
+        matched = true;
+        break;
+      }
+    }
+    const handles = matched ? existing : [...existing, handle];
+    await runTx(db, "readwrite", (store) => store.put({ name, handles }));
     db.close();
   } catch (_) {
     /* best-effort only */
   }
 }
 
-/** Returns all remembered {name, handle} entries, or [] if IndexedDB isn't available/empty. */
+/** Returns every remembered {name, handle} entry (one per handle, so a name shared by more than one
+ * remembered folder yields more than one entry), or [] if IndexedDB isn't available/empty. */
 export async function listRememberedFolders() {
   try {
     const db = await openDb();
-    const result = await new Promise((resolve, reject) => {
+    const records = await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readonly");
       const req = tx.objectStore(STORE_NAME).getAll();
       req.onsuccess = () => resolve(req.result || []);
       req.onerror = () => reject(req.error);
     });
     db.close();
-    return result;
+    const out = [];
+    for (const record of records) {
+      for (const handle of normalizeHandles(record)) out.push({ name: record.name, handle });
+    }
+    return out;
   } catch (_) {
     return [];
   }
 }
 
-/** Stops remembering a folder by name. */
-export async function forgetFolder(name) {
+/**
+ * Stops remembering a folder by name. With `handle` given, only the entry for that specific
+ * underlying folder (isSameEntry) is dropped, leaving any other differently-located folder that
+ * happens to share this display name untouched; without it, every entry under this name is
+ * forgotten (used when there's no handle left to distinguish by, e.g. clearing everything).
+ */
+export async function forgetFolder(name, handle) {
   try {
     const db = await openDb();
+    if (handle) {
+      const existing = normalizeHandles(await getRecord(db, name));
+      const remaining = [];
+      for (const h of existing) {
+        if (!(await sameEntry(h, handle))) remaining.push(h);
+      }
+      if (remaining.length > 0 && remaining.length < existing.length) {
+        await runTx(db, "readwrite", (store) => store.put({ name, handles: remaining }));
+        db.close();
+        return;
+      }
+      if (remaining.length === existing.length) {
+        // handle didn't match anything under this name - nothing to remove.
+        db.close();
+        return;
+      }
+    }
     await runTx(db, "readwrite", (store) => store.delete(name));
     db.close();
   } catch (_) {

@@ -428,17 +428,40 @@ export function createEditableWaveform({
     onSelect(idx);
   }
 
+  /**
+   * Toolbar "+ Add": drop a default-length slice centered on `centerTime`. Must never overlap an
+   * existing region, same guarantee as the double-click gesture (addOrSplitAt/addOrSplitRegionAt
+   * below) - a naive symmetric slice clamped only to [0, duration] can land on top of whatever
+   * region is already sitting under the view center. If `centerTime` falls inside an existing
+   * region there's no free space to drop a new one at all, so this defers to the split gesture
+   * instead of fabricating an overlap; otherwise the default-length slice is clamped into the free
+   * gap around `centerTime` (the end of the preceding region, or 0, up to the start of the
+   * following one, or duration).
+   */
   function addSliceAt(centerTime) {
-    const defaultLen = Math.min(Math.max(duration, MIN_SLICE_SEC), Math.max(0.05, viewDuration * 0.2));
-    let s = Math.max(0, centerTime - defaultLen / 2);
-    let e = Math.min(duration, centerTime + defaultLen / 2);
-    s = snap(s);
-    e = snap(e);
-    if (e - s < MIN_SLICE_SEC) e = Math.min(duration, s + MIN_SLICE_SEC);
-    if (e - s < MIN_SLICE_SEC) s = Math.max(0, e - MIN_SLICE_SEC);
-    slices.push({ s, e });
+    if (sliceAtTime(centerTime) != null) {
+      addOrSplitAt(centerTime);
+      return;
+    }
+    let precEnd = 0;
+    for (const r of slices) if (r.e <= centerTime) precEnd = r.e;
+    const next = slices.find((r) => r.s > centerTime);
+    const nextStart = next ? next.s : duration;
+    if (nextStart - precEnd < MIN_SLICE_SEC) return; // no room here at all
+
+    const defaultLen = Math.min(nextStart - precEnd, Math.max(0.05, viewDuration * 0.2));
+    let s = Math.max(precEnd, centerTime - defaultLen / 2);
+    let e = Math.min(nextStart, centerTime + defaultLen / 2);
+    s = Math.max(precEnd, snap(s));
+    e = Math.min(nextStart, snap(e));
+    if (e - s < MIN_SLICE_SEC) e = Math.min(nextStart, s + MIN_SLICE_SEC);
+    if (e - s < MIN_SLICE_SEC) s = Math.max(precEnd, e - MIN_SLICE_SEC);
+    if (e - s < MIN_SLICE_SEC) return; // window too tight even unsnapped - refuse rather than overlap
+
+    const newSlice = { s, e };
+    slices.push(newSlice);
     slices.sort((a, b) => a.s - b.s);
-    select(slices.findIndex((r) => r.s === s && r.e === e));
+    select(slices.indexOf(newSlice)); // identity, not coordinate match - safe even if two slices share bounds
     onChange();
   }
 
