@@ -2213,6 +2213,7 @@ async function decodeFile(file, ext) {
 
 let heavyDspWorker = null;
 let heavyDspWorkerBroken = false;
+let heavyDspFallbackNotified = false; // logWarn() the first time only - see terminateHeavyDspWorker()
 let heavyDspRequestId = 0;
 const heavyDspPending = new Map();
 
@@ -2228,6 +2229,14 @@ function terminateHeavyDspWorker() {
   if (heavyDspWorker) heavyDspWorker.terminate();
   heavyDspWorker = null;
   heavyDspWorkerBroken = true;
+  // Every later processRegionsHeavy call in this session now runs on the main thread instead - see
+  // getHeavyDspWorker()'s own `heavyDspWorkerBroken` check. That's silent-but-still-correct on a
+  // small batch, but worth surfacing once so a large batch that's noticeably slower than expected
+  // isn't a mystery. Only ever logged once per session, not once per subsequent fallback.
+  if (!heavyDspFallbackNotified) {
+    heavyDspFallbackNotified = true;
+    logWarn("Background audio processing failed - the rest of this session runs on the main thread instead. Exports still work, just slower on a big batch.");
+  }
 }
 
 function getHeavyDspWorker() {
@@ -2250,8 +2259,7 @@ function getHeavyDspWorker() {
       terminateHeavyDspWorker();
     });
   } catch (err) {
-    heavyDspWorkerBroken = true;
-    heavyDspWorker = null;
+    terminateHeavyDspWorker();
   }
   return heavyDspWorker;
 }
@@ -2744,6 +2752,12 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
     sampleRate: buffer.sampleRate,
     editContext,
     analysisKey: key,
+    // Frozen at process time, same reasoning as hasOneShots below: key/tempo detection runs
+    // unconditionally regardless of mode now, so effectiveBpm alone can't tell a tempo-locked drum
+    // break from an incidentally-detected tempo on a phrase-mode source - only this can. Used to
+    // gate the waveform editor's beat/bar grid (see mountEditor's createEditableWaveform call),
+    // which would be actively misleading on chops that were never bar-quantized to begin with.
+    isDrumsMode: mode === "drums",
     hasOneShots: mode === "drums" && extractOneShots,
     chopSelectedIndex: previous ? previous.chopSelectedIndex : null,
     oneShotSelectedIndex: previous ? previous.oneShotSelectedIndex : null,
@@ -3629,6 +3643,9 @@ function renderFileResult(state) {
       noun: editing === "chops" ? "chop" : "one-shot",
       zcSearchMs: exportSettings.zcSearchMs,
       color: themeColor,
+      // Grid is a drums-mode, main-chops-only reference (one-shot hits aren't bar-quantized) - see
+      // state.isDrumsMode's own doc comment for why this can't just check effectiveBpm alone.
+      bpm: editing === "chops" && state.isDrumsMode && state.editContext ? state.editContext.effectiveBpm : null,
       // The canonical region state lives in analysisCache, and it's updated the moment a slice
       // changes - not on some later "Apply" click. This is what makes Export always cut where the
       // waveform currently shows, whether or not "Update previews" was ever clicked. Every commit
@@ -3791,7 +3808,19 @@ function renderFileResult(state) {
     regeneratePreviews();
   });
 
-  rechopClearBtn.addEventListener("click", () => {
+  rechopClearBtn.addEventListener("click", async () => {
+    const currentCount = editor ? editor.getRegions().length : 0;
+    if (currentCount > 0) {
+      const { confirmed } = await showConfirmDialog({
+        title: "Clear every chop?",
+        body: `This removes all ${currentCount} chop${currentCount === 1 ? "" : "s"} on ${
+          state.fileName
+        } so you can build a new set from scratch with + Add. Undo (Cmd/Ctrl+Z) brings them back if you change your mind.`,
+        confirmLabel: "Clear",
+        cancelLabel: "Cancel",
+      });
+      if (!confirmed) return;
+    }
     applyNewChopRegions([]);
     log(`  ${state.fileName}: chops cleared - build your own with + Add.`);
     regeneratePreviews();

@@ -46,6 +46,11 @@ export function viewXToTime(xRel, width, viewStart, viewDuration) {
  * @param {string} opts.noun                "chop" or "one-shot", for labels and empty states
  * @param {number} opts.zcSearchMs          zero-crossing snap window, from export settings
  * @param {(name:string,fallback:string)=>string} opts.color  reads a CSS custom property
+ * @param {number|null} [opts.bpm]          confidently-detected/effective tempo, if any - draws a
+ *   faint beat/bar reference grid (4/4 assumed) behind the waveform when set, so a manual boundary
+ *   nudge near a bar line has something to line up against. Omit/null for anything that isn't
+ *   tempo-locked drum material (phrase-mode chops, one-shots, an unconfident/no detection) - the
+ *   grid is a drums-mode-only convenience, not a general metronome overlay.
  * @param {()=>void} opts.onChange          fired whenever the slice list changes
  * @param {(idx:number|null)=>void} opts.onSelect
  * @param {()=>void} [opts.onUndo]          fired by the Undo button or Cmd/Ctrl+Z - the canonical
@@ -62,6 +67,7 @@ export function createEditableWaveform({
   noun = "chop",
   zcSearchMs = 15,
   color = (_n, f) => f,
+  bpm = null,
   onChange = () => {},
   onSelect = () => {},
   onUndo = () => {},
@@ -88,7 +94,7 @@ export function createEditableWaveform({
   const loopBtn = mkBtn("↺ Loop", "Loop the selected slice");
   loopBtn.classList.add("btn--loop");
   const addBtn = mkBtn("+ Add", `Add a ${noun} (or double-click anywhere on the waveform to start a new slice there)`);
-  const deleteBtn = mkBtn("Delete", `Delete the selected ${noun} (Delete)`);
+  const deleteBtn = mkBtn("Delete", `Delete the selected ${noun}(s) (Delete) - Shift+click to select more than one, Cmd/Ctrl+A to select all`);
   const undoBtn = mkBtn("↶ Undo", "Undo the last edit (Cmd/Ctrl+Z)");
   undoBtn.disabled = true;
   const redoBtn = mkBtn("↷ Redo", "Redo (Cmd/Ctrl+Shift+Z, or Ctrl+Y)");
@@ -111,6 +117,14 @@ export function createEditableWaveform({
 
   const slices = initialRegions.map(([s, e]) => ({ s, e }));
   let selected = null;
+  // Extra multi-selected slices, on top of (never including) `selected` itself - Shift+click adds
+  // to this set (see the pointerdown/endDrag "pending-pan" handling below). Kept as a separate set
+  // rather than folding `selected` into it so audition (Play/Loop) unambiguously has ONE slice to
+  // play - multi-select only ever drives a batch action (Delete), never playback. Any edit other
+  // than the multi-delete itself (add, split, re-chop, a boundary drag reordering slices) clears
+  // this rather than trying to keep stale indices valid - see select()'s own reset of it, and the
+  // extra clear() after a boundary-drag sort below.
+  const extraSelected = new Set();
 
   const MIN_VIEW_SEC = Math.min(Math.max(duration, 0.001), 0.25);
   const BIN_COUNT = 600;
@@ -210,14 +224,49 @@ export function createEditableWaveform({
       return;
     }
 
-    // selected slice gets a tinted bed so it's obvious which one the buttons act on
-    if (selected != null && slices[selected]) {
-      const r = slices[selected];
-      const x0 = Math.max(0, timeToX(r.s, w));
-      const x1 = Math.min(w, timeToX(r.e, w));
-      if (x1 > x0) {
-        ctx.fillStyle = color("--wave-region-sel", "rgba(255, 75, 59, 0.16)");
-        ctx.fillRect(x0, 0, x1 - x0, h);
+    // Beat/bar reference grid (drums-mode tempo-locked material only - see the `bpm` param).
+    // Background layer, drawn before the selection tint/peaks/boundaries so it reads as a faint
+    // guide under the waveform rather than competing with it. 4/4 is assumed for the bar line
+    // (every 4th beat) since that's the overwhelmingly common case for the breaks this mode
+    // targets - nothing here claims to detect time signature. Beat lines are skipped once they'd
+    // be closer together than a few px (pure visual noise at that density); bar lines fall back to
+    // their own, coarser density check so a heavily zoomed-out view still shows SOME reference
+    // rather than losing the grid the moment individual beats get too dense to draw.
+    if (bpm > 0) {
+      const beatSec = 60 / bpm;
+      const beatPx = (beatSec / viewDuration) * w;
+      const drawBeats = beatPx >= 4;
+      const drawBars = drawBeats || beatPx * 4 >= 4;
+      if (drawBeats || drawBars) {
+        const beatColor = color("--wave-grid", "rgba(255, 255, 255, 0.12)");
+        const barColor = color("--wave-grid-bar", "rgba(255, 255, 255, 0.26)");
+        const firstBeat = Math.max(0, Math.floor(viewStart / beatSec));
+        const lastTime = viewStart + viewDuration;
+        ctx.lineWidth = 1;
+        for (let n = firstBeat; n * beatSec <= lastTime; n++) {
+          const isBar = n % 4 === 0;
+          if (isBar ? !drawBars : !drawBeats) continue;
+          const x = timeToX(n * beatSec, w);
+          if (x < 0 || x > w) continue;
+          ctx.strokeStyle = isBar ? barColor : beatColor;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, h);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // Every selected slice (the primary one, and any Shift-selected extras) gets a tinted bed so
+    // it's obvious which one(s) the buttons act on.
+    if (selected != null || extraSelected.size) {
+      ctx.fillStyle = color("--wave-region-sel", "rgba(255, 75, 59, 0.16)");
+      for (const idx of selected != null ? [selected, ...extraSelected] : extraSelected) {
+        const r = slices[idx];
+        if (!r) continue;
+        const x0 = Math.max(0, timeToX(r.s, w));
+        const x1 = Math.min(w, timeToX(r.e, w));
+        if (x1 > x0) ctx.fillRect(x0, 0, x1 - x0, h);
       }
     }
 
@@ -247,7 +296,7 @@ export function createEditableWaveform({
     for (const b of boundaries()) {
       const x = timeToX(b.t, w);
       if (x < -10 || x > w + 10) continue;
-      const touchesSelected = selected != null && b.refs.some((r) => r.idx === selected);
+      const touchesSelected = b.refs.some((r) => isSelected(r.idx));
       const isShared = b.refs.length > 1;
       ctx.strokeStyle = touchesSelected ? selColor : markerColor;
       ctx.fillStyle = touchesSelected ? selColor : markerColor;
@@ -285,7 +334,7 @@ export function createEditableWaveform({
       const x1 = timeToX(r.e, w);
       if (x1 < 0 || x0 > w) return;
       const label = String(idx + 1).padStart(2, "0");
-      ctx.fillStyle = idx === selected ? selColor : color("--text-faint", "#8a929a");
+      ctx.fillStyle = isSelected(idx) ? selColor : color("--text-faint", "#8a929a");
       ctx.fillText(label, Math.max(3, x0 + 4), h - 3);
     });
 
@@ -306,14 +355,20 @@ export function createEditableWaveform({
     zoomOutBtn.disabled = viewDuration >= duration - 1e-6;
     zoomInBtn.disabled = viewDuration <= MIN_VIEW_SEC + 1e-6;
     fitBtn.disabled = zoomOutBtn.disabled;
-    deleteBtn.disabled = selected == null;
+    deleteBtn.disabled = selected == null && extraSelected.size === 0;
     playBtn.disabled = selected == null;
-    hint.textContent =
-      selected == null
-        ? `${slices.length} ${noun}${slices.length === 1 ? "" : "s"} · click one to select, double-click to add/split, scroll to zoom`
-        : `${noun} ${String(selected + 1).padStart(2, "0")} selected · ${formatEditorTime(slices[selected].s)} to ${formatEditorTime(
-            slices[selected].e
-          )} · Space plays, Delete removes`;
+    if (selected == null && extraSelected.size === 0) {
+      hint.textContent = `${slices.length} ${noun}${
+        slices.length === 1 ? "" : "s"
+      } · click one to select, Shift+click to select more, double-click to add/split, scroll to zoom`;
+    } else if (extraSelected.size > 0) {
+      const total = extraSelected.size + (selected != null ? 1 : 0);
+      hint.textContent = `${total} ${noun}s selected · Delete removes all of them, Shift+click a slice to add/remove it`;
+    } else {
+      hint.textContent = `${noun} ${String(selected + 1).padStart(2, "0")} selected · ${formatEditorTime(
+        slices[selected].s
+      )} to ${formatEditorTime(slices[selected].e)} · Space plays, Delete removes, Shift+←/→ nudges the start, Shift+Alt+←/→ the end, Shift+click to select more`;
+    }
   }
 
   // ---- audition -------------------------------------------------------------
@@ -458,10 +513,29 @@ export function createEditableWaveform({
 
   // ---- mutation -------------------------------------------------------------
 
+  /** Whether `idx` is part of the current selection for HIGHLIGHTING purposes (the tinted region,
+   * boundary/label colour) - the primary `selected` slice, or one of the Shift-click extras. Playback
+   * and single-slice actions stay keyed on `selected` alone; this is only ever used for what to draw. */
+  function isSelected(idx) {
+    return idx === selected || extraSelected.has(idx);
+  }
+
   function select(idx) {
     selected = idx;
+    if (extraSelected.size) extraSelected.clear(); // a plain (non-Shift) select replaces the whole selection
     redraw();
     onSelect(idx);
+  }
+
+  /** Shift+click on a slice body: adds it to (or, if already there, removes it from) the multi-select
+   * set on top of whatever's already the primary `selected` slice. A no-op with nothing selected yet
+   * (see the pointerdown/endDrag handling below, which selects normally instead in that case) or on
+   * the primary slice itself (already effectively selected). */
+  function toggleExtraSelected(idx) {
+    if (idx == null || idx === selected) return;
+    if (extraSelected.has(idx)) extraSelected.delete(idx);
+    else extraSelected.add(idx);
+    redraw();
   }
 
   /**
@@ -501,10 +575,17 @@ export function createEditableWaveform({
     onChange();
   }
 
+  /** Deletes the primary selected slice, plus any Shift-selected extras, as ONE undo step - the
+   * multi-select answer to "batch delete needs repeating per-slice one at a time". */
   function deleteSelected() {
-    if (selected == null) return;
-    slices.splice(selected, 1);
-    select(slices.length ? Math.min(selected, slices.length - 1) : null);
+    const toRemove = new Set(extraSelected);
+    if (selected != null) toRemove.add(selected);
+    if (toRemove.size === 0) return;
+    const lowestRemoved = Math.min(...toRemove);
+    // Descending order so removing an earlier index doesn't shift the position of one still to come.
+    for (const idx of [...toRemove].sort((a, b) => b - a)) slices.splice(idx, 1);
+    extraSelected.clear();
+    select(slices.length ? Math.min(lowestRemoved, slices.length - 1) : null);
     onChange();
   }
 
@@ -606,8 +687,20 @@ export function createEditableWaveform({
       onRedo();
       return;
     }
+    if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && (ev.key === "a" || ev.key === "A")) {
+      // Select every slice into the multi-select - the fast path for "delete everything and start
+      // over with a different set of boundaries" without repeating Shift+click per slice.
+      if (!slices.length) return;
+      ev.preventDefault();
+      selected = 0;
+      extraSelected.clear();
+      for (let i = 1; i < slices.length; i++) extraSelected.add(i);
+      redraw();
+      onSelect(selected);
+      return;
+    }
     if (ev.key === "Delete" || ev.key === "Backspace") {
-      if (selected == null) return;
+      if (selected == null && extraSelected.size === 0) return;
       ev.preventDefault();
       deleteSelected();
     } else if (ev.key === " ") {
@@ -619,10 +712,18 @@ export function createEditableWaveform({
       if (currentSource) stopPlayback();
       else select(null);
     } else if (ev.key === "ArrowRight" || ev.key === "ArrowLeft") {
+      const direction = ev.key === "ArrowRight" ? 1 : -1;
+      if (ev.shiftKey) {
+        // Shift+Arrow nudges the selected slice's start; Shift+Alt+Arrow nudges its end - see
+        // nudgeBoundary's own doc comment for why this doesn't snap to zero-crossing per keystroke.
+        if (selected == null) return;
+        ev.preventDefault();
+        nudgeBoundary(ev.altKey ? "e" : "s", direction);
+        return;
+      }
       if (!slices.length) return;
       ev.preventDefault();
-      const step = ev.key === "ArrowRight" ? 1 : -1;
-      const next = selected == null ? 0 : Math.max(0, Math.min(slices.length - 1, selected + step));
+      const next = selected == null ? 0 : Math.max(0, Math.min(slices.length - 1, selected + direction));
       select(next);
     }
   });
@@ -703,6 +804,7 @@ export function createEditableWaveform({
         startClientY: ev.clientY,
         startViewStart: viewStart,
         hitSlice: sliceAtTime(t),
+        shiftKey: ev.shiftKey,
       };
     } else {
       select(sliceAtTime(t));
@@ -751,6 +853,49 @@ export function createEditableWaveform({
     return clamped;
   }
 
+  /** The full boundary entry (every slice edge sharing this point, see boundaries() above) for one
+   * specific slice's own start or end - same shared-edge semantics a drag gets, so nudging a slice's
+   * start also nudges whatever adjacent slice's end sits at the same point. */
+  function boundaryRefsFor(idx, which) {
+    for (const b of boundaries()) {
+      if (b.refs.some((r) => r.idx === idx && r.which === which)) return b.refs;
+    }
+    return [{ idx, which }]; // shouldn't happen - every slice edge is one of its own boundaries() entries
+  }
+
+  const NUDGE_SEC = 0.001; // ~1ms - fine control, well under a single MIN_SLICE_SEC step
+  let nudgeCommitTimer = null;
+
+  /**
+   * Fine keyboard adjustment of the selected slice's start or end (Shift+Arrow / Shift+Alt+Arrow -
+   * see the keydown handler below), for when a mouse/trackpad drag is more precision than the job
+   * needs, or isn't available at all. Deliberately does NOT re-snap to the nearest zero-crossing on
+   * every keystroke the way a drag snaps on release: export always re-snaps from these canonical
+   * regions regardless (see exportChopsForRegions/prepareExportRegions in app.js), so the editor's
+   * own snap is only ever a display convenience - snapping after every nudge would fight a held-down
+   * arrow key by pulling the boundary straight back toward whatever crossing it just left.
+   *
+   * Each keystroke moves and redraws immediately (so nudging feels live), but onChange() - and the
+   * one Undo step it produces - is debounced to fire once a short pause after the last keystroke,
+   * the same "a whole gesture is one Undo step" rule a drag already gets (see the README's own
+   * "A drag is a single step no matter how many times it moved while held").
+   */
+  function nudgeBoundary(which, direction) {
+    if (selected == null || !slices[selected]) return;
+    const refs = boundaryRefsFor(selected, which);
+    const current = slices[refs[0].idx][refs[0].which];
+    moveBoundary(refs, current + direction * NUDGE_SEC);
+    redraw();
+    if (boundaryTouchesPlayingSlice(refs)) applyLiveBoundaryUpdate();
+    clearTimeout(nudgeCommitTimer);
+    nudgeCommitTimer = setTimeout(() => {
+      nudgeCommitTimer = null;
+      extraSelected.clear(); // same "a sort can invalidate raw indices" reasoning as the boundary-drag path
+      slices.sort((a, b) => a.s - b.s);
+      onChange();
+    }, 400);
+  }
+
   function endDrag() {
     if (!dragging) return;
     const kind = dragging.kind;
@@ -759,13 +904,24 @@ export function createEditableWaveform({
       const startRef = dragging.refs.find((r) => r.which === "s");
       select(startRef != null ? startRef.idx : dragging.refs[0].idx);
     } else if (kind === "pending-pan") {
-      // Never crossed the drag threshold: a click on the waveform body.
-      select(dragging.hitSlice != null ? dragging.hitSlice : null);
+      // Never crossed the drag threshold: a click on the waveform body. Shift+click on a slice (with
+      // something already primary-selected) toggles it into the multi-select instead of replacing
+      // the selection - see toggleExtraSelected's own doc comment for why a bare Shift+click with
+      // nothing selected yet just selects normally rather than starting a multi-select of one.
+      if (dragging.shiftKey && dragging.hitSlice != null && selected != null) {
+        toggleExtraSelected(dragging.hitSlice);
+      } else {
+        select(dragging.hitSlice != null ? dragging.hitSlice : null);
+      }
     } else if (kind === "boundary") {
       canvas.classList.remove("waveform-canvas--dragging");
       const refs = dragging.refs;
       const current = slices[refs[0].idx][refs[0].which];
       moveBoundary(refs, snap(current));
+      // A drag can in principle reorder slices relative to each other, which would invalidate any
+      // raw indices sitting in extraSelected - simplest to just drop the multi-select rather than
+      // try to track identity through a sort, same as every other edit already does.
+      extraSelected.clear();
       slices.sort((a, b) => a.s - b.s);
       redraw();
       onChange();
@@ -831,6 +987,8 @@ export function createEditableWaveform({
       stopPlayback();
       if (redrawRafId) cancelAnimationFrame(redrawRafId);
       redrawRafId = 0;
+      clearTimeout(nudgeCommitTimer); // don't let a debounced onChange() fire after teardown
+      nudgeCommitTimer = null;
       if (resizeObserver) resizeObserver.disconnect();
       else window.removeEventListener("resize", scheduleRedraw);
     },
