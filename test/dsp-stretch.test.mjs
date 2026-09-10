@@ -368,4 +368,64 @@ test("heavy-dsp-worker.js: onmessage runs the real stretch + lo-fi + fade + enco
   delete globalThis.self;
 });
 
+// --- regression: the output has to be FULL, not merely the right length ------------------
+
+/** RMS of the last `frac` of a buffer relative to the whole - near zero means a silent tail. */
+function tailFill(x, frac = 0.1) {
+  const from = Math.floor(x.length * (1 - frac));
+  let tail = 0;
+  let all = 0;
+  for (let i = 0; i < x.length; i++) {
+    const e = x[i] * x[i];
+    all += e;
+    if (i >= from) tail += e;
+  }
+  const tailRms = Math.sqrt(tail / Math.max(1, x.length - from));
+  const allRms = Math.sqrt(all / Math.max(1, x.length));
+  return allRms > 0 ? tailRms / allRms : 0;
+}
+
+/** A dense, irregular break - the material that exposed the bug. */
+function breakLoop(bpm, sampleRate = 44100) {
+  const spb = 60 / bpm;
+  const n = Math.round(4 * spb * sampleRate);
+  const x = new Float32Array(n);
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1;
+  for (const beat of [0, 0.5, 0.75, 1, 1.5, 2, 2.25, 2.5, 3, 3.25, 3.5, 3.75]) {
+    const s = Math.round(beat * spb * sampleRate);
+    const L = Math.round(spb * sampleRate * 0.5);
+    for (let i = 0; i < L && s + i < n; i++) {
+      const e = Math.exp(-i / (sampleRate * 0.03));
+      x[s + i] += 0.25 * e * rnd() + 0.5 * e * Math.sin((2 * Math.PI * 180 * i) / sampleRate);
+    }
+  }
+  return x;
+}
+
+test("stretchChannels: every character fills its whole output buffer", () => {
+  // The bug: WSOLA accumulated the similarity search's forward nudges into its read
+  // position, so the input ran out while the output buffer was only part-written. A break
+  // stretched with Clean/Tight/Vintage came back the right LENGTH with silence on the end -
+  // right duration, missing audio.
+  const src = breakLoop(136);
+  assert.ok(tailFill(src) > 0.5, "the source itself must have a loud tail for this to mean anything");
+  for (const character of ["clean", "tight", "vintage", "glitch", "crushed", "transient", "punch", "grain"]) {
+    for (const ratio of [0.855, 1.133, 1.347, 2.2]) {
+      const [out] = stretchChannels([src], 44100, ratio, character);
+      assert.equal(out.length, Math.round(src.length * ratio), `${character} @ ${ratio}: wrong length`);
+      assert.ok(tailFill(out) > 0.4, `${character} @ ${ratio}: tail is ${tailFill(out).toFixed(3)} - the end of the buffer is empty`);
+    }
+  }
+});
+
+test("stretchChannels: a large stretch still fills the buffer", () => {
+  // The failure got worse the further from 1.0 the ratio was, so the extremes matter most.
+  const src = breakLoop(136);
+  for (const ratio of [3.5, 6]) {
+    const [out] = stretchChannels([src], 44100, ratio, "vintage");
+    assert.ok(tailFill(out) > 0.4, `vintage @ ${ratio}: tail is ${tailFill(out).toFixed(3)}`);
+  }
+});
+
 console.log(`\n${passed} test(s) passed.`);

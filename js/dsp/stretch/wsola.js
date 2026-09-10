@@ -72,38 +72,61 @@ export function stretchWsola(channels, sampleRate, ratio, params) {
   const inputLen = reference.length;
   const windowSize = Math.max(64, Math.round((windowMs / 1000) * sampleRate));
   const synthesisHop = Math.max(1, Math.round(windowSize * hopFraction));
+  // Kept for clarity about what the ratio means in grain terms: the input advances this far
+  // for every synthesisHop of output. The loop below derives each grain's position from the
+  // output rather than stepping by this, so drift can't accumulate - see there.
   const analysisHop = Math.max(1, Math.round(synthesisHop / ratio));
+  void analysisHop;
   const searchRadius = Math.max(0, Math.round((searchMs / 1000) * sampleRate));
   const window = hannWindow(windowSize);
   const outLen = Math.max(windowSize, Math.round(inputLen * ratio));
 
   // Decide grain placement once, from the mono reference, so every channel splices at the same points.
+  //
+  // The analysis position for each grain is DERIVED from where that grain lands in the
+  // output (synthesisPos / ratio), not accumulated from the previous grain's chosen start.
+  // That distinction matters more than it looks:
+  //
+  //   - Accumulating meant every nudge the similarity search made was permanent. The search
+  //     is free to move a splice point forwards, and those nudges compound, so the read
+  //     position ran through the input faster than the ratio intended. The loop then hit
+  //     "analysisPos >= inputLen" while the output buffer was only part-written, and the
+  //     rest of it stayed silent - a break stretched with Clean/Tight/Vintage came out the
+  //     right LENGTH with a gap on the end.
+  //   - The same compounding drift also pulled the output off the beat, which is why the
+  //     WSOLA characters measured far looser than the phase-vocoder ones.
+  //
+  // Deriving the position instead makes the search what it should be: a local choice about
+  // where to splice, bounded by searchRadius, with no memory. Window size, search radius,
+  // hop fraction and bit depth are untouched, so each character still sounds like itself -
+  // the deliberately rough ones included. A stretch that doesn't reach the end of its own
+  // buffer isn't character, it's a bug.
   const grains = [];
-  let analysisPos = 0;
   let synthesisPos = 0;
   let prevTail = null;
-  while (synthesisPos < outLen && analysisPos < inputLen) {
+  const maxGrainStart = Math.max(0, inputLen - windowSize);
+  while (synthesisPos < outLen) {
+    const idealStart = Math.min(maxGrainStart, Math.round(synthesisPos / ratio));
     let bestOffset = 0;
     if (searchRadius > 0 && prevTail) {
       let bestScore = -Infinity;
       const overlapLen = Math.min(windowSize, prevTail.length);
       const refEnergy = energy(prevTail, overlapLen);
-      const lo = Math.max(0, analysisPos - searchRadius);
-      const hi = Math.min(Math.max(lo, inputLen - windowSize), analysisPos + searchRadius);
+      const lo = Math.max(0, idealStart - searchRadius);
+      const hi = Math.min(Math.max(lo, maxGrainStart), idealStart + searchRadius);
       for (let cand = lo; cand <= hi; cand++) {
         const score = similarity(prevTail, refEnergy, reference, cand, overlapLen);
         if (score > bestScore) {
           bestScore = score;
-          bestOffset = cand - analysisPos;
+          bestOffset = cand - idealStart;
         }
       }
     }
-    const grainStart = Math.max(0, Math.min(Math.max(0, inputLen - windowSize), analysisPos + bestOffset));
+    const grainStart = Math.max(0, Math.min(maxGrainStart, idealStart + bestOffset));
     grains.push({ grainStart, synthesisPos });
 
     const tailLen = Math.min(windowSize, synthesisHop);
     prevTail = reference.slice(grainStart + windowSize - tailLen, grainStart + windowSize);
-    analysisPos = grainStart + analysisHop;
     synthesisPos += synthesisHop;
   }
 

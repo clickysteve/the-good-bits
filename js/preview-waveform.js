@@ -31,7 +31,11 @@ let activeInstance = null;
  * @param {() => AudioContext} opts.getAudioContext  shared context factory (app.js's getAudioContext)
  * @param {() => void} [opts.onPlayStateChange]
  */
-export function createPreviewWaveform({ mono, sampleRate, duration, color = (_n, f) => f, getAudioContext, onPlayStateChange = () => {} }) {
+export function createPreviewWaveform({ mono: initialMono, sampleRate: initialRate, duration: initialDuration, color = (_n, f) => f, getAudioContext, onPlayStateChange = () => {} }) {
+  // Reassigned by setAudio(); everything below reads these rather than the parameters.
+  let mono = initialMono;
+  let sampleRate = initialRate;
+  let duration = initialDuration;
   const wrap = document.createElement("div");
   wrap.className = "preview-waveform";
   wrap.tabIndex = 0;
@@ -57,9 +61,11 @@ export function createPreviewWaveform({ mono, sampleRate, duration, color = (_n,
   bar.append(playBtn, stopBtn, timeEl);
   wrap.appendChild(bar);
 
-  const hasAudio = !!(mono && mono.length && sampleRate && duration > 0);
   const BIN_COUNT = 500;
-  const peaks = hasAudio ? computePeaksInRange(mono, 0, mono.length, BIN_COUNT) : null;
+  // Mutable so setAudio() can swap what this player is showing without tearing the whole
+  // widget down - see setAudio's own comment for why that matters.
+  let hasAudio = !!(mono && mono.length && sampleRate && duration > 0);
+  let peaks = hasAudio ? computePeaksInRange(mono, 0, mono.length, BIN_COUNT) : null;
 
   let audioCtx = null;
   let buffer = null;
@@ -265,8 +271,36 @@ export function createPreviewWaveform({ mono, sampleRate, duration, color = (_n,
     window.addEventListener("resize", redraw);
   }
 
+  /**
+   * Point this player at different audio, keeping the playhead where it is.
+   *
+   * Exists for A/B comparison. Two players side by side each have their own playhead, so
+   * comparing "the same moment, processed and unprocessed" means starting one, stopping it,
+   * starting the other and hunting for the position again. Swapping the buffer underneath a
+   * single playhead makes it one click, which is the only way an A/B is actually useful.
+   *
+   * Position is preserved and clamped to the new duration, and playback continues if it was
+   * already running.
+   */
+  function setAudio(next) {
+    const wasPlaying = playing;
+    const at = currentPos();
+    if (playing) pause();
+    mono = next && next.mono;
+    sampleRate = next && next.sampleRate;
+    duration = (next && next.duration) || 0;
+    buffer = null; // rebuilt lazily by getBuffer() from the new samples
+    hasAudio = !!(mono && mono.length && sampleRate && duration > 0);
+    peaks = hasAudio ? computePeaksInRange(mono, 0, mono.length, BIN_COUNT) : null;
+    anchorPos = Math.max(0, Math.min(duration, at));
+    dragPreviewPos = null;
+    redraw();
+    if (wasPlaying && hasAudio) play(anchorPos);
+  }
+
   const instance = {
     el: wrap,
+    setAudio,
     play: (t) => play(t),
     pause,
     stop,

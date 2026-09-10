@@ -28,8 +28,10 @@ const ENGINE_FNS = {
   varispeed: (channels, sr, ratio) => stretchVarispeed(channels, ratio),
 };
 
-const DEFAULT_MAX_RATIO = 8;
-const MIN_RATIO = 0.05;
+export const DEFAULT_MAX_RATIO = 8;
+/** Floor the dispatcher clamps to. Exported so a caller can check whether a ratio it wants
+ * is actually reachable, rather than having it silently clamped underneath them. */
+export const MIN_RATIO = 0.05;
 
 /**
  * Time-stretch every channel using the named character. `ratio` = output length / input length.
