@@ -49,6 +49,7 @@
       <button type="button" class="seg-btn" data-task-choice="chop" title="Cut audio into chops and one-shots. No processing.">Chop</button>
       <button type="button" class="seg-btn" data-task-choice="stretch" title="Time-stretch and colour whole files. No cutting.">Stretch</button>
       <button type="button" class="seg-btn" data-task-choice="both" title="Cut it up and process it, with every option available.">Both</button>
+      <button type="button" class="seg-btn" data-task-choice="nice" title="Conform loops to a shared tempo and key, so unrelated samples play nice together.">Play nice</button>
     </div>
 
     <div class="topbar-right">
@@ -361,6 +362,13 @@
              attribute (see updateStretchWorkspaceVisibility() in app.js) rather than a [data-task]
              CSS rule, since it also depends on whether any audio has been queued yet. -->
         <div id="stretch-workspace" class="stretch-workspace" hidden></div>
+
+        <!-- PLAY NICE's own workspace: a target (typed, or detected from a reference loop),
+             a pile of dropped loops, and the conformed result for each. Built by
+             js/play-nice/controller.js, which owns all of its own state - CHOP, STRETCH and
+             BOTH are entirely unaffected by it. Shown/hidden via the `hidden` attribute the
+             same way #stretch-workspace is, from updatePlayNiceVisibility() in app.js. -->
+        <div id="play-nice-workspace" class="play-nice-workspace" hidden></div>
 
         <div id="results-panel" class="results-panel"></div>
       </main>

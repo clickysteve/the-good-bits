@@ -23,6 +23,8 @@ import {
 import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups, MACROS } from "./timestretch.js";
 import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "./dsp/stretch/workspace-state.js";
 import { createStretchWorkspace } from "./stretch-workspace.js";
+import { createPlayNice } from "./play-nice/controller.js";
+import { renderConform } from "./play-nice/render.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
 import { resolveNamePattern, resolveFolderName } from "./naming-tokens.js";
 import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure, deriveRegionSeed } from "./outputstage.js";
@@ -413,6 +415,7 @@ const timestretchSeedRow = $("#timestretch-seed-row");
 const timestretchSeedInput = $("#timestretch-seed-input");
 const timestretchPitchNote = $("#timestretch-pitch-note");
 const stretchWorkspaceEl = $("#stretch-workspace");
+const playNiceWorkspaceEl = $("#play-nice-workspace");
 const detectionParamsPanel = $("#detection-params-panel");
 const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
 const outputstageOptions = $("#outputstage-options");
@@ -889,6 +892,39 @@ const stretchWorkspace = createStretchWorkspace({
   },
 });
 
+// ---------------------------------------------------------------------------
+// PLAY NICE
+//
+// Given everything it needs and otherwise left alone: it owns its own state, its own queue and its
+// own export destination (see js/play-nice/controller.js). What app.js lends it is the machinery
+// that already exists and shouldn't be duplicated - the decoder, the shared AudioContext, the
+// essentia bridge, the log panel, the theme-colour lookup the canvas waveforms need, the heavy-DSP
+// worker, and the File System Access helpers.
+// ---------------------------------------------------------------------------
+
+const playNice = createPlayNice({
+  container: playNiceWorkspaceEl,
+  // The mix transport is bottom chrome for the whole app, not part of the scrolling stage,
+  // so it mounts into the shell alongside the action bar it stands in for.
+  chromeContainer: document.querySelector(".app"),
+  decodeFile,
+  analyze: analyzeKeyAndTempo,
+  getAudioContext,
+  color: themeColor,
+  log,
+  logWarn,
+  logSuccess,
+  runConform: runConformHeavy,
+  io: {
+    supportsFSA: FSA_SUPPORTED && FSA_FILE_PICKER_SUPPORTED,
+    pickFiles: () => pickFilesFSA(),
+    pickFolder: () => pickFolderFSA(),
+    ensurePermission: ensureReadWritePermission,
+    writeFile: writeFileFSA,
+    ZipBatch,
+  },
+});
+
 let stretchActiveKey = null; // analysisKey() of the file shown in the workspace right now
 const stretchFileOrder = []; // [{key, folder, fileInfo}], rebuilt at the start of every stretch-task batch run
 
@@ -1060,6 +1096,20 @@ function updateStretchWorkspaceVisibility() {
   const show = task === "stretch" && sourceFolders.length > 0;
   stretchWorkspaceEl.hidden = !show;
   if (!show) stretchWorkspace.stopAllPlayback();
+}
+
+/**
+ * PLAY NICE's workspace replaces the whole stage rather than sitting alongside it: it has its own
+ * drop zones, its own queue and its own export buttons, so the shared dropzone/results/action bar
+ * would all be misleading while it's up. Unlike the Stretch workspace this shows as soon as the task
+ * is selected, with nothing queued - its own drop zones ARE the empty state.
+ */
+function updatePlayNiceVisibility() {
+  const active = task === "nice";
+  playNiceWorkspaceEl.hidden = !active;
+  // The floating mix bar is attached to <body>, not to the workspace, so it has to be told
+  // separately - and it pads the page while it's up so nothing hides behind it.
+  playNice.setActive(active);
 }
 
 // ---------------------------------------------------------------------------
@@ -1408,7 +1458,10 @@ function loadSettings() {
 // ---------------------------------------------------------------------------
 
 const TASK_STORAGE_KEY = "good-bits-task-v1";
-const TASKS = ["chop", "stretch", "both"];
+// "nice" is PLAY NICE - a fourth task that shares the shell (topbar, stage, log) but none of the
+// batch pipeline: it keeps its own queue, target and export destination inside
+// js/play-nice/controller.js, so nothing about CHOP/STRETCH/BOTH changes when it's selected.
+const TASKS = ["chop", "stretch", "both", "nice"];
 let task = "chop";
 
 function applyTask(next, { persist = true } = {}) {
@@ -1422,6 +1475,8 @@ function applyTask(next, { persist = true } = {}) {
   updateNamingPreview();
   updateStretchTaskVisibility();
   updateStretchWorkspaceVisibility();
+  updatePlayNiceVisibility();
+  if (task !== "nice") playNice.stopAllPlayback();
   if (task === "stretch") {
     renderStretchCharacterBrowser();
     renderStretchFileStrip();
@@ -2136,7 +2191,7 @@ clearFoldersBtn.addEventListener("click", clearSourceQueue);
  * and "start a new session" should never quietly mean "lose how I like this set up".
  */
 async function newSession() {
-  const hasWork = processing || sourceFolders.length > 0;
+  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent();
   if (hasWork) {
     const { confirmed } = await showConfirmDialog({
       title: "Start a new session?",
@@ -2159,6 +2214,8 @@ async function newSession() {
   stopAllFileEditorPlayback();
   mountedFileEditors.clear();
   stretchWorkspace.stopAllPlayback();
+  // PLAY NICE keeps its own queue and target, so clearSourceQueue() below doesn't reach it.
+  playNice.reset();
 
   clearSourceQueue();
   resultsPanel.innerHTML = "";
@@ -2249,6 +2306,7 @@ function getHeavyDspWorker() {
       if (!pending) return;
       heavyDspPending.delete(requestId);
       if (type === "processRegionsResult") pending.resolve(ev.data.results);
+      else if (type === "conformLoopResult") pending.resolve({ blob: ev.data.blob, seconds: ev.data.seconds, alignment: ev.data.alignment || null });
       else pending.reject(new Error(ev.data.message || "worker error"));
     });
     heavyDspWorker.addEventListener("error", (ev) => {
@@ -2319,6 +2377,69 @@ async function processRegionsHeavy({ sampleRate, bitDepth, fadeInSamples, fadeOu
     const blob = encodeWav(sliced, sampleRate, bitDepth);
     return { blob, seconds: sliced[0].length / sampleRate };
   });
+}
+
+/**
+ * PLAY NICE's render path: one conform plan -> one finished WAV blob, on the worker where possible.
+ *
+ * Deliberately a sibling of processRegionsHeavy() rather than a branch inside it - the two share the
+ * worker and the fallback shape, but nothing else: PLAY NICE renders whole files against a plan and
+ * never touches the lo-fi chain, regions, or the CHOP/STRETCH settings this function's neighbour
+ * reads from module state. Keeping them separate is what lets PLAY NICE exist without altering a
+ * single line of the existing export pipeline.
+ *
+ * Channels are COPIED before being transferred: unlike a chop's throwaway slice, PLAY NICE's source
+ * channels stay live for the whole session (the Original waveform, and every later re-render after
+ * a settings change), so detaching them would silently empty the card the user is looking at.
+ */
+async function runConformHeavy({ channels, sampleRate, bitDepth, plan, seed, fadeInSamples, fadeOutSamples }) {
+  const worker = getHeavyDspWorker();
+  if (worker) {
+    // Copied only on the path that actually needs it. postMessage detaches these buffers,
+    // which is why the worker gets copies rather than the caller's live channels - but the
+    // main-thread fallback below makes its own copies, so allocating here first meant a
+    // full duplicate of the source audio built and thrown away on every fallback render.
+    const copies = channels.map((ch) => Float32Array.from(ch));
+    const timeoutMs = HEAVY_DSP_TIMEOUT_BASE_MS + HEAVY_DSP_TIMEOUT_PER_REGION_MS;
+    try {
+      return await new Promise((resolve, reject) => {
+        const requestId = ++heavyDspRequestId;
+        const timer = setTimeout(() => {
+          heavyDspPending.delete(requestId);
+          reject(new Error(`heavy-dsp-worker did not respond within ${Math.round(timeoutMs / 1000)}s - it may be stuck`));
+        }, timeoutMs);
+        heavyDspPending.set(requestId, {
+          resolve: (v) => {
+            clearTimeout(timer);
+            resolve(v);
+          },
+          reject: (e) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+        });
+        worker.postMessage(
+          { type: "conformLoop", requestId, channels: copies, sampleRate, bitDepth, plan, seed, fadeInSamples, fadeOutSamples },
+          copies.map((ch) => ch.buffer)
+        );
+      });
+    } catch (err) {
+      console.error("heavy-dsp-worker failed during a PLAY NICE conform, falling back to the main thread:", err);
+      terminateHeavyDspWorker();
+      throw err;
+    }
+  }
+
+  // Main-thread fallback - the same pure functions the worker runs, so the audio is identical.
+  const rendered = renderConform(
+    channels.map((ch) => Float32Array.from(ch)),
+    sampleRate,
+    plan,
+    { seed }
+  );
+  const alignment = rendered.alignment || null;
+  applyFades(rendered, fadeInSamples || 0, fadeOutSamples || 0);
+  return { blob: encodeWav(rendered, sampleRate, bitDepth), seconds: rendered[0].length / sampleRate, alignment };
 }
 
 /**

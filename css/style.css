@@ -1185,6 +1185,19 @@ input[type="range"]::-moz-range-thumb {
 [data-task="stretch"] .mod[data-tasks~="stretch"],
 [data-task="both"] .mod[data-tasks~="both"] { display: flex; }
 
+/* PLAY NICE brings its own everything - target, queue, drop zones, export buttons - so the shared
+   settings rail, source drop zone, results panel and Process/Export bar are all unmounted while
+   it's up rather than sitting there meaning nothing. No .mod declares data-tasks~="nice", so the
+   rail would be empty anyway; hiding the toggle too stops it advertising a panel with nothing in
+   it. See updatePlayNiceVisibility() in js/app.js. */
+[data-task="nice"] .controls,
+[data-task="nice"] #settings-toggle,
+[data-task="nice"] .stage > .dropzone,
+[data-task="nice"] #folder-list,
+[data-task="nice"] #results-panel,
+[data-task="nice"] #output-banner,
+[data-task="nice"] .actionbar { display: none; }
+
 /* Time-stretch: STRETCH's whole purpose is stretching, so its own enable checkbox (meaningful only
    when stretching is optional, i.e. in BOTH) and the reciprocal "it's just on" note swap in/out
    rather than both being shown at once. See updateStretchTaskVisibility() in app.js. */
@@ -1239,6 +1252,515 @@ input[type="range"]::-moz-range-thumb {
   gap: 3px 14px;
 }
 
+
+/* ===========================================================================
+   PLAY NICE
+   Conform arbitrary loops to one shared tempo and key. Its own workspace,
+   built by js/play-nice/controller.js (+ target-panel.js, loop-card.js); it
+   replaces the stage's normal contents rather than sitting alongside them -
+   see the [data-task="nice"] rules above. Reuses the app's existing field /
+   seg / btn / field-readout / preview-waveform language throughout, so it
+   looks like the same app rather than a bolted-on second one.
+   =========================================================================== */
+
+.play-nice-workspace[hidden] { display: none; }
+.play-nice { display: flex; flex-direction: column; gap: 14px; }
+
+.pn-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 13px 15px 15px;
+}
+
+.pn-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pn-panel-head--toggle {
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  align-items: center;
+}
+.pn-panel-head--toggle:hover .pn-panel-title { color: var(--text); }
+.pn-panel-caret { color: var(--text-faint); font-size: 10px; flex-shrink: 0; }
+.pn-panel-body { display: flex; flex-direction: column; gap: 11px; }
+.pn-panel-body[hidden] { display: none; }
+.pn-panel.is-collapsed { padding-bottom: 11px; }
+.pn-target .pn-target-summary { margin-left: auto; }
+
+.pn-method-panel { padding: 9px 15px; }
+.pn-method-row .pn-panel-title { flex-shrink: 0; }
+
+.pn-panel-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* The target, as one line, always visible - it's the thing every other number on the
+   page is relative to. */
+.pn-target-summary {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-2);
+  text-align: right;
+}
+
+.pn-target-seg { align-self: flex-start; }
+.pn-target-values { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 18px; }
+.pn-field { gap: 5px; }
+.pn-field.is-disabled { opacity: .45; }
+.pn-bpm-input { width: 92px; }
+.pn-mode-seg { align-self: flex-start; }
+.pn-target-pitch-toggle { margin-top: -2px; }
+
+/* drop zones - the same language as the main stage's, at panel scale */
+.pn-dropzone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 15px 16px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+.pn-dropzone.is-dragover { border-color: var(--accent); background: var(--bg-raised-hover); }
+.pn-dropzone[hidden] { display: none; }
+.pn-dropzone--reference { padding: 13px 15px; }
+
+.pn-reference[hidden] { display: none; }
+.pn-reference-loaded { display: flex; flex-direction: column; gap: 9px; }
+.pn-reference-loaded[hidden] { display: none; }
+.pn-reference-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pn-reference-head-actions { display: flex; gap: 6px; }
+.pn-reference-name {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pn-reference-status { margin: 0; font-size: 12px; color: var(--text-faint); }
+.pn-reference-status.is-error { color: var(--danger); }
+.pn-detected-row { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+
+/* "Interpret as [64] [128] [256]" - octave correction as one click. Used for the
+   reference loop and for every loop's own source BPM. */
+.pn-interpret-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.pn-interpret-row[hidden] { display: none; }
+.pn-interpret-label {
+  font-size: 11px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.pn-interpret-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.pn-chip {
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
+}
+.pn-chip:hover { color: var(--text); background: var(--bg-raised-hover); }
+.pn-chip.is-active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+
+.pn-method-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.pn-method-select { min-width: 170px; }
+.pn-method-hint { margin: 0; flex: 1 1 240px; }
+
+/* ---- loop cards ----
+   Collapsed to a scannable row by default. The detailed card was ~450px tall, which meant
+   a twenty-loop batch - the thing this feature exists for - put exactly zero loops fully
+   on screen and needed nine thousand pixels of scrolling. See js/play-nice/loop-card.js. */
+
+.pn-card-list { display: flex; flex-direction: column; gap: 4px; }
+.pn-card-list[hidden] { display: none; }
+
+.pn-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.pn-card[hidden] { display: none; }
+.pn-card.is-error { border-color: var(--danger); }
+.pn-card.is-busy { opacity: .8; }
+.pn-card.is-reference { border-color: var(--accent-dim); }
+.pn-card.is-expanded { border-color: var(--border); background: var(--bg-panel); }
+/* Muted and soloed have to be legible at a glance down a list of twenty. */
+.pn-card.is-muted .pn-card-summary,
+.pn-card.is-muted .pn-card-name { opacity: .4; }
+.pn-card.is-soloed { border-color: var(--good); }
+
+.pn-card-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  cursor: pointer;
+  min-height: 44px;
+}
+.pn-card-row:hover { background: var(--bg-raised-hover); }
+
+.pn-card-toggle {
+  font: inherit;
+  font-size: 11px;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  border-radius: 3px;
+}
+.pn-card-toggle:hover { color: var(--text); background: var(--bg-raised); }
+.pn-card-toggle:disabled { opacity: .3; cursor: default; }
+
+.pn-card-id {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 240px;
+  min-width: 0;
+}
+.pn-card-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pn-ref-badge {
+  font-family: var(--font-display);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--text);
+  flex-shrink: 0;
+}
+.pn-ref-badge[hidden] { display: none; }
+
+/* One dot answering "does this want looking at?" without reading anything. */
+.pn-attention {
+  flex-shrink: 0;
+  border: none;
+  padding: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--warn);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  cursor: help;
+}
+.pn-attention[hidden] { display: none; }
+.pn-attention:hover { filter: brightness(1.15); }
+
+/* Why a loop is flagged, in words, at the top of its body. */
+.pn-attention-block {
+  border-left: 2px solid var(--warn);
+  padding: 2px 0 2px 9px;
+}
+.pn-attention-block[hidden] { display: none; }
+.pn-attention-title {
+  display: block;
+  font-size: 11px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--warn);
+  margin-bottom: 3px;
+}
+.pn-attention-list { margin: 0; padding-left: 16px; }
+.pn-attention-list li { font-size: 12px; line-height: 1.5; color: var(--text-dim); }
+
+.pn-card-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.pn-card-summary[hidden] { visibility: hidden; }
+.pn-transform-from { color: var(--text-dim); }
+.pn-transform-arrow { color: var(--text-faint); }
+.pn-transform-to { color: var(--accent-2); }
+.pn-transform-note { color: var(--text-faint); font-family: var(--font-body); font-size: 11px; }
+.pn-transform-note[hidden] { display: none; }
+
+.pn-card-status { font-size: 11px; color: var(--text-faint); white-space: nowrap; flex-shrink: 0; }
+.pn-card-status.is-error { color: var(--danger); }
+.pn-card-status.is-busy { color: var(--accent-2); }
+
+.pn-card-row .pn-method-select { flex: 0 0 122px; font-size: 11.5px; padding: 3px 6px; }
+.pn-card-row .pn-feel-select { flex: 0 0 56px; font-size: 11.5px; padding: 3px 4px; }
+
+.pn-fit { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.pn-fit-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--text-faint);
+  cursor: help;
+}
+.pn-fit-seg .seg-btn { padding: 2px 7px; font-size: 10.5px; }
+
+.pn-monitor { display: flex; gap: 3px; flex-shrink: 0; }
+.pn-mon-btn {
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  width: 24px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.pn-mon-btn:hover { color: var(--text); background: var(--bg-raised-hover); }
+.pn-mon-btn:disabled { opacity: .35; cursor: default; }
+.pn-solo.is-active { background: var(--good); border-color: var(--good); color: var(--bg); }
+.pn-mute.is-active { background: var(--danger); border-color: var(--danger); color: var(--bg); }
+
+/* ---- expanded body ---- */
+
+.pn-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 4px 12px 13px;
+  border-top: 1px solid var(--border-soft);
+}
+.pn-card-body[hidden] { display: none; }
+
+.pn-detection { display: flex; flex-wrap: wrap; gap: 10px 22px; }
+.pn-detect-block { display: flex; flex-direction: column; gap: 5px; min-width: 210px; }
+.pn-detect-head { display: flex; align-items: baseline; gap: 8px; }
+.pn-detect-title { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--text-faint); }
+.pn-detect-detected { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
+.pn-detect-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.pn-key-select, .pn-key-mode-select { min-width: 82px; }
+.pn-atonal { font-size: 12px; }
+
+.is-overridden { border-color: var(--accent-dim); color: var(--accent-2); }
+
+.pn-readouts { display: flex; flex-wrap: wrap; gap: 6px 20px; }
+.pn-readout.is-active strong { color: var(--accent-2); }
+
+.pn-warnings { display: flex; flex-direction: column; gap: 4px; }
+.pn-warning {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--warn);
+  border-left: 2px solid var(--warn);
+  padding-left: 8px;
+}
+.pn-warning.is-error { color: var(--danger); border-left-color: var(--danger); }
+
+/* One player, swapped between Original and Conformed, so the A/B keeps its playhead. */
+.pn-ab { display: flex; flex-direction: column; gap: 6px; }
+.pn-ab-head { display: flex; align-items: center; gap: 10px; }
+.pn-ab-seg .seg-btn { padding: 3px 11px; font-size: 11.5px; }
+.pn-ab-note { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); }
+
+.pn-card-body-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.pn-card-body-actions .pn-remove { margin-left: auto; color: var(--danger); }
+
+/* Scanning aid above the list. */
+.pn-filter-row { display: flex; align-items: center; gap: 10px; }
+.pn-filter-row[hidden] { display: none; }
+.pn-attention-filter[hidden] { display: none; }
+.pn-attention-filter.is-active { background: var(--warn); border-color: var(--warn); color: var(--bg); }
+.pn-filter-note { font-size: 11.5px; color: var(--text-faint); }
+
+/* Correctness switches, deliberately off the main path. */
+.pn-advanced { border-top: 1px solid var(--border-soft); padding-top: 8px; }
+.pn-advanced > summary {
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  list-style: none;
+}
+.pn-advanced > summary::-webkit-details-marker { display: none; }
+.pn-advanced > summary::before { content: "▸ "; }
+.pn-advanced[open] > summary::before { content: "▾ "; }
+.pn-advanced > summary:hover { color: var(--text-dim); }
+.pn-advanced > * + * { margin-top: 8px; }
+
+/* The mix transport: the app's bottom chrome while PLAY NICE is up, standing in for the
+   Process/Export action bar the other tasks use. In the shell's normal flex flow (flex:none,
+   like .actionbar) rather than position:fixed - a floated bar covered the log panel, and
+   "pad the body to compensate" is a worse answer than "take part in the layout".
+   Built by js/play-nice/mix-player.js. */
+.pn-mixbar {
+  flex: none;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+}
+.pn-mixbar[hidden] { display: none; }
+
+.pn-mixbar-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+}
+.pn-mixbar-controls { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+.pn-mixbar-play {
+  font: inherit;
+  font-size: 14px;
+  width: 40px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+.pn-mixbar-play:hover { background: var(--accent-2); border-color: var(--accent-2); }
+.pn-mixbar-play:disabled { opacity: .5; cursor: default; }
+.pn-mixbar-loop.is-active { background: var(--accent-dim); border-color: var(--accent-dim); color: var(--text); }
+
+.pn-mix-seg { flex-shrink: 0; }
+.pn-mix-seg .seg-btn { padding: 3px 11px; font-size: 11.5px; }
+
+.pn-mixbar-wave { flex: 1 1 auto; min-width: 120px; }
+.pn-mixbar-canvas {
+  display: block;
+  width: 100%;
+  height: 40px;
+  background: var(--wave-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  touch-action: none;
+}
+
+.pn-mixbar-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex-shrink: 0;
+  text-align: right;
+}
+.pn-mixbar-levels.is-active { background: var(--accent-dim); border-color: var(--accent-dim); color: var(--text); }
+.pn-mixbar-count.is-working { color: var(--accent-2); }
+
+.pn-mixbar-time,
+.pn-mixbar-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* Batch actions - the point of the screen, so they sit in the one bar that never scrolls
+   away, separated from the transport by a rule so "audition" and "write files" don't blur. */
+.pn-mixbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+}
+
+.pn-in-mix { font-size: 12px; }
+
+/* Whichever loop the batch is currently following. */
+.pn-card.is-reference { border-color: var(--accent-dim); }
+.pn-ref-badge {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--text);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.pn-ref-badge[hidden] { display: none; }
+
+/* What this loop was, and what it becomes. The headline line on every card. */
+.pn-transform {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.pn-transform[hidden] { display: none; }
+.pn-transform-from { color: var(--text-dim); }
+.pn-transform-arrow { color: var(--text-faint); }
+.pn-transform-to { color: var(--accent-2); font-weight: 500; }
+.pn-transform-note {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: var(--font-body);
+}
+.pn-transform-note[hidden] { display: none; }
+
+.pn-auto-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--text);
+  white-space: nowrap;
+}
+.pn-auto-badge[hidden] { display: none; }
+.pn-auto-badge--row { font-size: 9px; padding: 0 5px; flex-shrink: 0; }
+.pn-warning--loose { color: var(--warn); }
+
+.pn-strategy-field select { min-width: 132px; }
+.pn-strategy-hint { margin: -4px 0 0; }
+
 /* ===========================================================================
    RESPONSIVE
    Below the breakpoint the fixed-chrome shell stops making sense, so the
@@ -1255,6 +1777,22 @@ input[type="range"]::-moz-range-thumb {
   .actionbar { position: sticky; bottom: 0; }
   .chop-list { grid-template-columns: 1fr; }
   .stretch-ab { grid-template-columns: 1fr; }
+  .pn-ab { grid-template-columns: 1fr; }
+  /* At this width the row squeezed the filename to ~54px and the from-to summary to ~81px
+     while the method select kept 170px - exactly the wrong priority. Wrap instead: identity
+     and summary get the full width on top, controls sit underneath. */
+  .pn-card-row { flex-wrap: wrap; row-gap: 6px; }
+  .pn-card-id { flex: 1 1 auto; order: 1; }
+  .pn-card-summary { flex: 1 1 100%; order: 3; padding-left: 30px; }
+  .pn-card-status { order: 2; }
+  .pn-card-row .pn-feel-select { order: 4; margin-left: 30px; }
+  .pn-card-row .pn-method-select { order: 4; flex: 1 1 120px; }
+  .pn-card-row .pn-fit { order: 5; }
+  .pn-monitor { order: 6; margin-left: auto; }
+
+  .pn-mixbar-inner { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
+  .pn-mixbar-wave { order: 10; flex-basis: 100%; }
+  .pn-mixbar-actions { margin-left: auto; padding-left: 0; border-left: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
