@@ -284,17 +284,115 @@ export function multiBandOnsetStrengthCurve(mono, sampleRate, winMs = 20, hopMs 
 }
 
 /**
- * Snap a candidate cut time to the nearest beat-grid line for a given tempo,
- * so that resulting chop lengths are exact whole numbers of beats and loop
- * cleanly. gridStart is the time of beat 1 (usually the first strong onset).
- * Returns the original time unmodified if it's further than `tolerance`
- * seconds from any grid line.
+ * How far either side of a predicted bar line to look for that bar's attack. A sixteenth is
+ * wide enough to find the downbeat when the coarse anchor is a few milliseconds out, and
+ * narrow enough that it can never grab the hit on a neighbouring subdivision instead.
  */
-export function snapToBeatGrid(t, bpm, gridStart, tolerance) {
+const GRID_REFINE_SEARCH_DIV = 16;
+
+/** Largest shift refineGridStart will apply. Beyond a 32nd this stops being editing slop and starts being a different beat. */
+const GRID_REFINE_MAX_SHIFT_DIV = 32;
+
+/** Bars that must contribute a usable attack before the refinement is trusted at all. */
+const GRID_REFINE_MIN_VOTES = 4;
+
+/**
+ * Pull a coarse bar-grid start onto the sample where the downbeat attack actually begins.
+ *
+ * Every tempo-locked chop boundary is measured from this one number, and being late with it
+ * is far worse than it sounds. `drumRegions` derives it from the first detected onset, which
+ * comes off a 10ms-hop RMS envelope: quantised to 10ms before anything else goes wrong, and
+ * timestamped at its window's start so it lags the attack that produced it. On a real file
+ * that lands the grid 10-15ms late - past the peak of the downbeat kick. Every chop then
+ * opens mid-kick with its transient sliced off and closes with the first few milliseconds of
+ * the NEXT kick glued to its tail, so looping it flams on every cycle even though the chop is
+ * an exact whole number of bars long.
+ *
+ * Fixing it needs more than a better reading of the first onset: the first hit in a file is
+ * routinely a few milliseconds later than the rest (a fade-in on the bounce, a softer opening
+ * hit), so anchoring on it alone just moves the error around. Instead every bar votes. At each
+ * bar line predicted from the coarse anchor, the loudest sample nearby is found and walked
+ * back to where its attack begins; the offsets from bars that carry a clean transient are
+ * pooled, and a low percentile of them becomes the correction.
+ *
+ * A LOW percentile, not the median, and that asymmetry is the point. Cutting a hair early
+ * costs a millisecond or two of the previous bar's tail, which on a downbeat is decaying or
+ * silent and is inaudible. Cutting late destroys a transient. When the two errors are this
+ * lopsided, aim early.
+ *
+ * The whole correction is bounded to a 32nd note and needs several agreeing bars, so on
+ * material with no clear downbeat - or where the loudest thing near the line is a syncopated
+ * hit rather than the beat - it declines to move and the caller keeps its coarse anchor.
+ * Returns the refined grid start in seconds.
+ */
+export function refineGridStart(mono, sampleRate, bpm, coarseGridStart, beatsPerBar = 4) {
+  if (!(bpm > 0) || !mono || !mono.length || !(sampleRate > 0)) return coarseGridStart;
+  const barSamples = beatsPerBar * (60 / bpm) * sampleRate;
+  if (!(barSamples >= 32)) return coarseGridStart;
+
+  const search = Math.round(barSamples / GRID_REFINE_SEARCH_DIV);
+  const preWindow = Math.max(1, Math.round(0.003 * sampleRate));
+  const anchor = coarseGridStart * sampleRate;
+  const offsets = [];
+
+  for (let line = anchor; line + search < mono.length; line += barSamples) {
+    const c = Math.round(line);
+    const lo = Math.max(0, c - search);
+    const hi = Math.min(mono.length, c + search);
+    if (hi - lo < 8) continue;
+
+    let peak = 0;
+    let peakIdx = -1;
+    for (let i = lo; i < hi; i++) {
+      const v = Math.abs(mono[i]);
+      if (v > peak) {
+        peak = v;
+        peakIdx = i;
+      }
+    }
+    if (peakIdx < 0 || peak < 1e-4) continue;
+
+    // Back from the peak to the first sample of the attack that produced it.
+    const floor = peak * 0.08;
+    let s = peakIdx;
+    while (s > lo && Math.abs(mono[s]) > floor) s--;
+    if (s <= lo) continue; // attack starts outside the window - this is sustain, not a hit
+
+    // Only a genuine transient votes: it has to rise out of something quieter than itself.
+    let pre = 0;
+    for (let i = Math.max(0, s - preWindow); i < s; i++) {
+      const v = Math.abs(mono[i]);
+      if (v > pre) pre = v;
+    }
+    if (pre > peak * 0.25) continue;
+
+    offsets.push(s - c);
+  }
+
+  if (offsets.length < GRID_REFINE_MIN_VOTES) return coarseGridStart;
+  offsets.sort((a, b) => a - b);
+  const shift = offsets[Math.floor(offsets.length * 0.25)];
+  const maxShift = barSamples / GRID_REFINE_MAX_SHIFT_DIV;
+  if (Math.abs(shift) > maxShift) return coarseGridStart;
+  return Math.max(0, (anchor + shift) / sampleRate);
+}
+
+/**
+ * Snap a candidate cut time to the nearest grid line for a given tempo, so that resulting
+ * chop lengths are exact whole numbers of beats - or, when `step` says so, of bars - and loop
+ * cleanly. gridStart is the time of beat 1 (see refineGridStart for why that has to be
+ * sample-accurate, not merely close). Returns the original time unmodified if it's further
+ * than `tolerance` seconds from any grid line.
+ *
+ * `step` defaults to one beat. Passing a bar is what keeps a chop a whole number of BARS: a
+ * beat-snapped boundary can be a whole number of beats from the last one and still land on
+ * beat 3, which loops as audio but not as music.
+ */
+export function snapToBeatGrid(t, bpm, gridStart, tolerance, step = null) {
   if (!bpm || bpm <= 0) return t;
-  const beatPeriod = 60 / bpm;
-  const n = Math.round((t - gridStart) / beatPeriod);
-  const grid = gridStart + n * beatPeriod;
+  const period = step && step > 0 ? step : 60 / bpm;
+  const n = Math.round((t - gridStart) / period);
+  const grid = gridStart + n * period;
   return Math.abs(grid - t) <= tolerance ? grid : t;
 }
 
@@ -302,7 +400,20 @@ export function snapToBeatGrid(t, bpm, gridStart, tolerance) {
  * Break-sized drum phrase detection. Walks the file in ~preferred-length
  * chunks, choosing each boundary from a nearby detected onset (falling back
  * to the lowest-energy point), then - when a confident tempo is supplied -
- * snapping that boundary onto the beat grid so the chop is loop-ready.
+ * snapping that boundary onto the tempo grid so the chop is loop-ready.
+ *
+ * When `p.preferred` is a whole number of bars (which is what computeDrumRegions hands over
+ * whenever the tempo is confident), the grid is the BAR grid rather than the beat grid, and
+ * every boundary - the first one included - sits on it. Three separate things have to hold
+ * before a chop actually loops, and snapping alone only buys the first:
+ *
+ *   1. Every chop is an exact whole number of bars. Beat snapping is not enough: a boundary
+ *      can be a whole number of beats from the last one and still land on beat 3.
+ *   2. The FIRST boundary is on the grid too. Starting the walk at t=0 regardless, as this
+ *      used to, made chop 1 the one chop in the file guaranteed not to loop - it ran from 0
+ *      to the first grid line plus N bars, so its length was N bars plus the grid phase.
+ *   3. The grid's phase is accurate to the sample, not to the 10ms envelope hop the onsets
+ *      come off. See refineGridStart - a grid 10ms late cuts straight through the downbeat.
  */
 export function drumRegions(mono, sampleRate, p, bpm = null) {
   const duration = mono.length / sampleRate;
@@ -311,11 +422,24 @@ export function drumRegions(mono, sampleRate, p, bpm = null) {
 
   const { diffs } = multiBandOnsetStrengthCurve(mono, sampleRate, 20, 10, { times, vals });
   const onsets = pickOnsets(times, diffs, p.onsetSensitivity, 0.12);
-  const gridStart = bpm && onsets.length ? onsets[0] : 0;
-  const tolerance = bpm ? (60 / bpm) * 0.5 : 0;
+  const beatsPerBar = p.beatsPerBar || 4;
+  const barSec = bpm ? beatsPerBar * (60 / bpm) : 0;
 
-  const bounds = [0];
-  let cur = 0;
+  // A whole-bar preferred length means the caller is chopping in bars, so the grid to snap to
+  // - and to step the tail along - is the bar, not the beat.
+  const barsPerChop = barSec ? p.preferred / barSec : 0;
+  const wholeBars = barsPerChop >= 1 && Math.abs(barsPerChop - Math.round(barsPerChop)) < 1e-6;
+  const snapStep = wholeBars ? barSec : null;
+  const chopStep = wholeBars ? Math.round(barsPerChop) * barSec : 0;
+
+  const gridStart = bpm && onsets.length ? refineGridStart(mono, sampleRate, bpm, onsets[0], beatsPerBar) : 0;
+  const tolerance = bpm ? (snapStep || 60 / bpm) * 0.5 : 0;
+
+  // The earliest grid line at or after the start of the file, so chop 1 is a whole number of
+  // bars like every other chop. Anything before it is a partial bar that could never loop.
+  const first = chopStep ? gridStart - Math.floor(gridStart / chopStep) * chopStep : 0;
+  const bounds = [first];
+  let cur = first;
   while (duration - cur > p.maxLen) {
     const target = cur + p.preferred;
     const lo = Math.max(cur + p.minLen, target - 2.5);
@@ -330,7 +454,7 @@ export function drumRegions(mono, sampleRate, p, bpm = null) {
     }
 
     if (bpm) {
-      const snapped = snapToBeatGrid(cut, bpm, gridStart, tolerance);
+      const snapped = snapToBeatGrid(cut, bpm, gridStart, tolerance, snapStep);
       if (snapped >= lo - tolerance && snapped <= hi + tolerance && snapped - cur >= p.minLen) {
         cut = snapped;
       }
@@ -341,7 +465,18 @@ export function drumRegions(mono, sampleRate, p, bpm = null) {
     cur = cut;
   }
 
-  if (duration - bounds[bounds.length - 1] < p.minLen && bounds.length > 1) {
+  if (chopStep) {
+    // Keep laying down whole-bar chops while a full one still fits. Without this the walk's
+    // "stop once the remainder is under maxLen" rule hands the entire tail to the last chop,
+    // which at the default maxLen of 1.5x makes it a 12-bar chop where 8 + a remainder was
+    // asked for. Whatever is genuinely left over then becomes its own final region: it is the
+    // tail of the file and was never going to be a loop, but dropping it would lose audio.
+    while (duration - cur >= chopStep) {
+      cur += chopStep;
+      bounds.push(cur);
+    }
+    if (duration - cur > 1e-6) bounds.push(duration);
+  } else if (duration - bounds[bounds.length - 1] < p.minLen && bounds.length > 1) {
     bounds[bounds.length - 1] = duration;
   } else {
     bounds.push(duration);

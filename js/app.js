@@ -2721,7 +2721,9 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   // `kt` here is effectiveKt (bpm already corrected) - this context only ever feeds naming
   // (buildChopFileName's {tempo}/{tag}) and resolveStretchRatio, both of which want the effective
   // value; the raw detected bpm still lives untouched in analysisCache's own `kt` field below.
-  const editContext = { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt: effectiveKt };
+  // barLocked: these chops were cut to a bar grid, so their exact sample length IS the
+  // deliverable and the export must not round it off. See exportChopsForRegions.
+  const editContext = { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt: effectiveKt, barLocked: mode === "drums" && !!effectiveBpm };
   let chopRows = [];
   let chopMarkers = [];
   let oneShotRows = [];
@@ -2760,6 +2762,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
       mono,
       zipBatch,
       effectiveBpm,
+      barLocked: editContext.barLocked,
       kt: effectiveKt,
       writeIndividualFiles,
       dryRun,
@@ -2902,11 +2905,23 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
  * with Slice Markers" mode skips writing the numbered per-chop files while exportMarkerWavForFile()
  * writes the one continuous file that replaces them for that run.
  */
-async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, effectiveBpm, kt, writeIndividualFiles = true, dryRun }) {
+async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, taggedStem, buffer, channels, mono, zipBatch, effectiveBpm, barLocked = false, kt, writeIndividualFiles = true, dryRun }) {
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
-  const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
+  // A bar-locked chop is a LOOP, and the two cleanup passes that make a one-shot or a phrase
+  // sound tidy are exactly what stop a loop from looping:
+  //
+  //   - The fades put a hole at the seam. A 5ms fade-out running into the next cycle's 5ms
+  //     fade-in is 10ms of gain dipping to zero straight through the downbeat, on every
+  //     cycle. No amount of care over where the chop is cut survives that.
+  //   - The zero-crossing snap moves each end INDEPENDENTLY by up to zcSearchMs, so a chop
+  //     that was an exact whole number of bars comes out a few milliseconds long or short.
+  //     Played back at tempo it drifts off the grid a little further every cycle.
+  //
+  // Neither is needed here: a cut that lands on the bar line is already clean, because the
+  // sample after the chop's end IS the sample at its start, every cycle, by construction.
+  const fadeInSamples = barLocked ? 0 : Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
   const fadeOutSamples = fadeInSamples;
-  const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
+  const zcWindow = barLocked ? 0 : Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
   const stretchRatio = resolveStretchRatio(effectiveBpm);
   // The primary/secondary export model (js/output-scope.js): Output Stage (or, in STRETCH/BOTH,
   // time-stretch too) OFF means the clean chop already IS the primary output, so a secondary clean
@@ -3018,7 +3033,7 @@ async function exportMarkerWavForFile({ folder, fileInfo, taggedStem, regions, c
  * Re-chop/Revert paths that call it afterwards), never from a real Export - so dryRun is fixed true
  * here rather than threaded in from a caller. */
 async function reExportSingleFile(editContext, editedRegions) {
-  const { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt } = editContext;
+  const { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt, barLocked } = editContext;
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
@@ -3039,6 +3054,7 @@ async function reExportSingleFile(editContext, editedRegions) {
     mono,
     zipBatch,
     effectiveBpm,
+    barLocked,
     kt,
     writeIndividualFiles,
     dryRun,
@@ -3068,15 +3084,18 @@ async function reExportSingleFile(editContext, editedRegions) {
  * only that one chop.
  */
 async function exportSelectedChop(editContext, region, index) {
-  const { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt } = editContext;
+  const { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt, barLocked } = editContext;
   const file = fileInfo.fsaHandle ? await fileInfo.fsaHandle.getFile() : fileInfo.legacyFile;
   const { buffer } = await decodeFile(file, fileInfo.ext);
   const channels = bufferChannels(buffer);
   const mono = toMono(channels);
 
-  const fadeInSamples = Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
+  // Same reasoning as exportChopsForRegions: on a bar-locked chop the fades and the
+  // zero-crossing snap are what stop it looping, so a chop exported on its own from the editor
+  // has to come out byte-identical to the one a full export writes.
+  const fadeInSamples = barLocked ? 0 : Math.round((exportSettings.fadeMs / 1000) * buffer.sampleRate);
   const fadeOutSamples = fadeInSamples;
-  const zcWindow = Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
+  const zcWindow = barLocked ? 0 : Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
   const stretchRatio = resolveStretchRatio(effectiveBpm);
 
   const { regionDefs } = prepareExportRegions([region], { mono, channels, sampleRate: buffer.sampleRate, zcWindow });

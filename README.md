@@ -104,15 +104,19 @@ site on GitHub Pages.
 - **Auto key and tempo detection** (via [essentia.js](https://mtg.github.io/essentia.js/), see licensing note below), shown per source file and baked into the output folder/file name.
 - **Tempo-locked drum chopping, in bars.** Choose a chop length in bars (1,
   2, 3, 4, 6, 8, 16…) and it's converted to seconds from the detected tempo,
-  then boundaries snap to the beat grid so chop lengths are exact and loop
-  cleanly. If tempo isn't confidently detected on a drums-mode file, you get
+  then every boundary - the first one included - snaps to the **bar** grid, so
+  each chop is an exact whole number of bars and loops cleanly. The grid's
+  phase is measured to the sample against the file's real downbeat rather than
+  taken from the first detected onset; see Chopping on the bar line. If tempo isn't confidently detected on a drums-mode file, you get
   a warning and a choice: continue with a fixed fallback length, or skip
   that file - with an option to apply your choice to the rest of the batch.
 - **Editing chops and one-shots is independent.** A file with both shows a
   Chops / One-shots switch above the waveform; adjusting one set never
-  discards the other. Dragged boundaries snap to the nearest zero-crossing
-  when you let go, the same as an export, so hand-edited cuts stay
-  click-free.
+  discards the other. Dragged boundaries snap when you let go - to the beat
+  grid on tempo-locked drum chops, so a hand-placed cut stays on the bar, and
+  to the nearest zero-crossing on everything else, so it stays click-free.
+  Drop a boundary more than a sixteenth from a grid line and it stays exactly
+  where you put it, for when an off-grid cut is the point.
 - **One-shot extraction that returns usable hits.** Hits used to be cut hard
   at the next onset, so on a busy break every "one-shot" came out as a ~40ms
   stub with its tail chopped off, and a dedupe pass that clustered on three
@@ -177,8 +181,15 @@ site on GitHub Pages.
   each other), pick the separator used inside the auto-generated
   key/tempo tag, and see an example of the resulting file/folder names
   update as you type.
-- **Click-free boundaries.** Every cut point is snapped to the nearest
-  zero-crossing and gets a short fade in/out, so chops don't pop at the edges.
+- **Click-free boundaries - except where they'd break a loop.** Phrase chops
+  and one-shots get their cut points snapped to the nearest zero-crossing plus
+  a short fade in/out, so they don't pop at the edges. Bar-locked drum chops
+  get neither, deliberately: the fades would put a 10ms hole at the loop seam
+  on every cycle, and the zero-crossing snap moves each end independently, so
+  a chop that was an exact whole number of bars comes out a few milliseconds
+  long or short and drifts off the grid. A cut that lands on the bar line
+  doesn't need the protection - the sample after the chop's end is the sample
+  at its start, by construction.
 - **Folders or individual files, by button or drag-and-drop.** Click
   **+ Add Source Folder** / **+ Add Individual Files**, or just drag a
   folder or audio files from your file manager and drop them anywhere in
@@ -700,7 +711,8 @@ Once a file has processed, its result card shows its waveform live and
 ready to edit straight away - no separate edit mode to enter. A file with
 both chops and one-shots gets a **Chops** / **One-shots** switch above it;
 editing one set never disturbs the other. Drag a handle to move a cut
-point (it snaps to the nearest zero-crossing when released), scroll or
+point (released, it snaps to the beat grid on tempo-locked drum chops and to
+the nearest zero-crossing otherwise), scroll or
 use the Zoom in/out/Fit buttons to work at finer detail, drag the
 waveform itself to pan around once zoomed in, and hit **▶** to hear a
 selected chop before you commit. Below the waveform, **Revert** discards
@@ -831,9 +843,47 @@ bars** and the detected tempo (falling back to a fixed length if no
 confident tempo was found), snapping each boundary to a nearby detected
 transient (or the quietest nearby point if none is found), then - if "snap
 to tempo grid" is on and a confident tempo was detected - nudging that
-boundary onto the nearest beat line so the chop's length is a whole number
-of beats. *Onset sensitivity* is the one manual knob left for drums, behind
-Auto like everything else.
+boundary onto the nearest **bar** line, so the chop's length is a whole
+number of bars. *Onset sensitivity* is the one manual knob left for drums,
+behind Auto like everything else.
+
+#### Chopping on the bar line
+
+Three things have to hold before a chop actually loops, and snapping alone
+only buys the first.
+
+**Every chop is a whole number of bars.** Beat snapping is not enough: a
+boundary can be a whole number of *beats* from the last one and still land on
+beat 3, which loops as audio but not as music. And the first boundary has to
+be on the grid too - starting the walk at t=0 regardless made chop 1 the one
+chop in the file guaranteed not to loop, since it ran from 0 to the first
+grid line plus N bars.
+
+**The grid's phase is accurate to the sample.** This is the one that bites.
+The phase used to come from the first detected onset, which is read off a
+10ms-hop RMS envelope and timestamped at its window's start - so it is
+quantised to 10ms before anything else goes wrong, and lags the attack that
+produced it. On a real 128 BPM bounce that put the grid 10ms late: past the
+*peak* of the downbeat kick. Every chop then opened mid-kick with its
+transient sliced off and closed with the first few milliseconds of the next
+kick glued to its tail, so looping it flammed on every cycle even though the
+chop was an exact 8 bars long.
+
+The first onset alone cannot fix that, because the first hit in a file is
+routinely a few milliseconds later than the rest - a fade-in on the bounce, a
+softer opening hit. So every bar votes: at each bar line predicted from the
+coarse anchor, the loudest sample nearby is walked back to where its attack
+begins, and a **low percentile** of those offsets becomes the correction. Low,
+not the median, deliberately - cutting a hair early costs a millisecond or two
+of the previous bar's decaying tail and is inaudible, while cutting late
+destroys a transient. When the two errors are that lopsided, aim early. The
+whole correction is bounded to a 32nd note and needs several agreeing bars, so
+material with no clear downbeat keeps its coarse anchor rather than being
+shoved somewhere the noise floor pointed at.
+
+**Nothing downstream rounds the length off.** See Click-free boundaries: the
+export fades and the zero-crossing snap are both bypassed on bar-locked chops,
+because both of them break a loop rather than clean it up.
 
 **One-shot extraction** (drums, opt-in) finds the same onsets, trims each
 hit to where it decays back toward the noise floor (or the next onset,
@@ -846,7 +896,9 @@ near-identical files. The bucket itself isn't reliable enough to trust in
 a filename, so the kept hits are written out as plain sequential numbers.
 
 **Export settings** (all modes): fade length and zero-crossing search window
-control click protection at every cut; export bit depth is 16 or 24-bit.
+control click protection at every cut; export bit depth is 16 or 24-bit. Both
+click-protection settings are bypassed on bar-locked drum chops, where they
+would break the loop rather than clean it up - see Click-free boundaries.
 
 All of the above are hidden behind **Auto** by default (see Features) -
 they're only relevant once you switch to manual tuning. None of these

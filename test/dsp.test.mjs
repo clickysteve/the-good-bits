@@ -15,6 +15,7 @@ import {
   multiBandOnsetStrengthCurve,
   pickOnsets,
   snapToBeatGrid,
+  refineGridStart,
   drumRegions,
   findNearestZeroCrossing,
   applyFades,
@@ -230,6 +231,73 @@ test("snapToBeatGrid: snaps within tolerance, leaves distant points alone", () =
   assert.equal(snapToBeatGrid(1.3, bpm, 0, 0.1), 1.3); // too far from any grid line
 });
 
+test("snapToBeatGrid: an explicit step snaps to bars, not beats", () => {
+  const bpm = 120; // beat 0.5s, bar 2.0s
+  const bar = 2.0;
+  // 2.6s is a whole number of beats from the grid start, so beat snapping leaves it on beat 6 -
+  // a chop of 5 beats, which loops as audio but not as music.
+  assert.equal(snapToBeatGrid(2.6, bpm, 0, bar / 2), 2.5);
+  assert.equal(snapToBeatGrid(2.6, bpm, 0, bar / 2, bar), 2.0);
+  assert.equal(snapToBeatGrid(3.1, bpm, 0, bar / 2, bar), 4.0);
+});
+
+// --- grid phase ------------------------------------------------------------
+
+/** A kick-like burst every `barSec`, starting `phaseSec` in. Silence between hits, so each attack has a clean start. */
+function barPulses(barSec, count, phaseSec = 0, hitSec = 0.05) {
+  const parts = [silence(phaseSec)];
+  for (let i = 0; i < count; i++) {
+    parts.push(tone(hitSec, 90, 0.9));
+    parts.push(silence(barSec - hitSec));
+  }
+  return concat(...parts);
+}
+
+test("refineGridStart: pulls a late anchor back onto the attack", () => {
+  const bpm = 120;
+  const bar = 2.0;
+  const phase = 0.02;
+  const sig = barPulses(bar, 12, phase);
+  // What drumRegions used to hand over: an onset time quantised to the 10ms envelope hop and
+  // lagging the attack that produced it, so the grid lands well after the downbeat.
+  const refined = refineGridStart(sig, SR, bpm, phase + 0.012, 4);
+  assert.ok(
+    Math.abs(refined - phase) < 0.003,
+    `expected the grid to land on the attack at ${phase}s, got ${refined}s`
+  );
+});
+
+test("refineGridStart: never lands after the attack it is correcting", () => {
+  const bpm = 120;
+  const phase = 0.05;
+  const sig = barPulses(2.0, 12, phase);
+  for (const lateBy of [0.004, 0.008, 0.012, 0.02]) {
+    const refined = refineGridStart(sig, SR, bpm, phase + lateBy, 4);
+    assert.ok(
+      refined <= phase + 0.0015,
+      `anchor ${lateBy * 1000}ms late refined to ${refined}s, which is past the attack at ${phase}s - a cut there slices the transient`
+    );
+  }
+});
+
+test("refineGridStart: leaves the anchor alone when there is nothing to measure", () => {
+  const quiet = silence(8);
+  assert.equal(refineGridStart(quiet, SR, 120, 0.01, 4), 0.01);
+  // A steady tone has no attacks to vote with, so there is no evidence to move on.
+  const steady = tone(8, 220, 0.5);
+  assert.equal(refineGridStart(steady, SR, 120, 0.01, 4), 0.01);
+});
+
+test("refineGridStart: refuses a correction too large to be editing slop", () => {
+  const bpm = 120;
+  const bar = 2.0;
+  const sig = barPulses(bar, 12, 0.02);
+  // Anchored most of a beat away from any downbeat. Whatever it finds there is not slop, so the
+  // coarse anchor has to stand rather than the grid jumping onto a different subdivision.
+  const anchor = 0.02 + bar / 8;
+  assert.equal(refineGridStart(sig, SR, bpm, anchor, 4), anchor);
+});
+
 test("drumRegions: produces loop-length chops close to preferred length", () => {
   const parts = [];
   for (let i = 0; i < 40; i++) {
@@ -244,6 +312,84 @@ test("drumRegions: produces loop-length chops close to preferred length", () => 
     assert.ok(e - s <= p.maxLen + 1e-6);
     assert.ok(e - s >= 0.5);
   }
+});
+
+test("drumRegions: every chop but the tail is an exact whole number of bars", () => {
+  const bpm = 120;
+  const bar = 2.0; // 4 beats at 120bpm
+  const barsPerChop = 4;
+  const chopSec = barsPerChop * bar;
+  const phase = 0.03; // the file does not start on the grid, as a DAW bounce rarely does
+  const sig = barPulses(bar, 30, phase); // 30 bars = 7.5 four-bar chops
+  const p = {
+    preferred: chopSec,
+    minLen: chopSec * 0.5,
+    maxLen: chopSec * 1.5,
+    onsetSensitivity: 0.65,
+  };
+  const { regions } = drumRegions(sig, SR, p, bpm);
+  assert.ok(regions.length >= 6, `expected several chops, got ${regions.length}`);
+
+  // The tail is whatever is left over after the last whole chop and was never going to loop.
+  for (let i = 0; i < regions.length - 1; i++) {
+    const [s, e] = regions[i];
+    const bars = (e - s) / bar;
+    assert.ok(
+      Math.abs(bars - barsPerChop) < 0.01,
+      `chop ${i + 1} is ${bars.toFixed(4)} bars (${(e - s).toFixed(4)}s), not ${barsPerChop} - it cannot loop`
+    );
+  }
+});
+
+test("drumRegions: the FIRST chop is on the grid too", () => {
+  const bpm = 120;
+  const bar = 2.0;
+  const phase = 0.03;
+  const sig = barPulses(bar, 30, phase);
+  const p = { preferred: 4 * bar, minLen: 2 * bar, maxLen: 6 * bar, onsetSensitivity: 0.65 };
+  const { regions, gridStart } = drumRegions(sig, SR, p, bpm);
+
+  // Starting the walk at t=0 regardless - which is what this used to do - made chop 1 the one
+  // chop in the file guaranteed not to loop: it ran from 0 to the first grid line plus N bars.
+  assert.ok(regions[0][0] > 0, "chop 1 should start on the grid, not at t=0");
+  const offGrid = Math.abs(((regions[0][0] - gridStart) / bar) % 1);
+  assert.ok(
+    offGrid < 0.01 || offGrid > 0.99,
+    `chop 1 starts ${regions[0][0]}s, which is not a bar line from gridStart ${gridStart}s`
+  );
+});
+
+test("drumRegions: a tail shorter than a chop does not get swallowed by the last chop", () => {
+  const bpm = 120;
+  const bar = 2.0;
+  const barsPerChop = 4;
+  // 10 bars at 4 bars a chop: two full chops and a 2-bar remainder. The old walk stopped as soon
+  // as the remainder fit inside maxLen (1.5x), handing the whole tail to chop 2 and making it six
+  // bars long when four was asked for.
+  const sig = barPulses(bar, 10, 0.02);
+  const p = {
+    preferred: barsPerChop * bar,
+    minLen: barsPerChop * bar * 0.5,
+    maxLen: barsPerChop * bar * 1.5,
+    onsetSensitivity: 0.65,
+  };
+  const { regions } = drumRegions(sig, SR, p, bpm);
+  assert.ok(regions.length >= 3, `expected two whole chops plus a tail, got ${regions.length}`);
+  for (let i = 0; i < regions.length - 1; i++) {
+    const len = regions[i][1] - regions[i][0];
+    assert.ok(
+      Math.abs(len / bar - barsPerChop) < 0.01,
+      `chop ${i + 1} is ${(len / bar).toFixed(3)} bars, not ${barsPerChop}`
+    );
+  }
+});
+
+test("drumRegions: with no tempo, behaviour is unchanged - chops still start at 0", () => {
+  const sig = barPulses(2.0, 20, 0.03);
+  const p = { preferred: 8, minLen: 3, maxLen: 16, onsetSensitivity: 0.65 };
+  const { regions } = drumRegions(sig, SR, p, null);
+  assert.equal(regions[0][0], 0);
+  assert.equal(regions[regions.length - 1][1], sig.length / SR);
 });
 
 // --- one-shot extraction ----------------------------------------------------

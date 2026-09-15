@@ -128,6 +128,17 @@ export function createEditableWaveform({
 
   const MIN_VIEW_SEC = Math.min(Math.max(duration, 0.001), 0.25);
   const BIN_COUNT = 600;
+
+  // Phase of the tempo grid, taken from where chop 1 was cut. The grid almost never starts at
+  // t=0 - drumRegions places it on the file's real downbeat, which is a few milliseconds in on
+  // anything bounced from a DAW - and a reference grid drawn from 0 instead would sit just off
+  // every boundary it is supposed to help line up against. Captured once at mount so later
+  // drags move boundaries against a fixed grid rather than dragging the grid with them.
+  const beatSec = bpm > 0 ? 60 / bpm : 0;
+  const gridPhase =
+    beatSec && initialRegions && initialRegions.length
+      ? ((initialRegions[0][0] % beatSec) + beatSec) % beatSec
+      : 0;
   let viewStart = 0;
   let viewDuration = Math.max(duration, MIN_VIEW_SEC);
   let dragging = null;
@@ -172,7 +183,25 @@ export function createEditableWaveform({
     setView(anchorTime - ratio * clampedDuration, clampedDuration);
   }
 
+  /**
+   * Where a hand-placed boundary actually lands.
+   *
+   * On tempo-locked material that is the beat grid, never the nearest zero crossing. The
+   * zero-crossing snap exists to keep a cut from clicking, and on a phrase or a one-shot it
+   * does that well - but it moves each end of a chop independently by up to zcSearchMs, which
+   * on a loop is the difference between an exact number of bars and a chop that drifts a few
+   * milliseconds further off the grid every cycle. A cut on the bar line doesn't need the
+   * click protection anyway: the sample after the chop's end is the sample at its start.
+   *
+   * Beat resolution rather than bar, so a deliberate half- or quarter-bar chop is still
+   * possible, and only within a sixteenth of a line - drop a boundary in the middle of a beat
+   * and it stays exactly where you put it.
+   */
   function snap(t) {
+    if (beatSec) {
+      const line = gridPhase + Math.round((t - gridPhase) / beatSec) * beatSec;
+      return Math.abs(line - t) <= beatSec / 4 ? line : t;
+    }
     if (!mono || !sampleRate) return t;
     const win = Math.max(1, Math.round((zcSearchMs / 1000) * sampleRate));
     return findNearestZeroCrossing(mono, Math.round(t * sampleRate), win) / sampleRate;
@@ -233,20 +262,20 @@ export function createEditableWaveform({
     // their own, coarser density check so a heavily zoomed-out view still shows SOME reference
     // rather than losing the grid the moment individual beats get too dense to draw.
     if (bpm > 0) {
-      const beatSec = 60 / bpm;
       const beatPx = (beatSec / viewDuration) * w;
       const drawBeats = beatPx >= 4;
       const drawBars = drawBeats || beatPx * 4 >= 4;
       if (drawBeats || drawBars) {
         const beatColor = color("--wave-grid", "rgba(255, 255, 255, 0.12)");
         const barColor = color("--wave-grid-bar", "rgba(255, 255, 255, 0.26)");
-        const firstBeat = Math.max(0, Math.floor(viewStart / beatSec));
+        const firstBeat = Math.floor((viewStart - gridPhase) / beatSec);
         const lastTime = viewStart + viewDuration;
         ctx.lineWidth = 1;
-        for (let n = firstBeat; n * beatSec <= lastTime; n++) {
+        for (let n = firstBeat; gridPhase + n * beatSec <= lastTime; n++) {
+          if (n < 0) continue;
           const isBar = n % 4 === 0;
           if (isBar ? !drawBars : !drawBeats) continue;
-          const x = timeToX(n * beatSec, w);
+          const x = timeToX(gridPhase + n * beatSec, w);
           if (x < 0 || x > w) continue;
           ctx.strokeStyle = isBar ? barColor : beatColor;
           ctx.beginPath();
