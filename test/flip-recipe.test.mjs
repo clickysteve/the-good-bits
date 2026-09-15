@@ -208,29 +208,115 @@ test("generateRecipe: intensity is monotonic - more of it means more of the phra
   }
 });
 
-test("generateRecipe: conservative settings protect downbeats far more often than off-beats", () => {
+/**
+ * The musically meaningful question is NOT "does slot i still hold slice i" - a bar whose downbeat
+ * was replaced by another bar's downbeat still lands, and a relocated entry point is the whole
+ * feature of `new-entry`. It is "does a downbeat slot still carry intact downbeat material".
+ */
+function downbeatSurvival(map, options, takes = 80) {
+  let intact = 0;
+  let total = 0;
+  for (let seed = 1; seed <= takes; seed++) {
+    const recipe = generateRecipe({ map, seed: seed * 104729, ...options });
+    for (let i = 0; i < recipe.steps.length; i++) {
+      if (!map.slices[i].isDownbeat) continue;
+      total++;
+      const step = recipe.steps[i];
+      const source = map.slices[step.src];
+      if (source && source.isDownbeat && !step.reverse && !step.silent && !step.stutter) intact++;
+    }
+  }
+  return intact / total;
+}
+
+test("generateRecipe: conservative settings keep downbeats landing on downbeats", () => {
   const map = loopMap("1/16");
-  let downbeatsMoved = 0;
-  let downbeatsTotal = 0;
+  const survival = downbeatSurvival(map, { style: "mixed", intensity: 20 });
+  assert.ok(survival > 0.8, `downbeats should mostly survive at intensity 20, got ${survival.toFixed(3)}`);
+
+  // ...and off-beats should be where the damage lands instead.
   let offbeatsMoved = 0;
   let offbeatsTotal = 0;
   for (let seed = 1; seed <= 60; seed++) {
     const recipe = generateRecipe({ map, style: "mixed", intensity: 20, seed: seed * 104729 });
     for (let i = 0; i < recipe.steps.length; i++) {
-      const moved = recipe.steps[i].src !== i || recipe.steps[i].silent;
-      if (map.slices[i].isDownbeat) {
-        downbeatsTotal++;
-        if (moved) downbeatsMoved++;
-      } else if (!map.slices[i].isBeat) {
-        offbeatsTotal++;
-        if (moved) offbeatsMoved++;
-      }
+      if (map.slices[i].isBeat) continue;
+      offbeatsTotal++;
+      if (recipe.steps[i].src !== i || recipe.steps[i].silent) offbeatsMoved++;
     }
   }
-  const downbeatRate = downbeatsMoved / downbeatsTotal;
-  const offbeatRate = offbeatsMoved / offbeatsTotal;
-  assert.ok(downbeatRate < offbeatRate, `downbeats (${downbeatRate.toFixed(3)}) should move less than off-beats (${offbeatRate.toFixed(3)})`);
-  assert.ok(downbeatRate < 0.2, `downbeats should mostly survive at intensity 20, got ${downbeatRate.toFixed(3)}`);
+  assert.ok(offbeatsMoved / offbeatsTotal > 0, "something has to be changing");
+});
+
+test("generateRecipe: downbeat preservation is a real, switchable setting", () => {
+  const map = loopMap("1/16");
+  for (const intensity of [25, 45, 70, 100]) {
+    const on = downbeatSurvival(map, { style: "mixed", intensity, keepDownbeats: true });
+    const off = downbeatSurvival(map, { style: "mixed", intensity, keepDownbeats: false });
+    assert.ok(on > off + 0.05, `intensity ${intensity}: keeping downbeats (${on.toFixed(3)}) should beat not keeping them (${off.toFixed(3)}) by a clear margin`);
+  }
+});
+
+test("generateRecipe: downbeat preservation defaults to on, and is recorded on the recipe", () => {
+  const map = loopMap("1/16");
+  assert.equal(generateRecipe({ map, style: "mixed", intensity: 50, seed: 1 }).keepDownbeats, true);
+  assert.equal(generateRecipe({ map, style: "mixed", intensity: 50, seed: 1, keepDownbeats: false }).keepDownbeats, false);
+  // It changes the arrangement, so it has to be part of what a seed reproduces against.
+  const a = generateRecipe({ map, style: "mixed", intensity: 60, seed: 99, keepDownbeats: true });
+  const b = generateRecipe({ map, style: "mixed", intensity: 60, seed: 99, keepDownbeats: false });
+  assert.notDeepEqual(a.steps, b.steps);
+});
+
+test("generateRecipe: the opening moves often enough that a batch doesn't all start the same way", () => {
+  const map = loopMap("1/16");
+  // The failure this guards against: before `new-entry` existed the start slice changed in 2-13% of
+  // variations at the default intensity, so eight alternatives all announced themselves identically
+  // for the first beat - which is the single fastest way to make a batch feel like one result.
+  for (const style of ["shuffle", "jump", "mixed", "chaos"]) {
+    let moved = 0;
+    for (let seed = 1; seed <= 80; seed++) {
+      if (generateRecipe({ map, style, intensity: 45, seed: seed * 104729 }).steps[0].src !== 0) moved++;
+    }
+    assert.ok(moved / 80 > 0.25, `${style}: the opening should move in a good share of a batch, got ${((moved / 80) * 100).toFixed(0)}%`);
+  }
+  // ...but it should still usually be the original opening at conservative settings.
+  let movedLow = 0;
+  for (let seed = 1; seed <= 80; seed++) {
+    if (generateRecipe({ map, style: "mixed", intensity: 5, seed: seed * 104729 }).steps[0].src !== 0) movedLow++;
+  }
+  assert.ok(movedLow / 80 < 0.2, `at intensity 5 the opening should mostly stay put, got ${((movedLow / 80) * 100).toFixed(0)}%`);
+});
+
+test("generateRecipe: a relocated opening takes its material from a bar line while downbeats are preserved", () => {
+  // Scoped to the `new-entry` edit specifically. Slot 0 can also be rewritten by an ordinary
+  // operation that happened to anchor there (a group swap, a forward jump), and those make no
+  // bar-alignment promise - only the operation whose entire job is choosing an entry point does.
+  const map = loopMap("1/16");
+  let relocations = 0;
+  for (let seed = 1; seed <= 200; seed++) {
+    const recipe = generateRecipe({ map, style: "jump", intensity: 70, seed: seed * 104729 });
+    const entry = recipe.edits.find((e) => e.op === "new-entry");
+    if (!entry) continue;
+    relocations++;
+    assert.ok(map.slices[entry.from] && map.slices[entry.from].isDownbeat, `seed ${seed}: took the opening from slice ${entry.from}, which isn't a bar line`);
+    assert.notEqual(entry.from, 0, "relocating the entry to where it already was is not a relocation");
+  }
+  assert.ok(relocations > 20, `expected plenty of relocations to check, got ${relocations}`);
+});
+
+test("generateRecipe: with downbeats unprotected, the opening is free to start mid-bar", () => {
+  const map = loopMap("1/16");
+  let offBarStarts = 0;
+  let relocations = 0;
+  for (let seed = 1; seed <= 200; seed++) {
+    const recipe = generateRecipe({ map, style: "jump", intensity: 70, seed: seed * 104729, keepDownbeats: false });
+    const entry = recipe.edits.find((e) => e.op === "new-entry");
+    if (!entry) continue;
+    relocations++;
+    if (!map.slices[entry.from].isDownbeat) offBarStarts++;
+  }
+  assert.ok(relocations > 20, `expected plenty of relocations to check, got ${relocations}`);
+  assert.ok(offBarStarts > 0, "switching the setting off should let the loop open somewhere other than a bar line");
 });
 
 test("generateRecipe: conservative settings keep runs of the original in place, not a wash of tiny edits", () => {

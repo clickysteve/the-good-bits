@@ -13,6 +13,11 @@
 // `unlocks`   per-style override of an operation's own intensity gate. A style that exists to do a
 //             thing shouldn't have to wait for the slider to permit it: STUTTER stutters at 10.
 //
+// `new-entry` is weighted like any other operation but never appears in the per-chunk pick list -
+// it is only ever applied once, to the opening, so its weight reads as a PROPENSITY: how much this
+// personality likes starting the loop somewhere other than where the source started it. JUMP is
+// keenest, STUTTER and SPARSE barely bother, and a weight of 0 would mean never.
+//
 // MIXED vs CHAOS is the distinction the brief asks for and it's deliberately not "more of the same":
 // MIXED draws from the whole gentle end of the vocabulary at a NORMAL rate and severity, so it reads
 // as a considered remix that happens to use several techniques. CHAOS turns up the rate AND the
@@ -26,6 +31,7 @@ export const STYLES = [
     rateScale: 0.95,
     severityScale: 0.9,
     weights: {
+      "new-entry": 1.6,
       "swap-groups": 3,
       "move-fragment": 2.2,
       "jump-back": 1.4,
@@ -43,6 +49,7 @@ export const STYLES = [
     rateScale: 1,
     severityScale: 0.85,
     weights: {
+      "new-entry": 0.6,
       "repeat-slice": 2.4,
       "repeat-group": 2.6,
       "repeat-half-beat": 1.8,
@@ -59,6 +66,7 @@ export const STYLES = [
     rateScale: 1.05,
     severityScale: 1,
     weights: {
+      "new-entry": 1.9,
       "jump-back": 3,
       "jump-forward": 2.4,
       "move-fragment": 1.4,
@@ -75,6 +83,7 @@ export const STYLES = [
     rateScale: 0.9,
     severityScale: 1.15,
     weights: {
+      "new-entry": 0.35,
       "stutter-slice": 2.8,
       "stutter-tail": 2.4,
       "repeat-slice": 1.6,
@@ -91,6 +100,7 @@ export const STYLES = [
     rateScale: 0.9,
     severityScale: 0.95,
     weights: {
+      "new-entry": 0.6,
       "reverse-slice": 2.6,
       "reverse-group": 2.4,
       "call-response": 1.4,
@@ -106,6 +116,7 @@ export const STYLES = [
     rateScale: 1,
     severityScale: 0.85,
     weights: {
+      "new-entry": 0.45,
       "silence-slice": 3.2,
       "repeat-group": 1,
       "jump-back": 0.8,
@@ -121,6 +132,7 @@ export const STYLES = [
     rateScale: 0.95,
     severityScale: 0.9,
     weights: {
+      "new-entry": 1.0,
       "repeat-group": 1.5,
       "repeat-slice": 1.1,
       "repeat-half-beat": 1.2,
@@ -145,6 +157,7 @@ export const STYLES = [
     rateScale: 1.5,
     severityScale: 1.35,
     weights: {
+      "new-entry": 1.5,
       "repeat-group": 1.2,
       "repeat-slice": 1.2,
       "repeat-half-beat": 1,

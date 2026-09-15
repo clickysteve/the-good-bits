@@ -44,9 +44,10 @@ function clamp01(v) {
  * @param {string} opts.style      a style key (js/flip/styles.js)
  * @param {number} opts.intensity  0..100, conservative -> destructive
  * @param {number|string} opts.seed
+ * @param {boolean} [opts.keepDownbeats]  weight edits away from strong metric positions
  * @returns {{seed:number, style:string, intensity:number, sliceCount:number, subdivision:string, steps:object[], edits:object[]}}
  */
-export function generateRecipe({ map, style, intensity, seed }) {
+export function generateRecipe({ map, style, intensity, seed, keepDownbeats = true }) {
   const st = resolveStyle(style);
   const t = clamp01((Number(intensity) || 0) / 100);
   const rng = makeRng(hashSeed(seed));
@@ -62,37 +63,10 @@ export function generateRecipe({ map, style, intensity, seed }) {
   // because "generate me a variation" that returns the original is a bug, not conservatism.
   const baseRate = clamp01((0.18 + 0.62 * t) * st.rateScale);
 
-  // PROTECTED OPENING. The example in the brief - 1 2 3 4 5 6 5 6 - is not "a few small random
-  // edits", it's "the first half is the original, then it breaks". Getting that shape reliably at
-  // low intensity needs an explicit contiguous hold, not luck: a probabilistic per-chunk rate low
-  // enough to usually leave the opening alone is also too low to do anything interesting later.
-  let protectUntil = 0;
-  if (map.count >= map.perBar * 2 && rng.next() < 0.78 - 0.68 * t) {
-    // A whole number of bars where possible, so the hold ends where the ear expects a change.
-    const holdBars = Math.max(1, Math.floor(map.bars / 2));
-    protectUntil = Math.min(map.count - map.perBeat, holdBars * map.perBar);
-  }
-
   // Chunk = one beat, or one slice when the subdivision IS the beat. Anchoring every operation to a
   // beat boundary is most of what stops results sounding like an accident rather than an edit.
   const chunk = Math.max(1, map.perBeat);
   const chunkCount = Math.ceil(map.count / chunk);
-
-  // Which chunks this variation is even allowed to touch, after the protected opening.
-  const eligible = [];
-  for (let c = 0; c < chunkCount; c++) {
-    const at = c * chunk;
-    if (at >= protectUntil && at < map.count) eligible.push(at);
-  }
-  if (!eligible.length) eligible.push(Math.max(0, map.count - chunk));
-
-  // A CEILING AND A FLOOR. The ceiling is what makes low intensity mean FEW changes rather than
-  // just small ones. The floor is what makes the slider honest: a probabilistic walk over eight
-  // beats at a 45% rate lands on one edit often enough that half a batch comes back as "the
-  // original with a hiccup in it", which is a waste of eight slots and reads as the tool not
-  // working. The top-up pass below spends whatever the walk didn't.
-  const maxEdits = Math.max(1, Math.round(eligible.length * baseRate * 1.6));
-  const minEdits = Math.max(1, Math.min(maxEdits, Math.round(eligible.length * baseRate * 0.7)));
 
   /**
    * "Is this personality allowed to do X, at this intensity, on this material?"
@@ -115,10 +89,12 @@ export function generateRecipe({ map, style, intensity, seed }) {
     return op.fits(map);
   }
 
-  const available = OPERATIONS.filter((op) => allows(op.key));
+  // `new-entry` is deliberately excluded: it always rewrites the opening, so firing it from a
+  // mid-phrase anchor would be meaningless. It gets its own single, explicit chance below.
+  const available = OPERATIONS.filter((op) => op.key !== "new-entry" && allows(op.key));
 
   if (!available.length) {
-    return { seed: hashSeed(seed), style: st.key, intensity: Math.round(t * 100), sliceCount: map.count, subdivision: map.subdivision, steps, edits };
+    return { seed: hashSeed(seed), style: st.key, intensity: Math.round(t * 100), keepDownbeats: !!keepDownbeats, sliceCount: map.count, subdivision: map.subdivision, steps, edits };
   }
 
   const totalWeight = available.reduce((sum, op) => sum + (st.weights[op.key] || 0), 0);
@@ -132,7 +108,64 @@ export function generateRecipe({ map, style, intensity, seed }) {
     return available[available.length - 1];
   }
 
-  const ctx = { rng, map, steps, t, severity, style: st, allows };
+  const ctx = { rng, map, steps, t, severity, style: st, allows, keepDownbeats };
+
+  // ---- the opening ----------------------------------------------------------------------------
+  //
+  // Two competing truths, resolved here rather than left to chance:
+  //
+  // HOLD IT. The example in the brief - 1 2 3 4 5 6 5 6 - is not "a few small random edits", it's
+  // "the first half is the original, then it breaks". Getting that shape reliably at low intensity
+  // needs an explicit contiguous hold: a per-chunk rate low enough to usually leave the opening
+  // alone is also too low to do anything interesting later.
+  //
+  // MOVE IT. Held too faithfully and every variation in a batch announces itself identically for
+  // the first beat, which is the one thing that makes eight alternatives feel like one. Measured
+  // before this existed: at intensity 45 the opening slice changed in 2-13% of variations, so a
+  // batch of eight essentially always started the same way. Relocating the entry to another bar
+  // line is the fix that doesn't cost downbeat preservation - see the "new-entry" operation.
+  //
+  // They are mutually exclusive by construction, and which one is likelier flips as intensity
+  // rises: conservative settings mostly hold, destructive settings mostly move.
+  let protectUntil = 0;
+  const entryOp = operationByKey("new-entry");
+  const entryRate = clamp01((0.08 + 0.55 * t) * (st.weights["new-entry"] || 0));
+  const movedEntry = allows("new-entry") && entryOp.fits(map) && rng.next() < entryRate;
+
+  if (movedEntry) {
+    const result = entryOp.apply({ ...ctx, at: 0 });
+    if (result) edits.push({ op: entryOp.key, label: entryOp.label, at: 0, ...result });
+  } else if (map.count >= map.perBar * 2 && rng.next() < 0.78 - 0.68 * t) {
+    // A whole number of bars, so the hold ends where the ear expects a change. Half the phrase is
+    // right at conservative settings and far too much at destructive ones, where it would leave a
+    // two-bar dead zone in something the user asked to be wrecked.
+    const holdBars = t < 0.35 ? Math.max(1, Math.floor(map.bars / 2)) : 1;
+    protectUntil = Math.min(map.count - map.perBeat, holdBars * map.perBar);
+  }
+
+  // Which chunks this variation is even allowed to touch, after the protected opening.
+  //
+  // ANCHORS ARE THE REAL MECHANISM. Weighting the *choice* of chunk against strong positions barely
+  // moves the result on its own, because operations work in beat multiples from beat boundaries, so
+  // downbeat material lands on downbeats however the anchors are picked - it's the grid, not the
+  // weighting, that preserves them. Turning downbeat preservation off therefore has to take the
+  // anchors off the grid as well, otherwise the setting reads as broken: measured with only the
+  // weighting relaxed, it changed how often a downbeat survived intact by four percentage points.
+  const eligible = [];
+  for (let c = 0; c < chunkCount; c++) {
+    const base = c * chunk;
+    const at = keepDownbeats || chunk < 2 ? base : Math.min(map.count - 1, base + rng.int(chunk));
+    if (at >= protectUntil && at < map.count) eligible.push(at);
+  }
+  if (!eligible.length) eligible.push(Math.max(0, map.count - chunk));
+
+  // A CEILING AND A FLOOR. The ceiling is what makes low intensity mean FEW changes rather than
+  // just small ones. The floor is what makes the slider honest: a probabilistic walk over eight
+  // beats at a 45% rate lands on one edit often enough that half a batch comes back as "the
+  // original with a hiccup in it", which is a waste of eight slots and reads as the tool not
+  // working. The top-up pass below spends whatever the walk didn't.
+  const maxEdits = Math.max(1, Math.round(eligible.length * baseRate * 1.6));
+  const minEdits = Math.max(1, Math.min(maxEdits, Math.round(eligible.length * baseRate * 0.7)));
 
   function attempt(at) {
     const op = pickOperation();
@@ -145,9 +178,13 @@ export function generateRecipe({ map, style, intensity, seed }) {
   for (const at of eligible) {
     if (edits.length >= maxEdits) break;
     // Metric protection: the stronger the position, the less likely it is to be disturbed - and the
-    // higher the intensity, the less that matters. At t = 1 this term disappears entirely.
+    // higher the intensity, the less that matters. At t = 1 this term disappears on its own.
+    //
+    // Switched off entirely, every position is equally fair game, which is the point: preserving
+    // downbeats is a musical preference, not a law, and a tool whose whole premise is "give me this
+    // loop back, but wrong" has no business refusing to touch the strong beats when asked.
     const strength = map.slices[at] ? map.slices[at].strength : 0.5;
-    const protection = (0.72 - 0.72 * t) * strength;
+    const protection = keepDownbeats ? (0.72 - 0.72 * t) * strength : 0;
     if (rng.next() >= baseRate * (1 - protection)) continue;
     attempt(at);
   }
@@ -164,6 +201,7 @@ export function generateRecipe({ map, style, intensity, seed }) {
     seed: hashSeed(seed),
     style: st.key,
     intensity: Math.round(t * 100),
+    keepDownbeats: !!keepDownbeats,
     sliceCount: map.count,
     subdivision: map.subdivision,
     steps,
@@ -225,7 +263,7 @@ export function recipePattern(recipe, maxSlices = 64) {
 /** Everything that decides what a recipe renders to. Used to spot a stale variation after a settings change. */
 export function recipeSignature(recipe, map) {
   if (!recipe) return "";
-  return JSON.stringify([recipe.seed, recipe.style, recipe.intensity, map ? map.subdivision : recipe.subdivision, map ? map.count : recipe.sliceCount, map ? Math.round((map.bpm || 0) * 100) : 0]);
+  return JSON.stringify([recipe.seed, recipe.style, recipe.intensity, !!recipe.keepDownbeats, map ? map.subdivision : recipe.subdivision, map ? map.count : recipe.sliceCount, map ? Math.round((map.bpm || 0) * 100) : 0]);
 }
 
 export { operationByKey };

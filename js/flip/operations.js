@@ -66,7 +66,14 @@ function groupLen(ctx, { allowSub = false } = {}) {
   candidates.push({ len: bar, w: 0.12 + 0.5 * severity });
   const usable = candidates.filter((c) => c.len >= 1 && c.len * 2 <= map.count);
   if (!usable.length) return 1;
-  return weightedPick(rng, usable).len;
+  const len = weightedPick(rng, usable).len;
+  // Off the grid: a group that isn't a whole number of beats is what turns "rearranged" into
+  // "displaced", and is the point of switching downbeat preservation off.
+  if (!ctx.keepDownbeats && len > 1 && rng.bool(0.5)) {
+    const skew = 1 + rng.int(Math.max(1, len - 1));
+    return Math.max(1, Math.min(len + (rng.bool() ? skew : -skew), Math.floor(map.count / 2)));
+  }
+  return len;
 }
 
 /** A jump distance: always a whole number of beats, near before far. */
@@ -81,7 +88,13 @@ function jumpDistance(ctx, maxDistance) {
   ];
   const usable = candidates.filter((c) => c.len >= 1 && c.len <= maxDistance);
   if (!usable.length) return 0;
-  return weightedPick(rng, usable).len;
+  const distance = weightedPick(rng, usable).len;
+  // A jump that doesn't land on a beat drags the whole phrase out of phase - deliberately.
+  if (!ctx.keepDownbeats && rng.bool(0.5)) {
+    const offset = 1 + rng.int(Math.max(1, beat - 1));
+    return Math.max(1, Math.min(distance + (rng.bool() ? offset : -offset), maxDistance));
+  }
+  return distance;
 }
 
 /**
@@ -105,6 +118,19 @@ function stutterCount(ctx) {
  *  when absent, so an operation can still be exercised standalone (a unit test, a future caller). */
 function permits(ctx, key) {
   return typeof ctx.allows === "function" ? ctx.allows(key) : true;
+}
+
+/**
+ * Where inside [from, from+len) should an edit that only needs ONE slice land?
+ *
+ * With downbeat preservation on, the weakest metric position - a rest or a reversed slice hurts
+ * least there, and the beat still lands. With it off, anywhere in the span, which is what makes the
+ * setting audible rather than notional: reversing the slice that carries the downbeat is exactly
+ * the kind of damage someone turning this off is asking for.
+ */
+function pickTarget(ctx, from, len) {
+  if (!ctx.keepDownbeats) return Math.min(ctx.map.count - 1, from + ctx.rng.int(Math.max(1, len)));
+  return weakestIn(ctx.map, from, len);
 }
 
 /** The weakest metric position inside [from, from+len) - where a silence or a stutter hurts least. */
@@ -226,8 +252,8 @@ export const OPERATIONS = [
     apply(ctx) {
       const { steps, at, map, rng } = ctx;
       // Reversing the slice that lands ON a downbeat swallows the transient the whole bar hangs
-      // off, so bias towards the weaker positions in this beat unless nothing else is available.
-      const target = rng.bool(0.7) ? weakestIn(map, at, Math.max(1, map.perBeat)) : at;
+      // off, so bias towards the weaker positions in this beat - unless downbeat preservation is off.
+      const target = !ctx.keepDownbeats || rng.bool(0.7) ? pickTarget(ctx, at, Math.max(1, map.perBeat)) : at;
       steps[target].reverse = !steps[target].reverse;
       steps[target].op = "reverse-slice";
       return { len: 1, target };
@@ -261,7 +287,7 @@ export const OPERATIONS = [
     apply(ctx) {
       const { steps, at, map, rng, severity } = ctx;
       const beat = Math.max(1, map.perBeat);
-      const start = weakestIn(map, at, beat);
+      const start = pickTarget(ctx, at, beat);
       // A gap longer than a beat stops reading as a drop-out and starts reading as a missing bar.
       let len = 1;
       if (severity > 0.5 && beat >= 2 && rng.bool(0.4)) len = Math.min(beat, 2);
@@ -286,8 +312,9 @@ export const OPERATIONS = [
       const { steps, at, map, rng, severity } = ctx;
       const beat = Math.max(1, map.perBeat);
       // Landing the stutter on the LAST slice of the beat makes it a run-up into the next downbeat,
-      // which is where a stutter sounds deliberate. Anywhere in the beat, once it's rough enough.
-      const target = severity > 0.55 && rng.bool(0.5) ? at + rng.int(beat) : Math.min(map.count - 1, at + beat - 1);
+      // which is where a stutter sounds deliberate. Anywhere in the beat, once it's rough enough -
+      // or straight away, when downbeat preservation is off.
+      const target = !ctx.keepDownbeats || (severity > 0.55 && rng.bool(0.5)) ? at + rng.int(beat) : Math.min(map.count - 1, at + beat - 1);
       const step = steps[Math.min(map.count - 1, target)];
       if (step.silent) return null;
       step.stutter = stutterCount(ctx);
@@ -306,7 +333,7 @@ export const OPERATIONS = [
     apply(ctx) {
       const { steps, at, map, rng } = ctx;
       const beat = Math.max(1, map.perBeat);
-      const target = Math.min(map.count - 1, rng.bool(0.65) ? at + beat - 1 : at);
+      const target = Math.min(map.count - 1, !ctx.keepDownbeats ? at + rng.int(beat) : rng.bool(0.65) ? at + beat - 1 : at);
       const step = steps[target];
       if (step.silent) return null;
       // The slice starts normally and only breaks up halfway through, so the attack is intact and
@@ -411,6 +438,49 @@ export const OPERATIONS = [
         steps[at + beat - 1].keepHead = 0;
       }
       return { len: beat };
+    },
+  },
+
+  {
+    key: "new-entry",
+    label: "start somewhere else",
+    minT: 0.05,
+    fits: (map) => map.count >= map.perBar * 2,
+    apply(ctx) {
+      const { steps, map, rng, severity } = ctx;
+      // ALWAYS the opening, whatever anchor it was handed - this operation is about where the loop
+      // begins, and the generator calls it exactly once, at the top. See generateRecipe().
+      //
+      // The material comes from another BAR LINE, not an arbitrary offset, which is the whole point:
+      // "preserve important downbeats" means edits should land on strong positions, not that slice 0
+      // is sacred. Opening on bar 3's downbeat is still opening on a downbeat - it just isn't the one
+      // the source opened on, which is the difference between eight variations that announce
+      // themselves identically for the first beat and eight that don't.
+      // WHERE the new opening comes from and HOW MUCH of the opening it replaces are separate
+      // decisions, and conflating them was a bug: tying the length to the alignment meant a whole
+      // bar got relocated even at intensity 10, which is a quarter of a four-bar loop rewritten by
+      // something the user asked to barely touch anything.
+      //
+      // Alignment: bar lines while downbeats are being preserved, so the loop still opens ON a
+      // downbeat. With that off, any beat will do - starting mid-bar is a legitimate thing to want.
+      const align = Math.max(1, ctx.keepDownbeats ? map.perBar : map.perBeat);
+      const slots = Math.floor(map.count / align);
+      if (slots < 2) return null;
+
+      // Length: a beat when gentle, up to a full bar when not. The opening changes either way -
+      // that's the point of the operation - but by a proportionate amount.
+      const beat = Math.max(1, map.perBeat);
+      const sizes = [{ len: beat, w: 1.3 - severity }];
+      if (map.perBar >= 2 && (map.perBar >> 1) !== beat) sizes.push({ len: map.perBar >> 1, w: 0.6 + 0.4 * severity });
+      if (map.perBar !== beat) sizes.push({ len: map.perBar, w: 0.15 + 1.1 * severity });
+      const len = weightedPick(rng, sizes.filter((c) => c.len >= 1 && c.len * 2 <= map.count)).len;
+      if (!len || len < 1) return null;
+
+      // Any aligned start but the one it already had.
+      const from = (1 + rng.int(slots - 1)) * align;
+      if (from + len > map.count) return null;
+      for (let i = 0; i < len; i++) steps[i] = makeStep(from + i, "new-entry");
+      return { len, from };
     },
   },
 

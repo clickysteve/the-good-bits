@@ -91,6 +91,8 @@ export function createFlip(deps) {
     subdivision: DEFAULT_SUBDIVISION,
     intensity: 45,
     style: DEFAULT_STYLE,
+    // A musical preference, not a law - see the checkbox in the controls panel.
+    keepDownbeats: true,
     batchSize: DEFAULT_BATCH_SIZE,
     bitDepth: DEFAULT_BIT_DEPTH,
     looping: true,
@@ -258,6 +260,29 @@ export function createFlip(deps) {
   styleField.appendChild(styleBlurb);
   controlsPanel.appendChild(styleField);
 
+  // Downbeat preservation. On by default because it is what makes most results sound intentional,
+  // and switchable because "give me this loop back, but wrong" is a poor reason to refuse to touch
+  // the strong beats. Off, edits stop being weighted away from strong positions AND stop being
+  // anchored to the beat grid at all - see generateRecipe() and groupLen()/jumpDistance().
+  const downbeatField = el("label", "check flip-check");
+  const downbeatCheckbox = el("input");
+  downbeatCheckbox.type = "checkbox";
+  downbeatCheckbox.addEventListener("change", () => {
+    state.keepDownbeats = downbeatCheckbox.checked;
+    save();
+    markStale();
+    render();
+  });
+  downbeatField.append(downbeatCheckbox, el("span", null, "Keep downbeats"));
+  controlsPanel.appendChild(downbeatField);
+  controlsPanel.appendChild(
+    el(
+      "p",
+      "mod-note flip-check-note",
+      "On, edits land on the beat and mostly leave the strong beats alone. Off, FLIP cuts wherever it likes - groups and jumps stop being whole numbers of beats, so things land off the grid and the phrase drags out of phase."
+    )
+  );
+
   const gridWarning = el("p", "flip-warning");
   gridWarning.hidden = true;
   controlsPanel.appendChild(gridWarning);
@@ -393,6 +418,7 @@ export function createFlip(deps) {
       batchSize: state.batchSize,
       bitDepth: state.bitDepth,
       looping: state.looping,
+      keepDownbeats: state.keepDownbeats,
     });
   }
 
@@ -405,6 +431,7 @@ export function createFlip(deps) {
     if (BATCH_SIZES.includes(saved.batchSize)) state.batchSize = saved.batchSize;
     if (saved.bitDepth === 16 || saved.bitDepth === 24) state.bitDepth = saved.bitDepth;
     if (typeof saved.looping === "boolean") state.looping = saved.looping;
+    if (typeof saved.keepDownbeats === "boolean") state.keepDownbeats = saved.keepDownbeats;
   }
 
   // -------------------------------------------------------------------------
@@ -551,7 +578,7 @@ export function createFlip(deps) {
   /** Everything a generated variation depends on besides its own seed. */
   function settingsSignature() {
     const map = currentMap();
-    return JSON.stringify([state.name, state.subdivision, state.intensity, state.style, map ? map.count : 0, map ? Math.round((map.bpm || 0) * 100) : 0]);
+    return JSON.stringify([state.name, state.subdivision, state.intensity, state.style, state.keepDownbeats, map ? map.count : 0, map ? Math.round((map.bpm || 0) * 100) : 0]);
   }
 
   /** Flag the on-screen batch as generated under settings that have since changed. */
@@ -601,7 +628,7 @@ export function createFlip(deps) {
     const signature = settingsSignature();
     const count = state.batchSize;
     const styleLabel = resolveStyle(state.style).label;
-    log(`FLIP generating ${count} variations - ${describeSliceMap(map)}, ${styleLabel}, intensity ${state.intensity} (${describeIntensity(state.intensity)}).`);
+    log(`FLIP generating ${count} variations - ${describeSliceMap(map)}, ${styleLabel}, intensity ${state.intensity} (${describeIntensity(state.intensity)})${state.keepDownbeats ? "" : ", downbeats unprotected"}.`);
 
     for (let i = 0; i < count; i++) {
       if (myGeneration !== generation) break; // superseded - stop rather than filling a stale list
@@ -626,7 +653,7 @@ export function createFlip(deps) {
 
   /** Generate + render one variation. Pure inputs -> everything the row needs. */
   function buildVariation({ map, signature, index, seed }) {
-    const recipe = generateRecipe({ map, style: state.style, intensity: state.intensity, seed });
+    const recipe = generateRecipe({ map, style: state.style, intensity: state.intensity, seed, keepDownbeats: state.keepDownbeats });
     const audio = renderVariationAudio({
       recipe,
       map,
@@ -671,7 +698,7 @@ export function createFlip(deps) {
     const wasPlaying = old.row.isPlaying();
     old.row.stop();
 
-    const recipe = generateRecipe({ map, style: state.style, intensity: state.intensity, seed });
+    const recipe = generateRecipe({ map, style: state.style, intensity: state.intensity, seed, keepDownbeats: state.keepDownbeats });
     old.recipe = recipe;
     old.seed = recipe.seed;
     old.audio = renderVariationAudio({ recipe, map, channels: state.audio.channels, sampleRate: state.audio.sampleRate });
@@ -820,6 +847,7 @@ export function createFlip(deps) {
     if (document.activeElement !== intensitySlider) intensitySlider.value = String(state.intensity);
     if (document.activeElement !== intensityNumber) intensityNumber.value = String(state.intensity);
     intensityWord.textContent = describeIntensity(state.intensity);
+    downbeatCheckbox.checked = state.keepDownbeats;
 
     const warning = hasSource ? readiness.reason || readiness.warning : null;
     gridWarning.hidden = !warning;

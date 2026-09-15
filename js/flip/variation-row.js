@@ -60,7 +60,13 @@ export function createVariationRow({ id, isOriginal = false, getAudioContext, co
   });
   player.el.classList.add("flip-row-wave");
 
+  // The description and the stale badge share ONE grid cell. The badge has to live somewhere that
+  // can't change the geometry of the row: put it in the right-hand rail and every waveform on the
+  // page resizes the moment a setting is changed, which is precisely when you most want to compare
+  // them against what you just heard.
+  const descWrap = el("div", "flip-row-desc-wrap");
   const desc = el("span", "flip-row-desc", isOriginal ? "your loop, untouched" : "");
+  descWrap.appendChild(desc);
   const meta = el("div", "flip-row-meta");
 
   let seedInput = null;
@@ -109,9 +115,11 @@ export function createVariationRow({ id, isOriginal = false, getAudioContext, co
   const staleBadge = el("span", "flip-stale", "settings changed");
   staleBadge.title = "This was generated before you changed a setting. Generate again to hear the new ones.";
   staleBadge.hidden = true;
-  meta.appendChild(staleBadge);
+  descWrap.appendChild(staleBadge);
 
-  root.append(playBtn, label, player.el, desc, meta, actions);
+  // Six cells, always, even on the original - the empty seed and action cells are what keep its
+  // waveform the same width as every variation's. See .flip-row in css/style.css.
+  root.append(playBtn, label, player.el, descWrap, meta, actions);
 
   playBtn.addEventListener("click", (ev) => {
     ev.stopPropagation();
