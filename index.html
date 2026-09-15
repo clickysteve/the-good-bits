@@ -163,7 +163,15 @@
           <span class="slider-unit">ms</span>
         </div>
       </div>
-      <p class="mod-note">Good Bits automatically analyses key and tempo for every source - there's nothing to opt into. Use the naming tokens above to decide whether that shows up in exported names.</p>
+      <label class="check">
+        <input id="detect-key-checkbox" type="checkbox" checked />
+        <span>Detect key</span>
+      </label>
+      <label class="check">
+        <input id="detect-tempo-checkbox" type="checkbox" checked />
+        <span>Detect tempo</span>
+      </label>
+      <p class="mod-note">Off skips that detector entirely, for every mode - no analysis attempted, and its {key}/{tempo}/{tag} naming tokens above quietly drop out. Turn off key detection for material with no meaningful key, like drum breaks. Tempo still drives bar-locked drum chop length and the stretch ratio, so turning it off without setting a tempo manually per file falls back the same way an unconfident detection already does.</p>
       <p id="essentia-status" class="essentia-status">Loading key &amp; tempo detection…</p>
     </section>
 

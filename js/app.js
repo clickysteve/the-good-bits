@@ -116,6 +116,8 @@ function detectionSignature() {
     extractOneShots,
     params: activeParams()[mode],
     zcSearchMs: exportSettings.zcSearchMs,
+    detectKey: detectionSettings.key,
+    detectTempo: detectionSettings.tempo,
   });
 }
 
@@ -258,9 +260,18 @@ const LEGACY_PATTERN_MAP = {
 };
 
 const exportSettings = { bitDepth: 24, fadeMs: 5, zcSearchMs: 15 };
-// Key/tempo detection is always attempted (see processOneFile/ensureStretchSourceAnalyzed) - there's
-// no longer a user-facing opt-out. Whether a detected value actually shows up anywhere is a separate,
-// later choice: whether the {key}/{tempo}/{tag} naming tokens are used in a pattern.
+
+// Whether essentia is even asked for a key/tempo, independently of each other and independently of
+// mode - see processOneFile/ensureStretchSourceAnalyzed, both of which pass this straight through as
+// analyzeKeyAndTempo's `want`. This is a different axis from namingSettings' {key}/{tempo}/{tag}
+// tokens: those decide whether an ALREADY-DETECTED value shows up in a name; this decides whether
+// detection is attempted for that value at all. Turning off key detection here is what actually keeps
+// key out of every mode's {tag} at once - most breaks have no meaningful key, and typing a
+// drums-only naming pattern just to drop {key} would be working around the real problem. Off means
+// the corresponding field on `kt` simply never gets set (null, same as a failed detection), which is
+// why nothing downstream needs to know this setting exists: a chop-length fallback for "no tempo"
+// already existed for a failed detection, and it does the right thing for a switched-off one too.
+const detectionSettings = { key: true, tempo: true };
 
 // Which shape the main chop export takes: "individual" (today's one-file-per-chop behaviour,
 // unchanged and still the default) or "markers" (one continuous WAV per source file, with the
@@ -387,6 +398,8 @@ const newSessionBtn = $("#new-session-btn");
 const drumOptions = $("#drum-options");
 const drumBarsSelect = $("#drum-bars-select");
 const oneShotsCheckbox = $("#one-shots-checkbox");
+const detectKeyCheckbox = $("#detect-key-checkbox");
+const detectTempoCheckbox = $("#detect-tempo-checkbox");
 const namingPatternEditorHost = $("#naming-pattern-editor-host");
 const namingFolderPatternEditorHost = $("#naming-folder-pattern-editor-host");
 const namingPreviewEl = $("#naming-preview");
@@ -624,6 +637,21 @@ oneShotsCheckbox.addEventListener("change", () => {
   saveSettings();
 });
 
+// Changing either toggle makes cachedAnalysis() treat every already-analyzed file as stale (see
+// detectionSignature()) - no explicit invalidateAnalysis() needed, same as drumBars/extractOneShots
+// above.
+detectKeyCheckbox.addEventListener("change", () => {
+  detectionSettings.key = detectKeyCheckbox.checked;
+  updateNamingPreview();
+  saveSettings();
+});
+
+detectTempoCheckbox.addEventListener("change", () => {
+  detectionSettings.tempo = detectTempoCheckbox.checked;
+  updateNamingPreview();
+  saveSettings();
+});
+
 // ---------------------------------------------------------------------------
 // Output naming
 // ---------------------------------------------------------------------------
@@ -663,6 +691,19 @@ namingFolderPatternEditorHost.appendChild(namingFolderPatternEditor.el);
  */
 function formatKeyToken(kt) {
   return kt && kt.key ? (kt.scale === "minor" ? `${kt.key}m` : kt.key) : "";
+}
+
+/**
+ * "C minor" / "unknown" / "unavailable" / "off" - the log/result-card text for a source's detected
+ * key, drawing the same three-way distinction formatBpmText already draws for tempo (see its own
+ * doc comment) plus the one formatBpmText doesn't need: key has no manual-override escape hatch, so
+ * "off" here always means the folder/filename really will have no key in it, not just no DETECTED
+ * one.
+ */
+function formatKeyText(kt) {
+  if (kt.key) return `${kt.key} ${kt.scale || ""}`.trim();
+  if (!detectionSettings.key) return "off";
+  return kt.available ? "unknown" : "unavailable";
 }
 
 /**
@@ -720,7 +761,15 @@ function buildChopFileName(stem, tag, index, kt) {
 
 /** Refreshes the "here's what that'll look like" example under the naming pattern inputs. */
 function updateNamingPreview() {
-  const sampleKt = { key: "C", scale: "minor", bpm: 120 };
+  // Mirrors whichever detector is switched off, the same way a real file with that detector off
+  // would: the field is simply never populated (see detectionSettings), so its tokens drop out here
+  // exactly as they will in an actual export - rather than showing a sample key/tempo that a real
+  // run with the same settings could never actually produce.
+  const sampleKt = {
+    key: detectionSettings.key ? "C" : null,
+    scale: detectionSettings.key ? "minor" : null,
+    bpm: detectionSettings.tempo ? 120 : null,
+  };
   const sampleTag = buildKeyTempoTag(sampleKt, namingSettings.separator);
   const folderName = buildTaggedStem("drum_take", sampleKt);
   const sampleNames = [1, 2, 3].map((i) => buildChopFileName("drum_take", sampleTag, i, sampleKt));
@@ -1413,6 +1462,7 @@ function flushSaveSettings() {
     drumBars,
     extractOneShots,
     chopIntoPieces,
+    detection: detectionSettings,
     naming: namingSettings,
     exportSettings,
     chopExportFormat,
@@ -1541,6 +1591,12 @@ function applySettings(saved) {
   if (typeof saved.extractOneShots === "boolean") {
     extractOneShots = saved.extractOneShots;
     oneShotsCheckbox.checked = extractOneShots;
+  }
+  if (saved.detection) {
+    if (typeof saved.detection.key === "boolean") detectionSettings.key = saved.detection.key;
+    if (typeof saved.detection.tempo === "boolean") detectionSettings.tempo = saved.detection.tempo;
+    detectKeyCheckbox.checked = detectionSettings.key;
+    detectTempoCheckbox.checked = detectionSettings.tempo;
   }
   // chopIntoPieces is no longer stored: it is derived from the task, so a stale saved value would
   // fight applyTask() on load.
@@ -2520,9 +2576,10 @@ async function ensureStretchSourceAnalyzed(folder, fileInfo) {
   const channels = bufferChannels(buffer);
   const mono = toMono(channels);
   const validCached = cachedAnalysis(folder, fileInfo);
-  const kt = validCached ? validCached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: true, tempo: true });
-  const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
-  const bpmText = formatBpmText(effectiveTempo(key, kt), tempoOverrides.has(key), kt.available);
+  const kt = validCached ? validCached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: detectionSettings.key, tempo: detectionSettings.tempo });
+  const keyText = formatKeyText(kt);
+  const stretchEffectiveBpm = effectiveTempo(key, kt);
+  const bpmText = stretchEffectiveBpm || detectionSettings.tempo ? formatBpmText(stretchEffectiveBpm, tempoOverrides.has(key), kt.available) : "off";
   analysisCache.set(key, {
     signature: detectionSignature(),
     kt,
@@ -2650,10 +2707,12 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   // A valid cache entry means Preview already ran essentia over this file and nothing that would
   // move a cut point has changed since, so Export reuses that work instead of repeating it.
   const cached = cachedAnalysis(folder, fileInfo);
-  // Key/tempo detection is always attempted (no user-facing opt-out any more) - see analyzeKeyAndTempo's
-  // {key,tempo} flags, which just mean "attempt this", not "the user asked for it". A failed detection
-  // still comes back as a normal result (kt.key/kt.bpm simply falsy), it never throws.
-  const kt = cached ? cached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: true, tempo: true });
+  // Each half of `want` reflects the matching Detect Key/Detect Tempo checkbox (detectionSettings) -
+  // a switched-off detector and a failed one look identical from here on (kt.key/kt.bpm simply
+  // falsy either way; analyzeKeyAndTempo never throws), which is deliberate: everything downstream
+  // that reacts to "no tempo"/"no key" already has to handle a real detection failure, so reusing
+  // that path for "didn't try" needs nothing extra.
+  const kt = cached ? cached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: detectionSettings.key, tempo: detectionSettings.tempo });
   if (cached) log(`    reusing the analysis from the last run`);
   // Every musical decision below - the tag, the {tempo} token, bar-based chop length, the stretch
   // ratio - is asking "what tempo should this source be treated as?", which is effectiveBpm, not
@@ -2665,13 +2724,14 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   const tag = buildKeyTempoTag(effectiveKt, namingSettings.separator);
   const taggedStem = buildTaggedStem(stem, effectiveKt);
 
-  const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
-  const bpmText = formatBpmText(effectiveBpm, isManualTempo, kt.available);
+  const keyText = formatKeyText(kt);
+  const bpmText = effectiveBpm || detectionSettings.tempo ? formatBpmText(effectiveBpm, isManualTempo, kt.available) : "off";
 
   // Drums-mode chop length is bar-based, so it genuinely needs a tempo to work from - unlike the
-  // rest of the app, this one processing mode really can't proceed the normal way without one.
-  // Detection itself is unconditional now (see the kt line above), so this only ever fires on a real
-  // detection failure, never on an opt-out that no longer exists.
+  // rest of the app, this one processing mode really can't proceed the normal way without one. This
+  // fires exactly the same way whether there's no tempo because detection failed or because Detect
+  // Tempo is switched off - either way there's nothing to chop bars from except a manual override,
+  // and the fallback-length prompt is the right answer to both.
   if (chopIntoPieces && mode === "drums" && !effectiveBpm) {
     const proceed = await resolveTempoWarning(fileInfo.name);
     if (!proceed) {
