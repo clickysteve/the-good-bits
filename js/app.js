@@ -23,6 +23,7 @@ import {
 import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups, MACROS } from "./timestretch.js";
 import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "./dsp/stretch/workspace-state.js";
 import { createStretchWorkspace } from "./stretch-workspace.js";
+import { resolveVariationSet, variationFileName } from "./variation-export.js";
 import { createPlayNice } from "./play-nice/controller.js";
 import { renderConform } from "./play-nice/render.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
@@ -64,6 +65,7 @@ import {
   clearOldChopsFSA,
   clearOldOneShotsFSA,
   clearOldNumberedFilesFSA,
+  clearOldVariationsFSA,
   ZipBatch,
   formatSourcePath,
 } from "./io-fs.js";
@@ -297,6 +299,16 @@ const timestretchSettings = {
   macroValues: { texture: 50, variation: 50, smear: 50, roughness: 50 },
   seed: 1,
 };
+
+// Characters queued for a multi-variation export in the Stretch workspace's character browser -
+// see renderStretchCharacterBrowser and the "batch or single" branch in processOneFile's derived-
+// copy write. Empty (the default, and every save from before this existed) means "export exactly
+// the single active character above," unchanged from how this always worked; any keys queued here
+// switch that one write over to one file per queued character, into variations/, instead. A plain
+// Set rather than an array because every real use is membership toggling (checkbox clicks) - order
+// only matters at export/display time, and resolveVariationSet (js/variation-export.js) is what
+// imposes a real, deterministic order on it then.
+const stretchExportVariationKeys = new Set();
 
 // Lo-fi processing chain (output-stage character -> drive -> crunch), applied in that order.
 // Same scope as time-stretch: main chops and the full-file wav/ copy, not one-shots.
@@ -1109,6 +1121,19 @@ function renderStretchCharacterBrowser() {
     characterKey: timestretchSettings.character,
     macroValues: timestretchSettings.macroValues,
     seed: timestretchSettings.seed,
+    exportKeys: stretchExportVariationKeys,
+    onToggleExportKey: (key, checked) => {
+      if (checked) stretchExportVariationKeys.add(key);
+      else stretchExportVariationKeys.delete(key);
+      renderStretchCharacterBrowser();
+      saveSettings();
+    },
+    onClearExportKeys: () => {
+      if (stretchExportVariationKeys.size === 0) return;
+      stretchExportVariationKeys.clear();
+      renderStretchCharacterBrowser();
+      saveSettings();
+    },
     onSelectCharacter: (key) => {
       if (timestretchSettings.character === key) return;
       timestretchSettings.character = key;
@@ -1467,6 +1492,7 @@ function flushSaveSettings() {
     exportSettings,
     chopExportFormat,
     timestretch: timestretchSettings,
+    stretchExportVariationKeys: [...stretchExportVariationKeys],
     outputStage: outputStageSettings,
     drive: driveSettings,
     crunch: crunchSettings,
@@ -1649,6 +1675,16 @@ function applySettings(saved) {
     }
     updateTimestretchModeVisibility();
     updateCharacterUI();
+  }
+  if (Array.isArray(saved.stretchExportVariationKeys)) {
+    // Same "unknown id quietly drops rather than breaking anything" rule as the single active
+    // character just above - resolveVariationSet is exactly this filter, already written for the
+    // export path itself, so it's reused here rather than duplicating the same registry lookup.
+    const allCharacters = characterGroups().flatMap((g) => g.characters);
+    stretchExportVariationKeys.clear();
+    for (const c of resolveVariationSet(saved.stretchExportVariationKeys, allCharacters)) {
+      stretchExportVariationKeys.add(c.key);
+    }
   }
   if (saved.outputStage) {
     Object.assign(outputStageSettings, saved.outputStage);
@@ -2506,15 +2542,22 @@ async function runConformHeavy({ channels, sampleRate, bitDepth, plan, seed, fad
  * both always go through exactly the DSP path Export would use - never a second, possibly-diverging
  * implementation. Always copies the channels first: processRegionsHeavy transfers its input buffers
  * to the worker, which would otherwise detach the caller's (possibly cached, reused-next-time) arrays.
+ *
+ * `characterKey` defaults to the single active character (every existing caller's behaviour,
+ * unchanged) - the multi-variation export (processOneFile) is the one caller that passes a
+ * different character per call, rendering the same channels/ratio/macroValues/seed once per queued
+ * variation. macroValues/seed always come from the live timestretchSettings regardless of which
+ * character is being rendered - see stretchExportVariationKeys' own doc comment for why that's the
+ * deliberate, simple choice rather than tracking a separate macro state per character.
  */
-async function renderStretchAudio(channels, sampleRate, ratio) {
+async function renderStretchAudio(channels, sampleRate, ratio, characterKey = timestretchSettings.character) {
   const [{ blob }] = await processRegionsHeavy({
     sampleRate,
     bitDepth: 24,
     fadeInSamples: 0,
     fadeOutSamples: 0,
     stretchRatio: ratio,
-    character: timestretchSettings.character,
+    character: characterKey,
     macroValues: timestretchSettings.macroValues,
     seed: timestretchSettings.seed,
     regions: [{ channels: channels.map((ch) => Float32Array.from(ch)) }],
@@ -2757,12 +2800,48 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   const fullStretchRatio = resolveStretchRatio(effectiveBpm);
   const fullStretched = fullStretchRatio !== 1;
   const fullLofi = lofiActive();
-  // STRETCH always needs this render for the workspace's Processed pane, even when it would end up
+  // Multi-variation export (Stretch workspace's character browser only - see
+  // stretchExportVariationKeys' own doc comment): with characters queued there, Export writes one
+  // file per queued character into variations/ instead of the usual single derived copy below, so
+  // trying out N stretch types never means running Export N separate times. Resolved once, in the
+  // registry's own display order, so the written files, the log line, and the on-screen "N queued"
+  // count can never disagree about which N. Scoped to task === "stretch" because that's the only
+  // place the checkboxes are reachable - a queue left over from a still-open STRETCH session must
+  // not silently start changing what CHOP/BOTH's per-chop stretch does.
+  const queuedVariations = task === "stretch" ? resolveVariationSet(stretchExportVariationKeys, characterGroups().flatMap((g) => g.characters)) : [];
+  // STRETCH always needs a render for the workspace's Processed pane, even when it would end up
   // identical to Original (ratio 1, lo-fi off) - the whole point of the A/B view is showing that
   // clearly rather than showing nothing. CHOP/BOTH keep the original behaviour: only render (and
   // only ever write) a derived copy when it would actually differ from the source.
   let stretchProcessedForWorkspace = null;
-  if (fullStretched || fullLofi || task === "stretch") {
+  if (queuedVariations.length > 0) {
+    // Idempotent re-run cleanup, same reasoning as clearOldChopsFSA above: a queue that's shrunk
+    // since the last export (a character unchecked) must not leave that character's old file
+    // sitting in variations/ forever.
+    if (isExportIncluded(fileInfo) && folder.kind === "fsa" && !dryRun) {
+      await clearOldVariationsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
+    }
+    const variationBaseStem = `${taggedStem}${fullLofi ? " lofi" : ""}`;
+    const writtenLabels = [];
+    for (const c of queuedVariations) {
+      const variationBlob = await renderStretchAudio(channels, buffer.sampleRate, fullStretchRatio, c.key);
+      const fileName = variationFileName(variationBaseStem, c.label);
+      await writeOutput(folder, "variations", fileInfo.relativeDir, fileName, variationBlob, zipBatch, fileInfo, dryRun);
+      // Same "don't claim a write that writeOutput() actually skipped" rule as exportMarkerWavForFile.
+      if (dryRun || isExportIncluded(fileInfo)) writtenLabels.push(c.label);
+    }
+    if (writtenLabels.length) log(`    wrote ${writtenLabels.length} variation${writtenLabels.length === 1 ? "" : "s"}: ${writtenLabels.join(", ")}`);
+    // The Processed pane always audits the single ACTIVE character (whatever's selected for live
+    // browsing), whether or not that character happens to also be queued for the batch above - a
+    // small possible duplicate render, accepted for not needing to special-case "was it already
+    // rendered a moment ago as part of the queue".
+    stretchProcessedForWorkspace = await decodeStretchPreview(
+      await renderStretchAudio(channels, buffer.sampleRate, fullStretchRatio),
+      resolveCharacter(timestretchSettings.character).label,
+      fullStretchRatio,
+      effectiveBpm
+    );
+  } else if (fullStretched || fullLofi || task === "stretch") {
     const derivedBlob = await renderStretchAudio(channels, buffer.sampleRate, fullStretchRatio);
     if (fullStretched || fullLofi) {
       const derivedName = `${taggedStem}${fullStretched ? " stretched" : ""}${fullLofi ? " lofi" : ""}.wav`;

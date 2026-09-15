@@ -736,6 +736,24 @@ scope**, right below, decides whether that chain also touches one-shots,
 and whether a raw unprocessed copy gets written alongside the processed
 one.
 
+In the Stretch task specifically, the character grid has a small checkbox
+on every card, separate from clicking the card itself to audition it.
+Checking a card queues that character for a **multi-variation export**:
+hit Export with, say, Glitch, Vintage and Tight all checked, and instead of
+the one processed copy you'd normally get, every included source writes
+one file per checked character into a `variations/` folder - `<name>
+Glitch.wav`, `<name> Vintage.wav`, `<name> Tight.wav` - all in a single
+run, at whatever stretch ratio and lo-fi settings are currently set (those
+stay shared across every variation; only the character differs between
+them). The card you have selected for on-screen audition is completely
+independent of what's queued - preview one thing while exporting a batch
+of others, or leave nothing checked to fall back to the single derived
+copy exactly as before. **Clear** next to the character grid empties the
+queue in one click; unchecking everything does the same thing one card at
+a time. Re-running Export against a shrunk queue cleans up any variation
+files from a previous run that are no longer checked, the same way a
+shrinking chop count already tidies up `chops/`.
+
 ## Deploying to GitHub Pages
 
 1. Push this folder to a GitHub repo.
@@ -769,7 +787,17 @@ Source Folder/
     wav/       <- 24-bit WAV copies of any non-WAV source (WAV sources aren't duplicated here);
                   also holds a full-track processed copy whenever time-stretch and/or a lo-fi
                   stage is on, named "<name> stretched.wav", "<name> lofi.wav", or
-                  "<name> stretched lofi.wav" depending on which are active
+                  "<name> stretched lofi.wav" depending on which are active - UNLESS one or more
+                  characters are queued in the Stretch workspace's character browser (see below),
+                  in which case this single derived copy isn't written at all and variations/
+                  (next) takes over instead
+    variations/                         <- only in the Stretch task, and only once at least one
+        <source file name> C#m 120bpm/     character is queued for export in the character
+            <name> Glitch.wav               browser - one file per queued character, instead of
+            <name> Vintage lofi.wav         the single derived copy wav/ would otherwise hold.
+            ...                              Queuing zero characters (the default) reverts to
+                                             that single wav/ copy - the two are never both
+                                             written for the same source in the same run.
     chops/
         <source file name> C#m 120bpm/
             01.wav
