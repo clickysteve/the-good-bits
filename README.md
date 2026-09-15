@@ -13,7 +13,7 @@ site on GitHub Pages.
 
 ## Features
 
-- **Four tasks, not a difficulty setting.** The app opens on one question:
+- **Five tasks, not a difficulty setting.** The app opens on one question:
   what are you here to do?
   - **Chop** cuts audio into chops and one-shots. No processing at all -
     original tempo, no colouration.
@@ -23,6 +23,9 @@ site on GitHub Pages.
   - **Play nice** conforms a pile of unrelated loops to one shared tempo and
     key, so samples that had nothing to do with each other can be used
     together. See [Play nice](#play-nice) below.
+  - **Flip** takes one loop and hands it back to you wrong - a batch of
+    automatic remixes of it, eight at a time, to click through until one of
+    them is better than what you started with. See [Flip](#flip) below.
 
   This replaced a Simple/Advanced toggle, which was the wrong axis: it
   described how much of the interface you could see, said nothing about what
@@ -618,6 +621,228 @@ Only the loop workflow is built today; the role model exists so the one-shot
 workflow can be added without unpicking a tempo assumption spread across five
 files.
 
+## Flip
+
+> Give me this loop back, but wrong.
+
+Everything else in the app takes audio apart so *you* can decide what to do
+with it. **Flip** decides for you, eight times, and lets you throw seven of
+them away.
+
+Drop in one ordinary musical loop - a boring four-bar piano part will do -
+and Flip slices it on the beat grid, rearranges the slices, and gives you a
+batch of alternative versions to audition. Some will still be recognisably
+your loop with something odd in the second half. Some will be much stranger.
+The whole point is that you didn't have to think of any of them.
+
+It is deliberately **not** a manual slicer, a pad instrument or a sequencer.
+There is no way to specify an individual edit, because specifying individual
+edits is what your DAW is for. Every control changes the *character* of what
+gets proposed.
+
+### The workflow
+
+1. Pick **Flip** in the top bar and drop a loop on the page.
+2. Check the tempo it detected. That tempo *is* the slice grid, so this is
+   the one thing worth looking at before you generate - see
+   [When the tempo is wrong](#when-the-tempo-is-wrong) below.
+3. Choose a slice size, an intensity and a style.
+4. Press **GENERATE**.
+5. Click down the list. **ORIGINAL** sits at the top in the same shape as the
+   variations, so `ORIGINAL → FLIP 01 → FLIP 02` is one continuous audition
+   rather than an A/B you have to set up. Only one row plays at a time.
+6. Press **GENERATE 8 MORE** until something is interesting. Export the ones
+   that are.
+
+### The controls
+
+**Slice size** - `1/4`, `1/8`, `1/16`, `1/32`. Where the cuts are, in musical
+subdivisions of the detected tempo. `1/16` is the useful default for most
+material; `1/8` is more conservative and more obviously musical; `1/32` gets
+choppy fast.
+
+**Intensity** - conservative to destructive, and it means two things at once:
+how *often* something happens, and how *far* it goes. Low intensity makes a
+handful of small changes, leaves the downbeats alone and usually holds the
+opening of the phrase completely intact. High intensity restructures freely,
+ignores the metric grid and starts cutting below the slice size.
+
+**Style** - the remix personality. Each one is a different weighting over the
+same set of transformations, so they share a vocabulary but not a temperament:
+
+| Style | What it does |
+| --- | --- |
+| **Shuffle** | Reorders whole chunks and swaps neighbours. The material survives; the order doesn't. |
+| **Repeat** | Builds motifs out of what's already there - repeats, A/B alternation, call and response. |
+| **Jump** | Skips backwards and forwards through the phrase, mostly to somewhere nearby. |
+| **Stutter** | Breaks individual slices into rapid fragments, usually running into the next downbeat. |
+| **Reverse** | Turns slices and groups round - the audio inside them, not just their order. |
+| **Sparse** | Takes things away. Slices drop out to deliberate silence, and what's left gets room. |
+| **Mixed** | A bit of everything, but still trying to sound like a version of your loop. |
+| **Chaos** | Everything at once, further and more often. Expect to throw most of these away. |
+
+**Mixed** and **Chaos** draw on the same operations; the difference is
+temperament, not vocabulary. Mixed works at a normal rate and reach and leaves
+the destructive techniques alone until you ask for them, so it reads as a
+considered remix that happens to use several ideas. Chaos turns the rate and
+the reach up *and* unlocks micro-editing, silence and displacement
+immediately.
+
+### Why the results sound like music and not like a shuffle
+
+The obvious implementation - put the slices in an array and shuffle it -
+produces something that is recognisably made of your loop and recognisably not
+music. Flip is built around mutating the original sequence instead. Given
+
+```
+1 2 3 4 5 6 7 8
+```
+
+a conservative result looks like
+
+```
+1 2 3 4 5 6 5 6
+```
+
+not
+
+```
+7 1 4 8 2 6 3 5
+```
+
+The rules that get it there:
+
+- **Everything is anchored to a beat.** No operation starts in an arbitrary
+  place; they all begin on a beat boundary and work in musical group lengths -
+  a beat, two beats, a bar.
+- **Strong positions are protected.** Every slice carries a metric weight
+  (bar downbeat highest, then beat 3, then the other beats, then off-beats),
+  and at low intensity the chance of disturbing a slice scales against it.
+  By maximum intensity the protection is gone entirely.
+- **Conservative settings hold a contiguous opening.** A low-intensity result
+  is usually "the original, and then something happens", not an even wash of
+  small edits across the whole phrase.
+- **Chunks move, not samples.** Swaps, jumps and repeats operate on groups.
+- **Jumps prefer somewhere near.** Distances are whole numbers of beats, and
+  short ones are likelier than long ones.
+- **There's a floor as well as a ceiling.** Low intensity means *few* changes,
+  not none: a variation identical to the source is a wasted slot in the batch,
+  so Flip never returns one.
+
+### Timing: the exported file is always exactly as long as the original
+
+This is structural rather than something the code checks afterwards. A
+variation is a list of instructions with **exactly one instruction per slice
+of the original**, and the renderer writes each one into its own pre-computed
+window. There is no path through it that can produce a longer or shorter file,
+whatever a repeat or a stutter asked for - a stutter with eight fragments
+fills its slot eight times faster, it does not take eight slots.
+
+So a four-bar 120 BPM loop comes back as a four-bar 120 BPM loop. Drag it into
+Logic and it occupies the same four bars.
+
+### Micro-editing
+
+At higher intensities Flip can work *below* the slice size: an individual
+slice gets subdivided into 2, 3, 4, 6 or 8 fragments and filled with repeats
+of one of them. On a sixteenth-note grid that's a sixty-fourth-note roll. The
+fine subdivisions only unlock as intensity rises, and only **Stutter** - where
+it's the entire point of the style - reaches for it straight away.
+
+### Clicks, gaps and levels
+
+Flip rearranges audio; it should not damage it. The naive fix - a fade in and
+out on every slice - dips the level at every boundary and blunts every attack
+that lands on one, which is exactly what makes chopped-up audio *sound*
+chopped up. Instead:
+
+- A boundary where the incoming audio genuinely continues the outgoing audio
+  is left completely alone. **Stretches you didn't edit come out bit-identical
+  to the original**, including the loop seam.
+- A boundary that *is* an edit gets a real crossfade, about 1.5ms long, using
+  **pre-roll**: the source samples that naturally precede the incoming slice.
+  The outgoing tail fades out against genuine incoming material rather than
+  against silence, and the crossfade finishes *at* the boundary, so the
+  incoming slice's own attack is at full level and completely untouched.
+- Pre-roll that falls off either end of the file wraps around, because the
+  source is a loop - what comes before sample 0 is the loop's own tail.
+- Crossfades are linear, not constant-power, because Flip's two sides are very
+  often the same material (a repeated fragment crossfading into another copy
+  of itself) where constant-power overshoots by up to 3dB and clips the
+  export. A linear crossfade can never exceed the louder of its two inputs.
+- Boundaries are counted at fragment level, not slice level. A stutter is
+  several hard splices *inside* one slice and they click just as loudly.
+- Silence from **Sparse** is written zeros, crossfaded in and out like
+  anything else. It's a deliberate drop-out, not a hole.
+
+### Seeds
+
+Every variation shows its seed, and the seed box is an input, not a label.
+The same **source + settings + seed** always produces the same arrangement, so
+a take you liked is recoverable: write the number down (or read it off the
+exported filename), type it into any row, press Enter, and it comes back.
+
+All the randomness in Flip runs through one seeded generator - the same
+`mulberry32` used by the creative time-stretch engines. The only
+non-deterministic thing in the whole feature is where the seeds themselves
+come from.
+
+### Regenerating one at a time
+
+Seven good ones and one dud shouldn't cost you the seven. The **⟳** button on
+a row replaces just that variation, in place, with a fresh take on the same
+settings.
+
+Changing a setting after generating doesn't throw the batch away either - the
+existing variations stay playable and are flagged **settings changed**, so you
+can still compare them against whatever you generate next.
+
+### When the tempo is wrong
+
+The detected tempo *is* the slice grid, so a half-time reading doesn't just
+mislabel the file, it halves the resolution of every variation you generate
+from it. Flip reuses the same detection the rest of the app uses, with the
+same **analysis proposes, user overrides** correction controls as Stretch:
+type a tempo, or use **½** / **×2** for the usual octave error.
+
+Two things happen automatically:
+
+- **The grid prefers a whole number of bars.** Detection is rarely exact - a
+  true 120 BPM four-bar loop comes back as 119.87 and asks for 256.3
+  sixteenths - so when a whole-bar count is within reach the grid snaps to it
+  and is then fitted to the file's exact length. This is what keeps bar-level
+  operations lined up with the music instead of drifting a slice further out
+  of phase every bar.
+- **When nothing musical is within reach, it says so.** A file that comes out
+  as 3.13 bars is almost always a detection failure rather than a strange
+  loop, and Flip tells you that rather than quietly generating against a grid
+  that doesn't line up.
+
+If there's no confident tempo at all, Flip divides the loop evenly into four
+bars' worth of slices and says so. Typing a tempo switches that off.
+
+### Export
+
+Each variation exports as a WAV at the source's own sample rate and channel
+count, at 24- or 16-bit, and at exactly the original length. **Export all**
+writes the whole batch - to a folder you pick (Chrome/Edge) or as a zip
+(everywhere else).
+
+Names carry the seed, which is the point of putting it there:
+
+```
+Dusty Piano Cm 80 BPM_FLIP_03_seed458577206.wav
+```
+
+### Limits
+
+- One loop at a time. Flip is not a batch tool; it's a slot machine.
+- It rearranges **time**, not pitch or tempo. Nothing is stretched or
+  transposed - use **Stretch** or **Play nice** for that.
+- Slices are capped at 512 per loop, so a very long file at `1/32` will be
+  sliced more coarsely than the setting implies.
+- It assumes 4/4.
+
 ## Quick start
 
 **You must serve this folder over local HTTP - do not just double-click
@@ -951,9 +1176,12 @@ repo's own (MIT) license.
 
 ## Testing
 
-The core detection algorithms, the WAV/AIFF codec, and the folder/file
-grouping logic are pure functions with no browser dependencies, so they're
-unit-tested with plain Node. `contrast.test.mjs` is the odd one out: it
+The core detection algorithms, the WAV/AIFF codec, the folder/file grouping
+logic and the whole of Flip's remix engine are pure functions with no browser
+dependencies, so they're unit-tested with plain Node. `flip-render.test.mjs`
+is worth knowing about: it asserts the two promises Flip makes about audio -
+that a variation is always exactly as long as its source, and that
+rearranging it introduces no clicks, gaps, level changes or clipping. `contrast.test.mjs` is the odd one out: it
 parses the palette straight out of `css/style.css` and asserts every text
 role against the surface it actually sits on, so a re-tint that drops a
 label under 4.5:1 fails here rather than shipping.
@@ -975,6 +1203,8 @@ node test/play-nice-conform.test.mjs
 node test/play-nice-key-matching.test.mjs
 node test/play-nice-naming.test.mjs
 node test/play-nice-downbeat.test.mjs
+node test/flip-recipe.test.mjs
+node test/flip-render.test.mjs
 ```
 
 There are also a few optional browser-integration tests that exercise the

@@ -25,6 +25,7 @@ import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, 
 import { createStretchWorkspace } from "./stretch-workspace.js";
 import { resolveVariationSet, variationFileName } from "./variation-export.js";
 import { createPlayNice } from "./play-nice/controller.js";
+import { createFlip } from "./flip/controller.js";
 import { renderConform } from "./play-nice/render.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
 import { resolveNamePattern, resolveFolderName } from "./naming-tokens.js";
@@ -441,6 +442,7 @@ const timestretchSeedInput = $("#timestretch-seed-input");
 const timestretchPitchNote = $("#timestretch-pitch-note");
 const stretchWorkspaceEl = $("#stretch-workspace");
 const playNiceWorkspaceEl = $("#play-nice-workspace");
+const flipWorkspaceEl = $("#flip-workspace");
 const detectionParamsPanel = $("#detection-params-panel");
 const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
 const outputstageOptions = $("#outputstage-options");
@@ -986,6 +988,40 @@ const playNice = createPlayNice({
   },
 });
 
+// ---------------------------------------------------------------------------
+// FLIP
+//
+// Same deal as PLAY NICE: it owns its own source, its own settings and its own export destination
+// (see js/flip/controller.js), and borrows the shared machinery rather than duplicating it - the
+// decoder, the AudioContext, the essentia key/tempo bridge, the log panel, the theme-colour lookup
+// the canvas waveforms need, and the File System Access helpers. Nothing about CHOP/STRETCH/BOTH or
+// PLAY NICE changes because this exists.
+//
+// It does NOT get runConformHeavy: FLIP's render is array copying into pre-allocated buffers (see
+// js/flip/render.js), measured in single-digit milliseconds for a four-bar loop, so shipping the
+// channel data to a worker and back would cost more than the work itself.
+// ---------------------------------------------------------------------------
+
+const flip = createFlip({
+  container: flipWorkspaceEl,
+  chromeContainer: document.querySelector(".app"),
+  decodeFile,
+  analyze: analyzeKeyAndTempo,
+  getAudioContext,
+  color: themeColor,
+  log,
+  logWarn,
+  logSuccess,
+  io: {
+    supportsFSA: FSA_SUPPORTED && FSA_FILE_PICKER_SUPPORTED,
+    pickFiles: (opts) => pickFilesFSA(opts),
+    pickFolder: () => pickFolderFSA(),
+    ensurePermission: ensureReadWritePermission,
+    writeFile: writeFileFSA,
+    ZipBatch,
+  },
+});
+
 let stretchActiveKey = null; // analysisKey() of the file shown in the workspace right now
 const stretchFileOrder = []; // [{key, folder, fileInfo}], rebuilt at the start of every stretch-task batch run
 
@@ -1184,6 +1220,20 @@ function updatePlayNiceVisibility() {
   // The floating mix bar is attached to <body>, not to the workspace, so it has to be told
   // separately - and it pads the page while it's up so nothing hides behind it.
   playNice.setActive(active);
+}
+
+/**
+ * FLIP's workspace replaces the stage the same way PLAY NICE's does, and for the same reason: it
+ * brings its own source zone, its own settings and its own export controls, so the shared dropzone,
+ * results panel and Process/Export bar would all be misleading while it's up. Like PLAY NICE (and
+ * unlike STRETCH) it shows as soon as the task is selected, with nothing loaded - its own drop zone
+ * IS the empty state.
+ */
+function updateFlipVisibility() {
+  const active = task === "flip";
+  flipWorkspaceEl.hidden = !active;
+  // The bottom bar is a flex child of the app shell, not of the workspace, so it's told separately.
+  flip.setActive(active);
 }
 
 // ---------------------------------------------------------------------------
@@ -1534,10 +1584,11 @@ function loadSettings() {
 // ---------------------------------------------------------------------------
 
 const TASK_STORAGE_KEY = "good-bits-task-v1";
-// "nice" is PLAY NICE - a fourth task that shares the shell (topbar, stage, log) but none of the
-// batch pipeline: it keeps its own queue, target and export destination inside
-// js/play-nice/controller.js, so nothing about CHOP/STRETCH/BOTH changes when it's selected.
-const TASKS = ["chop", "stretch", "both", "nice"];
+// "nice" is PLAY NICE and "flip" is FLIP - two tasks that share the shell (topbar, stage, log) but
+// none of the batch pipeline: each keeps its own queue/source, settings and export destination
+// inside js/play-nice/controller.js and js/flip/controller.js respectively, so nothing about
+// CHOP/STRETCH/BOTH changes when either is selected.
+const TASKS = ["chop", "stretch", "both", "nice", "flip"];
 let task = "chop";
 
 function applyTask(next, { persist = true } = {}) {
@@ -1552,7 +1603,9 @@ function applyTask(next, { persist = true } = {}) {
   updateStretchTaskVisibility();
   updateStretchWorkspaceVisibility();
   updatePlayNiceVisibility();
+  updateFlipVisibility();
   if (task !== "nice") playNice.stopAllPlayback();
+  if (task !== "flip") flip.stopAllPlayback();
   if (task === "stretch") {
     renderStretchCharacterBrowser();
     renderStretchFileStrip();
@@ -2283,7 +2336,7 @@ clearFoldersBtn.addEventListener("click", clearSourceQueue);
  * and "start a new session" should never quietly mean "lose how I like this set up".
  */
 async function newSession() {
-  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent();
+  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent() || flip.hasContent();
   if (hasWork) {
     const { confirmed } = await showConfirmDialog({
       title: "Start a new session?",
@@ -2306,8 +2359,9 @@ async function newSession() {
   stopAllFileEditorPlayback();
   mountedFileEditors.clear();
   stretchWorkspace.stopAllPlayback();
-  // PLAY NICE keeps its own queue and target, so clearSourceQueue() below doesn't reach it.
+  // PLAY NICE and FLIP keep their own sources, so clearSourceQueue() below doesn't reach either.
   playNice.reset();
+  flip.reset();
 
   clearSourceQueue();
   resultsPanel.innerHTML = "";
