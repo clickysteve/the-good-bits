@@ -103,7 +103,11 @@ export function createFlip(deps) {
     depth: 50,
     rollAmount: 35,
     pitchMode: DEFAULT_PITCH_MODE,
-    pitchAmount: 20,
+    // 35, not the 20 this started at. Pitch only ever decorates a repeat or a roll, and on a short
+    // loop there are few of those, so a low amount meant a two-bar source produced no transposition
+    // at all in 9 batches out of 10 - a headline feature you have to go hunting for is not a
+    // default that sounds good. At 35 it is still a clear minority of the loop (1-2% of slices).
+    pitchAmount: 35,
     // Manual key correction, same "analysis proposes, user overrides" split as the tempo above it.
     keyRoot: null,
     keyMode: null,
