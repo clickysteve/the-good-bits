@@ -675,8 +675,9 @@ being handed four sliders and told to discover that Structure 85 / Activity 30
 | **Rebuild** | Takes the phrase apart and puts it back in a different order. |
 | **Destroy** | Everything, at every scale, as far as it goes. |
 
-Each is a full settings snapshot, so clicking one always lands on a complete,
-coherent state. Move any slider afterwards and the chip simply stops being
+Each is a full settings snapshot - including the chop size, because the grid is
+half of what a remix type sounds like - so clicking one always lands on a
+complete, coherent state. Move any slider afterwards and the chip simply stops being
 highlighted - nothing is locked. Everything else lives behind **Fine tuning**.
 
 The overall shape - a division/rearrangement rule crossed with a treatment
@@ -684,6 +685,44 @@ category - is borrowed from the Yamaha RS7000's Loop Remix, whose `TYPE` (how
 the data is divided and rearranged) and `VARIATION` (`NORMAL` / `REVERSE` /
 `BREAK` / `PITCH` / `ROLL`) is the same separation, and which exposes it as
 numbered presets for the same reason.
+
+### Chop size
+
+The chop is the atom - the smallest thing Flip can move. It's sized in musical
+units, from a whole bar down to a thirty-second note:
+
+```
+1 bar    ½ bar    1/4    1/8    1/16    1/32
+```
+
+On an eight-bar loop those give 8, 16, 32, 64, 128 and 256 chops respectively,
+and the readout shows the count, because the count is what you're really
+choosing. This is the RS7000's model - detect the phrase length, pick how many
+chops to cut it into - expressed as a size rather than a raw number so the grid
+stays on the bar line and the label tells you what you're going to hear.
+
+**It matters more than it sounds like it should.** At `1 bar`, whole bars are
+the only thing that can move, and results look like `6 2 3 4 5 5 7 8` - genuine
+bar-level arrangement. At `1/32`, Flip works down to micro-fragments. Measured
+across a batch on an eight-bar loop:
+
+| Chop size | Chops | Avg edit span | Stutters per variation |
+| --- | --- | --- | --- |
+| 1 bar | 8 | 1.00 bars | 1.5 |
+| ½ bar | 16 | 0.62 bars | 1.6 |
+| 1/4 | 32 | 0.44 bars | 1.5 |
+| 1/16 | 128 | 0.32 bars | 2.4 |
+| 1/32 | 256 | 0.32 bars | 4.4 |
+
+Earlier versions sized the grid as a subdivision of the *beat*, which
+structurally forbade a chop bigger than one - so the smallest movable thing was
+always a beat or less, and bar-scale operations could only ever be assembled
+out of runs of small pieces.
+
+Presets pick a chop size of their own (Bar swap wants half-bars; Stutter wants
+sixteenths), and a size that would leave too few chops to rearrange - whole-bar
+chops on a one-bar break - steps finer automatically rather than handing you a
+dead GENERATE button.
 
 ### Hierarchical remixing
 
@@ -987,8 +1026,10 @@ Dusty Piano Cm 80 BPM_FLIP_03_seed458577206.wav
 - One loop at a time. Flip is not a batch tool; it's a slot machine.
 - It rearranges **time and pitch**, not tempo. Nothing is time-stretched - use
   **Stretch** or **Play nice** for that.
-- Slices are capped at 512 per loop, so a very long file at `1/32` will be
-  sliced more coarsely than the setting implies.
+- Chops are capped at 512 per loop, so a very long file at `1/32` will be cut
+  more coarsely than the setting implies.
+- At whole-bar chops only single-bar moves are possible, since a bar is the
+  atom. One size finer (`½ bar`) brings grouped movement back.
 - It assumes 4/4.
 - Pitch needs a region of at least ~1024 samples to shift, so transpositions on
   extremely short micro-fragments are skipped rather than smeared.

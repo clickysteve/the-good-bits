@@ -20,12 +20,27 @@
 // long, not 64 slices plus a 0.02-bar orphan that any rearrangement would audibly drop. The error
 // is reported (see `fit`) so the UI can say so when it gets big enough to matter.
 
-/** The subdivisions the UI offers, coarsest first. `perBeat` is how many slices fit in one beat. */
+/**
+ * The chop sizes the UI offers, coarsest first. `slicesPerBar` is the primary number.
+ *
+ * SIZED PER BAR, NOT PER BEAT, and that inversion is the whole point. Deriving the grid from a
+ * musical subdivision of the BEAT structurally forbids a chop bigger than one - the atom could
+ * never be a half-bar, so the smallest thing FLIP could physically move was always a beat or less,
+ * and bar-scale operations could only ever be built out of runs of small pieces.
+ *
+ * The RS7000's Loop Remix works the other way round: it detects the phrase length and you choose
+ * how many chops to cut it into, so "8 bars in 8 chops" makes a whole bar the atom. Expressing the
+ * choice as a musical size rather than a raw count keeps it readable (and keeps the grid on the
+ * bar line), while the chop COUNT is what the readout shows, because that is the number you are
+ * really picking.
+ */
 export const SUBDIVISIONS = [
-  { key: "1/4", label: "1/4", perBeat: 1, hint: "beats" },
-  { key: "1/8", label: "1/8", perBeat: 2, hint: "eighths" },
-  { key: "1/16", label: "1/16", perBeat: 4, hint: "sixteenths" },
-  { key: "1/32", label: "1/32", perBeat: 8, hint: "thirty-seconds" },
+  { key: "1bar", label: "1 bar", slicesPerBar: 1, hint: "whole bars" },
+  { key: "1/2bar", label: "½ bar", slicesPerBar: 2, hint: "half-bars" },
+  { key: "1/4", label: "1/4", slicesPerBar: 4, hint: "beats" },
+  { key: "1/8", label: "1/8", slicesPerBar: 8, hint: "eighths" },
+  { key: "1/16", label: "1/16", slicesPerBar: 16, hint: "sixteenths" },
+  { key: "1/32", label: "1/32", slicesPerBar: 32, hint: "thirty-seconds" },
 ];
 
 export const DEFAULT_SUBDIVISION = "1/16";
@@ -47,9 +62,9 @@ export function resolveSubdivision(key) {
  * the inverse of this at low intensity, which is what produces "it kept the downbeats" without any
  * operation needing to know what a downbeat is.
  */
-export function metricStrength(sliceIndex, perBeat, beatsPerBar) {
-  const perBar = perBeat * beatsPerBar;
-  if (perBar <= 0) return 0.5;
+export function metricStrength(sliceIndex, perBeat, perBar) {
+  if (perBar <= 0 || perBeat <= 0) return 0.5;
+  const beatsPerBar = Math.max(1, Math.round(perBar / perBeat));
   const inBar = sliceIndex % perBar;
   if (inBar === 0) return 1;
   if (inBar % perBeat !== 0) {
@@ -81,15 +96,20 @@ export function metricStrength(sliceIndex, perBeat, beatsPerBar) {
 export function createSliceMap({ totalSamples, sampleRate, bpm, subdivision = DEFAULT_SUBDIVISION, beatsPerBar = 4 }) {
   const sub = resolveSubdivision(subdivision);
   const duration = totalSamples > 0 && sampleRate > 0 ? totalSamples / sampleRate : 0;
-  const perBeat = sub.perBeat;
+  // A chop can now be BIGGER than a beat, so slices-per-bar is what's given and slices-per-beat is
+  // what's derived - clamped at 1, because at half-bar and whole-bar chop sizes a "beat" in the
+  // hierarchy is simply one chop. levelExists() in js/flip/hierarchy.js collapses the levels that
+  // stop being distinct, so nothing downstream has to know which regime it is in.
+  const perBar = sub.slicesPerBar;
+  const perBeat = Math.max(1, Math.round(perBar / beatsPerBar));
 
   let count;
   let fit = { source: "tempo", requested: 0, error: 0, aligned: "bar" };
 
   if (bpm && bpm > 0 && duration > 0) {
-    const nominal = 60 / bpm / perBeat; // one slice, in seconds, at the detected tempo
+    const barSeconds = (60 / bpm) * beatsPerBar;
+    const nominal = barSeconds / perBar; // one chop, in seconds, at the detected tempo
     const requested = duration / nominal;
-    const perBar = perBeat * beatsPerBar;
     // PREFER A WHOLE NUMBER OF BARS. Detection is rarely exact - a true 120 BPM four-bar loop comes
     // back as 119.87 and asks for 256.3 sixteenths - and plain rounding then lands on 256 by luck
     // and on 385 (24.06 bars) just as easily. Snapping to the nearest whole bar when one is close
@@ -119,7 +139,7 @@ export function createSliceMap({ totalSamples, sampleRate, bpm, subdivision = DE
     // still land on plausible musical positions even though nothing told us where the beats are.
     // The UI says so, and typing a tempo switches this branch off.
     const assumedBars = 4;
-    const ideal = assumedBars * beatsPerBar * perBeat;
+    const ideal = assumedBars * perBar;
     count = ideal;
     fit = { source: "even", requested: ideal, error: 0, aligned: "bar" };
   }
@@ -134,17 +154,17 @@ export function createSliceMap({ totalSamples, sampleRate, bpm, subdivision = DE
 
   const slices = [];
   for (let i = 0; i < count; i++) {
-    const inBar = i % (perBeat * beatsPerBar);
+    const inBar = i % perBar;
     slices.push({
       index: i,
       startSample: bounds[i],
       endSample: bounds[i + 1],
       length: bounds[i + 1] - bounds[i],
       beat: Math.floor(i / perBeat),
-      bar: Math.floor(i / (perBeat * beatsPerBar)),
+      bar: Math.floor(i / perBar),
       isBeat: inBar % perBeat === 0,
       isDownbeat: inBar === 0,
-      strength: metricStrength(i, perBeat, beatsPerBar),
+      strength: metricStrength(i, perBeat, perBar),
     });
   }
 
@@ -152,13 +172,13 @@ export function createSliceMap({ totalSamples, sampleRate, bpm, subdivision = DE
     subdivision: sub.key,
     perBeat,
     beatsPerBar,
-    perBar: perBeat * beatsPerBar,
+    perBar,
     bpm: bpm || null,
     sampleRate,
     totalSamples,
     duration,
     count,
-    bars: count / (perBeat * beatsPerBar),
+    bars: count / perBar,
     slices,
     bounds,
     fit,
@@ -176,23 +196,23 @@ export function sliceMapReadiness(map) {
   if (map.count < MIN_SLICES) {
     // Only suggest a finer slice size when a finer one would actually get there. On a 0.15s file
     // nothing will, and "try 1/32" is advice that wastes the user's next click.
-    const finer = SUBDIVISIONS.filter((s) => s.perBeat > map.perBeat);
-    const rescue = finer.find((s) => map.count * (s.perBeat / map.perBeat) >= MIN_SLICES);
+    const finer = SUBDIVISIONS.filter((s) => s.slicesPerBar > map.perBar);
+    const rescue = finer.find((s) => map.count * (s.slicesPerBar / map.perBar) >= MIN_SLICES);
     const advice = rescue ? `Try ${rescue.label}, or a longer loop.` : "FLIP needs a loop, not a one-shot - a bar or more.";
     return {
       ok: false,
-      reason: `That's only ${map.count} slice${map.count === 1 ? "" : "s"} at ${map.subdivision} - too short to rearrange. ${advice}`,
+      reason: `That's only ${map.count} chop${map.count === 1 ? "" : "s"} at ${chopLabel(map)} - too short to rearrange. ${advice}`,
       warning: null,
     };
   }
   const shortest = map.slices.reduce((min, s) => Math.min(min, s.length), Infinity);
   if (shortest < 32) {
-    return { ok: false, reason: `Slices are down to ${shortest} samples at ${map.subdivision}. Use a coarser slice size.`, warning: null };
+    return { ok: false, reason: `Chops are down to ${shortest} samples at ${chopLabel(map)}. Use a coarser chop size.`, warning: null };
   }
 
   let warning = null;
   if (map.fit.source === "even") {
-    warning = `No confident tempo, so the loop was divided evenly into ${map.count} slices - four bars' worth, assumed. Type a tempo above to slice on the real grid.`;
+    warning = `No confident tempo, so the loop was divided evenly into ${map.count} chops - four bars' worth, assumed. Type a tempo above to chop on the real grid.`;
   } else if (map.fit.aligned === "slice") {
     // Nothing musical was within reach of the detected tempo, which on a file that really is a
     // loop almost always means the detection is wrong rather than the loop being strange. Say that,
@@ -201,7 +221,7 @@ export function sliceMapReadiness(map) {
     const bars = map.bars.toFixed(2);
     warning = `At ${Math.round(map.bpm)} BPM this is ${bars} bars - not a whole number, so the grid doesn't line up with the music. If it really is a loop, the detected tempo is probably wrong: correct it above (½ and ×2 fix the usual half/double-time error) and the slices follow.`;
   } else if (map.count === MAX_SLICES) {
-    warning = `Capped at ${MAX_SLICES} slices - a coarser slice size will follow the grid more closely.`;
+    warning = `Capped at ${MAX_SLICES} chops - a coarser chop size will follow the grid more closely.`;
   }
   // Deliberately NO warning when `aligned` is "bar" or "beat", however far the detected tempo was
   // from landing on it. That case is the grid being snapped onto the music and then fitted to the
@@ -210,11 +230,17 @@ export function sliceMapReadiness(map) {
   return { ok: true, reason: null, warning };
 }
 
-/** "4 bars · 64 × 1/16 · 120 BPM" - the one-line description of what's being sliced. */
+/** The label for this map's chop size, e.g. "1/16" or "½ bar". */
+export function chopLabel(map) {
+  const sub = SUBDIVISIONS.find((s) => s.key === (map && map.subdivision));
+  return sub ? sub.label : (map && map.subdivision) || "";
+}
+
+/** "4 bars · 64 × 1/16 · 120 BPM" - the one-line description of what's being chopped. */
 export function describeSliceMap(map) {
   if (!map) return "";
   const bars = map.bars;
   const barText = Number.isFinite(bars) ? (Math.abs(bars - Math.round(bars)) < 0.02 ? `${Math.round(bars)} bar${Math.round(bars) === 1 ? "" : "s"}` : `${bars.toFixed(2)} bars`) : "";
   const tempo = map.bpm ? `${Math.round(map.bpm)} BPM` : "no tempo";
-  return [barText, `${map.count} × ${map.subdivision}`, tempo].filter(Boolean).join(" · ");
+  return [barText, `${map.count} × ${chopLabel(map)}`, tempo].filter(Boolean).join(" · ");
 }

@@ -29,7 +29,7 @@
 // Float32Arrays. Auditioning is then instant and identical to export, there is no "render on first
 // play" stall in the middle of clicking down the list, and the export path has nothing to re-derive.
 // Generating a new batch destroys the previous one's players and drops its buffers first.
-import { createSliceMap, sliceMapReadiness, describeSliceMap, SUBDIVISIONS, DEFAULT_SUBDIVISION, resolveSubdivision } from "./slice-map.js";
+import { createSliceMap, sliceMapReadiness, describeSliceMap, SUBDIVISIONS, DEFAULT_SUBDIVISION, resolveSubdivision, MIN_SLICES } from "./slice-map.js";
 import { generateRecipe, describeRecipe, recipePattern, recipeDeparture } from "./recipe.js";
 import { renderVariationAudio } from "./render.js";
 import { STYLES, DEFAULT_STYLE, resolveStyle, describeIntensity, describeStructure, describeActivity, describeDepth } from "./styles.js";
@@ -102,6 +102,10 @@ export function createFlip(deps) {
     //
     // The opening values live in js/flip/presets.js alongside the eight one-click starting points,
     // so "what FLIP opens on" and "what the presets offer" can't drift apart.
+    // Which preset is showing as active. Tracked explicitly rather than inferred by comparing every
+    // field, because a preset's chop size can be coerced finer on a short loop (see coerceChopSize)
+    // - and a chip that refuses to light up when you just clicked it reads as a broken button.
+    presetKey: null,
     // Manual key correction, same "analysis proposes, user overrides" split as the tempo above it.
     keyRoot: null,
     keyMode: null,
@@ -374,10 +378,11 @@ export function createFlip(deps) {
   });
   tweakDetails.appendChild(rollSlider.field);
 
-  // The grid everything else is measured against. Below the creative controls because it is a
-  // property of the material more than a choice about the remix.
+  // The grid everything else is measured against - the smallest thing FLIP can move. Sized in
+  // musical units rather than as a raw count so it stays readable and stays on the bar line, with
+  // the resulting chop count in the readout because that is the number you are really choosing.
   const sliceField = el("div", "field flip-field");
-  sliceField.appendChild(el("label", null, "Slice size"));
+  sliceField.appendChild(el("label", null, "Chop size"));
   const sliceSeg = el("div", "seg flip-seg");
   sliceSeg.setAttribute("role", "group");
   sliceSeg.setAttribute("aria-label", "Slice size");
@@ -385,12 +390,14 @@ export function createFlip(deps) {
   for (const sub of SUBDIVISIONS) {
     const btn = el("button", "seg-btn", sub.label);
     btn.type = "button";
-    btn.title = `Cut on ${sub.hint}`;
+    btn.title = `Cut on ${sub.hint} - the smallest thing FLIP will move`;
     btn.addEventListener("click", () => setSubdivision(sub.key));
     sliceSeg.appendChild(btn);
     sliceButtons.set(sub.key, btn);
   }
   sliceField.appendChild(sliceSeg);
+  const sliceNote = el("p", "mod-note flip-slider-hint");
+  sliceField.appendChild(sliceNote);
   tweakDetails.appendChild(sliceField);
 
   // ---- pitch -------------------------------------------------------------
@@ -414,6 +421,7 @@ export function createFlip(deps) {
   }
   pitchModeSelect.addEventListener("change", () => {
     state.pitchMode = resolvePitchMode(pitchModeSelect.value).key;
+    state.presetKey = null;
     save();
     markStale();
     render();
@@ -534,6 +542,7 @@ export function createFlip(deps) {
   function setSubdivision(key) {
     if (state.subdivision === key) return;
     state.subdivision = resolveSubdivision(key).key;
+    state.presetKey = null;
     save();
     markStale();
     render();
@@ -544,14 +553,50 @@ export function createFlip(deps) {
     const v = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
     if (state[name] === v) return;
     state[name] = v;
+    state.presetKey = null;
     save();
     markStale();
     render();
   }
 
+  /**
+   * The coarsest chop size at or finer than `wanted` that still yields enough chops to rearrange.
+   *
+   * A preset that asks for half-bar blocks is asking for something a two-bar loop cannot give it -
+   * four chops, of which nothing can move anywhere interesting. Silently stepping finer is better
+   * than handing back a disabled GENERATE button and a warning the user didn't cause.
+   */
+  /** How many chops `size` would produce for the current source. */
+  function sliceCountFor(size) {
+    if (!state.audio) return 0;
+    return createSliceMap({
+      totalSamples: state.audio.channels[0].length,
+      sampleRate: state.audio.sampleRate,
+      bpm: effectiveBpm(),
+      subdivision: size,
+    }).count;
+  }
+
+  function coerceChopSize(wanted) {
+    if (!state.audio) return wanted;
+    const from = SUBDIVISIONS.findIndex((s) => s.key === resolveSubdivision(wanted).key);
+    for (let i = Math.max(0, from); i < SUBDIVISIONS.length; i++) {
+      const map = createSliceMap({
+        totalSamples: state.audio.channels[0].length,
+        sampleRate: state.audio.sampleRate,
+        bpm: effectiveBpm(),
+        subdivision: SUBDIVISIONS[i].key,
+      });
+      if (map.count >= MIN_SLICES) return SUBDIVISIONS[i].key;
+    }
+    return SUBDIVISIONS[SUBDIVISIONS.length - 1].key;
+  }
+
   /** Write a whole preset at once - see js/flip/presets.js for why it is all-or-nothing. */
   function applyPreset(preset) {
     Object.assign(state, preset.settings);
+    state.subdivision = coerceChopSize(preset.settings.subdivision || state.subdivision);
+    state.presetKey = preset.key;
     save();
     markStale();
     render();
@@ -561,6 +606,7 @@ export function createFlip(deps) {
   function setStyle(key) {
     if (state.style === key) return;
     state.style = resolveStyle(key).key;
+    state.presetKey = null;
     save();
     markStale();
     render();
@@ -590,6 +636,7 @@ export function createFlip(deps) {
       if (Number.isFinite(saved[name])) state[name] = Math.max(0, Math.min(100, Math.round(saved[name])));
     }
     if (saved.pitchMode) state.pitchMode = resolvePitchMode(saved.pitchMode).key;
+    if (typeof saved.presetKey === "string" || saved.presetKey === null) state.presetKey = saved.presetKey;
     if (saved.style) state.style = resolveStyle(saved.style).key;
     if (BATCH_SIZES.includes(saved.batchSize)) state.batchSize = saved.batchSize;
     if (saved.bitDepth === 16 || saved.bitDepth === 24) state.bitDepth = saved.bitDepth;
@@ -671,6 +718,14 @@ export function createFlip(deps) {
       state.detected = { bpm: result.bpm ?? null, key: result.key ?? null, scale: result.scale ?? null };
       state.analysisAvailable = !!result.available;
       state.status = "ready";
+      // A one-bar break loaded while the grid is on whole-bar chops is one chop, which is nothing to
+      // rearrange - and arriving at a disabled GENERATE button you did not cause is a bad first
+      // second. Step the grid finer instead, and say so.
+      const coerced = coerceChopSize(state.subdivision);
+      if (coerced !== state.subdivision) {
+        log(`  ${resolveSubdivision(state.subdivision).label} chops would only give ${sliceCountFor(state.subdivision)} - using ${resolveSubdivision(coerced).label} instead.`);
+        state.subdivision = coerced;
+      }
       log(`  ${file.name}: ${state.detected.bpm ? `${Math.round(state.detected.bpm)} BPM` : state.analysisAvailable ? "no confident tempo" : "tempo detection unavailable"}.`);
     } catch (err) {
       state.status = "error";
@@ -1053,10 +1108,15 @@ export function createFlip(deps) {
     doubleBtn.disabled = bpm == null;
 
     sourceSummary.textContent = hasSource && map ? describeSliceMap(map) : "";
-    gridSummary.textContent = map ? `${map.count} slices` : "";
+    gridSummary.textContent = map ? `${map.count} chops` : "";
+    sliceNote.textContent = map
+      ? `${map.count} chops across the loop. Coarse sizes move whole bars around; fine ones let it work down to micro-fragments.`
+      : "Coarse sizes move whole bars around; fine ones let it work down to micro-fragments.";
 
     for (const [key, btn] of sliceButtons) btn.classList.toggle("is-active", key === state.subdivision);
-    const activePreset = matchPreset(state);
+    // The explicitly-clicked preset wins; matchPreset() is the fallback for a restored session
+    // whose saved settings happen to line up with one.
+    const activePreset = (state.presetKey && PRESETS.find((p) => p.key === state.presetKey)) || matchPreset(state);
     for (const [key, chip] of presetButtons) chip.classList.toggle("is-active", !!activePreset && activePreset.key === key);
     presetBlurb.textContent = activePreset ? activePreset.blurb : "Your own settings. Pick a starting point above, or open Fine tuning.";
     for (const [key, chip] of styleButtons) chip.classList.toggle("is-active", key === state.style);

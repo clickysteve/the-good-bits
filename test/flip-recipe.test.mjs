@@ -7,13 +7,14 @@
 // Cut-up, does pitch really stay in key, and does a batch really contain different ideas.
 // Run with: node test/flip-recipe.test.mjs
 import assert from "node:assert/strict";
-import { createSliceMap, sliceMapReadiness, describeSliceMap, metricStrength, SUBDIVISIONS, MIN_SLICES } from "../js/flip/slice-map.js";
+import { createSliceMap, sliceMapReadiness, describeSliceMap, metricStrength, chopLabel, SUBDIVISIONS, MIN_SLICES } from "../js/flip/slice-map.js";
 import { buildHierarchy, availableLevels, levelSpan, nodesAtLevel, positionAppeal, LEVELS } from "../js/flip/hierarchy.js";
 import { generateRecipe, describeRecipe, recipePattern, recipeDeparture, isIdentityRecipe, identitySteps } from "../js/flip/recipe.js";
 import { OPERATIONS, operationByKey, operationKeys, FAMILIES } from "../js/flip/operations.js";
 import { STYLES, resolveStyle, styleKeys, DEFAULT_STYLE } from "../js/flip/styles.js";
 import { pitchCandidates, choosePitch, melodicPattern, scaleDegreeOffsets, resolveKey, SCALE_INTERVALS, PITCH_MODES } from "../js/flip/pitch-plan.js";
 import { PROFILES, profilesForBatch, profileByKey } from "../js/flip/diversity.js";
+import { PRESETS, DEFAULT_SETTINGS, matchPreset } from "../js/flip/presets.js";
 import { makeRng } from "../js/dsp/stretch/rng.js";
 
 let passed = 0;
@@ -89,13 +90,38 @@ test("sliceMapReadiness: refuses audio too short, and only suggests a finer grid
 });
 
 test("metricStrength: downbeat beats beat 3 beats other beats beats off-beats", () => {
-  assert.ok(metricStrength(0, 4, 4) > metricStrength(8, 4, 4));
-  assert.ok(metricStrength(8, 4, 4) > metricStrength(4, 4, 4));
-  assert.ok(metricStrength(4, 4, 4) > metricStrength(1, 4, 4));
+  // (sliceIndex, slicesPerBeat, slicesPerBar) - a 1/16 grid in 4/4.
+  assert.ok(metricStrength(0, 4, 16) > metricStrength(8, 4, 16));
+  assert.ok(metricStrength(8, 4, 16) > metricStrength(4, 4, 16));
+  assert.ok(metricStrength(4, 4, 16) > metricStrength(1, 4, 16));
+  // At whole-bar chops every chop IS a downbeat, and the function should say so rather than
+  // inventing off-beats that cannot exist at that grid.
+  assert.equal(metricStrength(3, 1, 1), 1);
+});
+
+test("chop size: the grid can be coarser than a beat, which is what allows whole-bar movement", () => {
+  const eightBars = (key) => createSliceMap({ totalSamples: Math.round(16 * SR), sampleRate: SR, bpm: 120, subdivision: key });
+  assert.equal(eightBars("1bar").count, 8, "8 bars in whole-bar chops is 8 chops");
+  assert.equal(eightBars("1/2bar").count, 16);
+  assert.equal(eightBars("1/4").count, 32);
+  assert.equal(eightBars("1/16").count, 128);
+  for (const sub of SUBDIVISIONS) {
+    const map = eightBars(sub.key);
+    assert.equal(map.fit.aligned, "bar", `${sub.label}: lands on the bar line`);
+    assert.equal(map.perBar, sub.slicesPerBar, `${sub.label}: perBar is what was asked for`);
+    assert.ok(map.perBeat >= 1, `${sub.label}: slices-per-beat never goes below one chop`);
+    assert.ok(Math.abs(map.bars - 8) < 0.01, `${sub.label}: still eight bars`);
+  }
+  // At whole-bar chops the smallest thing that can move IS a bar.
+  const coarse = eightBars("1bar");
+  assert.equal(levelSpan(coarse, "bar"), 1);
+  assert.ok(!availableLevels(coarse).includes("halfBeat"), "no half-beats exist at this grid");
 });
 
 test("describeSliceMap: one readable line", () => {
   assert.equal(describeSliceMap(loopMap("1/16")), "4 bars · 64 × 1/16 · 120 BPM");
+  assert.equal(describeSliceMap(loopMap("1/2bar")), "4 bars · 8 × ½ bar · 120 BPM");
+  assert.equal(chopLabel(loopMap("1bar")), "1 bar");
 });
 
 // --- hierarchy -------------------------------------------------------------------------------
@@ -611,6 +637,47 @@ test("recipePattern: readable, and elides long phrases in the middle", () => {
   const map = loopMap("1/16");
   assert.ok(recipePattern(gen(map, { seed: 2024 }), 16).includes("…"));
   assert.equal(recipePattern({ steps: identitySteps(4) }), "1 2 3 4");
+});
+
+test("presets: every one is a complete, valid, self-matching snapshot with its own chop size", () => {
+  const styles = new Set(styleKeys());
+  const sizes = new Set(SUBDIVISIONS.map((s) => s.key));
+  const modes = new Set(PITCH_MODES.map((m) => m.key));
+  for (const preset of PRESETS) {
+    assert.ok(preset.label && preset.blurb, `${preset.key} has a label and a blurb`);
+    for (const field of ["subdivision", "style", "structure", "activity", "depth", "rollAmount", "pitchMode", "pitchAmount"]) {
+      assert.ok(preset.settings[field] !== undefined, `${preset.key} sets ${field}`);
+    }
+    assert.ok(styles.has(preset.settings.style), `${preset.key}: unknown remix type`);
+    assert.ok(sizes.has(preset.settings.subdivision), `${preset.key}: unknown chop size`);
+    assert.ok(modes.has(preset.settings.pitchMode), `${preset.key}: unknown pitch mode`);
+    assert.equal(matchPreset(preset.settings).key, preset.key, `${preset.key} should match itself`);
+  }
+  assert.equal(matchPreset(DEFAULT_SETTINGS), null, "the opening state is deliberately not one of the presets");
+  assert.ok(new Set(PRESETS.map((p) => p.key)).size === PRESETS.length, "no duplicate preset keys");
+});
+
+test("presets: each produces a recognisably different result on the same loop", () => {
+  const map = loopMap("1/16");
+  const shapes = PRESETS.map((preset) => {
+    const m = createSliceMap({ totalSamples: map.totalSamples, sampleRate: SR, bpm: 120, subdivision: preset.settings.subdivision });
+    let departure = 0;
+    let stutter = 0;
+    let rolls = 0;
+    for (let seed = 1; seed <= 30; seed++) {
+      const r = generateRecipe({ map: m, ...preset.settings, key: KEY, seed: seed * 104729 });
+      departure += recipeDeparture(r);
+      stutter += r.steps.filter((s) => s.stutter).length / r.steps.length;
+      rolls += r.edits.filter((e) => e.op === "roll").length;
+    }
+    return { key: preset.key, departure: departure / 30, stutter: stutter / 30, rolls: rolls / 30 };
+  });
+  const by = (k) => shapes.find((s) => s.key === k);
+  assert.ok(by("subtle").departure < by("destroy").departure / 2, "Subtle and Destroy must not be near neighbours");
+  assert.ok(by("fills").rolls > by("barswap").rolls * 2, `Fills should roll far more than Bar swap: ${by("fills").rolls.toFixed(2)} vs ${by("barswap").rolls.toFixed(2)}`);
+  assert.ok(by("stutter").stutter > by("subtle").stutter * 3, "Stutter should subdivide far more than Subtle");
+  const spread = Math.max(...shapes.map((s) => s.departure)) - Math.min(...shapes.map((s) => s.departure));
+  assert.ok(spread > 0.3, `presets should span a wide range, got ${(spread * 100).toFixed(0)} points`);
 });
 
 console.log(`\n${passed} test(s) passed.`);
