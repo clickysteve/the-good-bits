@@ -56,7 +56,7 @@ export const STYLES = [
     depthBias: 0.5,
     positionBias: { downbeat: 0.5, offBeat: 1.3 },
     rollBias: 0.35,
-    pitchBias: 0.25,
+    pitchBias: 0.35,
   },
 
   {
@@ -89,7 +89,7 @@ export const STYLES = [
     depthBias: 0.9,
     positionBias: { endOfBar: 1.3, offBeat: 1.2 },
     rollBias: 0.8,
-    pitchBias: 0.4,
+    pitchBias: 0.6,
   },
 
   {
@@ -122,7 +122,7 @@ export const STYLES = [
     depthBias: 0.85,
     positionBias: { endOfPhrase: 1.4, late: 1.2 },
     rollBias: 0.5,
-    pitchBias: 0.8,
+    pitchBias: 1.25,
   },
 
   {
@@ -158,7 +158,7 @@ export const STYLES = [
     positionBias: { endOfBar: 4.5, endOfPhrase: 5, lastBar: 2.6, late: 1.8, downbeat: 0.25 },
     rollBias: 2.2,
     rollPosition: { endOfBar: 5, endOfPhrase: 6, lastBar: 3, late: 2 },
-    pitchBias: 0.5,
+    pitchBias: 0.7,
   },
 
   {
@@ -191,7 +191,7 @@ export const STYLES = [
     depthBias: 0.8,
     positionBias: { late: 1.3 },
     rollBias: 0.7,
-    pitchBias: 0.7,
+    pitchBias: 0.95,
   },
 
   {
@@ -224,7 +224,7 @@ export const STYLES = [
     depthBias: 1.25,
     positionBias: { offBeat: 1.4, downbeat: 0.7 },
     rollBias: 1.2,
-    pitchBias: 0.5,
+    pitchBias: 0.6,
     unlocks: { stutter: 0.05, "micro-shuffle": 0, silence: 0 },
   },
 
@@ -258,7 +258,7 @@ export const STYLES = [
     depthBias: 1.1,
     positionBias: {},
     rollBias: 0.6,
-    pitchBias: 0.7,
+    pitchBias: 0.95,
   },
 
   {
@@ -291,7 +291,7 @@ export const STYLES = [
     depthBias: 1.45,
     positionBias: {},
     rollBias: 1.3,
-    pitchBias: 1.2,
+    pitchBias: 1.4,
     unlocks: { stutter: 0, silence: 0, "micro-shuffle": 0, "reverse-node": 0, gap: 0.05 },
   },
 
@@ -325,7 +325,7 @@ export const STYLES = [
     depthBias: 1,
     positionBias: { endOfBar: 1.3, late: 1.15 },
     rollBias: 0.9,
-    pitchBias: 0.7,
+    pitchBias: 1.0,
   },
 ];
 

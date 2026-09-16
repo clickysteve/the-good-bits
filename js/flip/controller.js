@@ -35,6 +35,7 @@ import { renderVariationAudio } from "./render.js";
 import { STYLES, DEFAULT_STYLE, resolveStyle, describeIntensity, describeStructure, describeActivity, describeDepth } from "./styles.js";
 import { PITCH_MODES, DEFAULT_PITCH_MODE, resolvePitchMode, resolveKey, NOTE_NAMES, formatKey } from "./pitch-plan.js";
 import { profilesForBatch } from "./diversity.js";
+import { PRESETS, DEFAULT_SETTINGS, matchPreset } from "./presets.js";
 import { variationFileName, batchFolderName, uniqueName } from "./naming.js";
 import { createVariationRow } from "./variation-row.js";
 import { makeRng } from "../dsp/stretch/rng.js";
@@ -91,23 +92,16 @@ export function createFlip(deps) {
     status: "empty", // empty | decoding | analysing | ready | error
     error: null,
     subdivision: DEFAULT_SUBDIVISION,
-    style: DEFAULT_STYLE,
+    ...DEFAULT_SETTINGS,
     // THREE controls, not one. See js/flip/recipe.js for what each actually does; the short version
     // is that a single "intensity" conflated "how much of the loop is touched" with "how far each
     // edit goes" with "is the large-scale shape allowed to change", and those are three different
     // musical intentions that people want in different combinations. Structure 85 / Activity 25 /
     // Depth 75 - recognisably the original, mostly left alone, but occasionally does something
     // dramatic - is not expressible with one slider at all.
-    structure: 65,
-    activity: 45,
-    depth: 50,
-    rollAmount: 35,
-    pitchMode: DEFAULT_PITCH_MODE,
-    // 35, not the 20 this started at. Pitch only ever decorates a repeat or a roll, and on a short
-    // loop there are few of those, so a low amount meant a two-bar source produced no transposition
-    // at all in 9 batches out of 10 - a headline feature you have to go hunting for is not a
-    // default that sounds good. At 35 it is still a clear minority of the loop (1-2% of slices).
-    pitchAmount: 35,
+    //
+    // The opening values live in js/flip/presets.js alongside the eight one-click starting points,
+    // so "what FLIP opens on" and "what the presets offer" can't drift apart.
     // Manual key correction, same "analysis proposes, user overrides" split as the tempo above it.
     keyRoot: null,
     keyMode: null,
@@ -297,6 +291,29 @@ export function createFlip(deps) {
   controlsHead.appendChild(gridSummary);
   controlsPanel.appendChild(controlsHead);
 
+  // PRESETS first. Everything below is the honest model; this row is how you start. A preset writes
+  // every field at once, so clicking one always lands on a complete, coherent state.
+  const presetField = el("div", "field flip-field");
+  presetField.appendChild(el("label", null, "Start from"));
+  const presetChips = el("div", "flip-chips");
+  const presetButtons = new Map();
+  for (const preset of PRESETS) {
+    const chip = el("button", "flip-chip flip-preset-chip", preset.label);
+    chip.type = "button";
+    chip.title = preset.blurb;
+    chip.addEventListener("click", () => applyPreset(preset));
+    presetChips.appendChild(chip);
+    presetButtons.set(preset.key, chip);
+  }
+  presetField.appendChild(presetChips);
+  const presetBlurb = el("p", "mod-note flip-preset-blurb");
+  presetField.appendChild(presetBlurb);
+  controlsPanel.appendChild(presetField);
+
+  const tweakDetails = el("details", "flip-advanced flip-tweak");
+  tweakDetails.appendChild(el("summary", "flip-advanced-summary", "Fine tuning"));
+  controlsPanel.appendChild(tweakDetails);
+
   // REMIX TYPE first: it decides which hierarchy scales and which transformation families are in
   // play at all, so the three sliders below are read as modifiers of it rather than as peers.
   const styleField = el("div", "field flip-field");
@@ -314,7 +331,7 @@ export function createFlip(deps) {
   styleField.appendChild(styleChips);
   const styleBlurb = el("p", "mod-note flip-style-blurb");
   styleField.appendChild(styleBlurb);
-  controlsPanel.appendChild(styleField);
+  tweakDetails.appendChild(styleField);
 
   // The three that matter most, in the order you reach for them.
   const structureSlider = makeSlider({
@@ -325,7 +342,7 @@ export function createFlip(deps) {
     describe: describeStructure,
     onChange: (v) => setParam("structure", v),
   });
-  controlsPanel.appendChild(structureSlider.field);
+  tweakDetails.appendChild(structureSlider.field);
 
   const activitySlider = makeSlider({
     id: "flip-activity",
@@ -335,7 +352,7 @@ export function createFlip(deps) {
     describe: describeActivity,
     onChange: (v) => setParam("activity", v),
   });
-  controlsPanel.appendChild(activitySlider.field);
+  tweakDetails.appendChild(activitySlider.field);
 
   const depthSlider = makeSlider({
     id: "flip-depth",
@@ -345,7 +362,7 @@ export function createFlip(deps) {
     describe: describeDepth,
     onChange: (v) => setParam("depth", v),
   });
-  controlsPanel.appendChild(depthSlider.field);
+  tweakDetails.appendChild(depthSlider.field);
 
   const rollSlider = makeSlider({
     id: "flip-roll",
@@ -355,7 +372,7 @@ export function createFlip(deps) {
     describe: (v) => (v === 0 ? "none" : v < 25 ? "rare" : v < 55 ? "occasional" : v < 80 ? "frequent" : "constant"),
     onChange: (v) => setParam("rollAmount", v),
   });
-  controlsPanel.appendChild(rollSlider.field);
+  tweakDetails.appendChild(rollSlider.field);
 
   // The grid everything else is measured against. Below the creative controls because it is a
   // property of the material more than a choice about the remix.
@@ -374,15 +391,15 @@ export function createFlip(deps) {
     sliceButtons.set(sub.key, btn);
   }
   sliceField.appendChild(sliceSeg);
-  controlsPanel.appendChild(sliceField);
+  tweakDetails.appendChild(sliceField);
 
   // ---- pitch -------------------------------------------------------------
   //
-  // Its own disclosure: the defaults are good, most sessions never open it, and four more controls
-  // permanently on screen is how a tool that should take seconds turns into a cockpit.
-  const pitchDetails = el("details", "flip-advanced");
-  const pitchSummary = el("summary", "flip-advanced-summary", "Pitch");
-  pitchDetails.appendChild(pitchSummary);
+  // A peer of the other controls rather than hidden behind a second disclosure. The RS7000 lists
+  // PITCH alongside REVERSE, BREAK and ROLL as one of the things a Loop Remix variation can BE, and
+  // that is the right billing: key-aware transposition is one of the most musical things FLIP does,
+  // and burying it is most of why it went unnoticed.
+  const pitchDetails = tweakDetails;
 
   const pitchModeField = el("div", "field flip-field");
   const pitchModeLabel = el("label", null, "Pitch mode");
@@ -415,8 +432,6 @@ export function createFlip(deps) {
     onChange: (v) => setParam("pitchAmount", v),
   });
   pitchDetails.appendChild(pitchSlider.field);
-  controlsPanel.appendChild(pitchDetails);
-
   const gridWarning = el("p", "flip-warning");
   gridWarning.hidden = true;
   controlsPanel.appendChild(gridWarning);
@@ -532,6 +547,15 @@ export function createFlip(deps) {
     save();
     markStale();
     render();
+  }
+
+  /** Write a whole preset at once - see js/flip/presets.js for why it is all-or-nothing. */
+  function applyPreset(preset) {
+    Object.assign(state, preset.settings);
+    save();
+    markStale();
+    render();
+    log(`FLIP preset: ${preset.label} - ${preset.blurb}`);
   }
 
   function setStyle(key) {
@@ -1032,6 +1056,9 @@ export function createFlip(deps) {
     gridSummary.textContent = map ? `${map.count} slices` : "";
 
     for (const [key, btn] of sliceButtons) btn.classList.toggle("is-active", key === state.subdivision);
+    const activePreset = matchPreset(state);
+    for (const [key, chip] of presetButtons) chip.classList.toggle("is-active", !!activePreset && activePreset.key === key);
+    presetBlurb.textContent = activePreset ? activePreset.blurb : "Your own settings. Pick a starting point above, or open Fine tuning.";
     for (const [key, chip] of styleButtons) chip.classList.toggle("is-active", key === state.style);
     styleBlurb.textContent = resolveStyle(state.style).blurb;
     structureSlider.sync(state.structure);

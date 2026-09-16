@@ -658,6 +658,33 @@ gets proposed.
 6. Press **GENERATE 8 MORE** until something is interesting. Export the ones
    that are.
 
+### Presets
+
+Eight one-click starting points that already sound like something, because
+being handed four sliders and told to discover that Structure 85 / Activity 30
+/ Depth 65 / Rolls 90 is "the fills one" is not a way to begin:
+
+| | |
+| --- | --- |
+| **Subtle** | Your loop, with something quietly different about it. Whole bars untouched. |
+| **Bar swap** | Bars and half-bars change places, repeat and answer each other. |
+| **New groove** | Same bars, different rhythm. |
+| **Fills** | Leaves the loop alone and adds fills at the ends of bars and the phrase. |
+| **Melodic** | Finds a new tune in the one you already had. |
+| **Stutter** | The glitchy end - micro-slices, rolls and rapid repeats. |
+| **Rebuild** | Takes the phrase apart and puts it back in a different order. |
+| **Destroy** | Everything, at every scale, as far as it goes. |
+
+Each is a full settings snapshot, so clicking one always lands on a complete,
+coherent state. Move any slider afterwards and the chip simply stops being
+highlighted - nothing is locked. Everything else lives behind **Fine tuning**.
+
+The overall shape - a division/rearrangement rule crossed with a treatment
+category - is borrowed from the Yamaha RS7000's Loop Remix, whose `TYPE` (how
+the data is divided and rearranged) and `VARIATION` (`NORMAL` / `REVERSE` /
+`BREAK` / `PITCH` / `ROLL`) is the same separation, and which exposes it as
+numbered presets for the same reason.
+
 ### Hierarchical remixing
 
 A loop is not a flat list of slices, and the difference between a remix and a
@@ -701,6 +728,30 @@ not by failing to be picked, and at low **Activity** most of them will be. A
 good remix might only touch 20-30% of the source; the original material is
 what supplies the musical coherence, and Flip should exploit that rather than
 feel obliged to demonstrate itself constantly.
+
+### Phrase form
+
+Deciding each bar independently produces a scatter of treated and untreated
+bars; music produces *shapes*. So a variation will often adopt a form - `ABAB`,
+`AABA`, `AAAB` - and concentrate its changes accordingly, which is what makes
+the result sound arranged rather than processed: you hear a pattern of change,
+not just change. (The RS7000 exposes the same idea as an `INTERVAL` parameter -
+"remix every other measure".)
+
+It's a weighting, not a rule, and it's mean-neutral: a form redistributes
+activity, it never adds any.
+
+### The opening
+
+Where the loop starts is the first thing you hear, so it's the first thing that
+has to differ between one variation and the next. Flip relocates the entry
+point to another bar line in roughly two thirds of variations at default
+settings - eight alternatives that all begin identically read as one result,
+however different their middles are.
+
+**Structure** still protects the opening, it just no longer protects it almost
+absolutely, and the batch deliberately spreads: the first variation in a batch
+is always the most faithful one.
 
 ### Three controls, not one
 
@@ -786,18 +837,38 @@ in A minor, up three semitones lands on C and belongs; up one lands on A# and
 does not.
 
 The unit is **scale degrees**, not semitones, so a third is a third whether it
-happens to be three semitones or four, and small movements are strongly
-favoured over large ones with **Depth** opening up the leaps.
+happens to be three semitones or four.
+
+**It favours chord tones, not small movements.** This is the opposite of the
+obvious rule and it matters: transposing a *sampled* fragment leaves the rest
+of the loop where it is, so the moved fragment has to agree with harmony that
+is still sounding. That makes thirds, fifths, fourths and octaves the useful
+intervals - they're consonant against whatever the loop is sitting on - while a
+second or a seventh is a passing note: the smallest move on paper and the most
+dissonant one in practice. About 80% of the weight sits on chord tones. (An
+earlier version weighted the second highest of all, which is exactly why in-key
+shifts still sounded like wrong notes.)
+
+**Repeats become sequences.** A sequence - restating a figure transposed by a
+consistent interval each time - is the oldest melodic development technique
+there is, and it's the difference between four transpositions of a fragment and
+a line going somewhere. Descending thirds, ascending thirds and descending
+fifths are the strongest; ascending steps read as a build. A figure repeated
+four times can come back as `root / third / fifth / seventh` - an arpeggio built
+out of your own loop.
 
 **Pitch modes:** `Off`, `Octaves` (always safe - an octave is the same note),
 `In key` (scale-degree moves inside the detected key), `Mixed` (in-key plus
 octaves, with the occasional deliberate surprise once Depth is high).
 
-**Pitch lands on repeats and rolls**, not on scattered single slices, and as
-*melodic shapes* rather than independent random notes. A fragment repeated four
-times might come back as `original / up a third / original / up a third`, or
-climb through the scale; a roll can rise through several allowed pitches as it
-goes. Over 90% of transposed slices sit inside a repeat or a roll.
+**Pitch covers musical spans**, not scattered single slices. Its targets are
+rolls (which can rise or fall through the scale as they go), repetitions (which
+become sequences), and **whole bars or half-bars** - "bar 3 is bar 3, a third
+down" is an obvious, instantly musical variation that needs no repetition to
+hang off. Over 85% of transposed slices are part of a transposed span.
+
+In **Octaves** mode the sequences are constrained too, so "octaves" means
+octaves everywhere, including inside a melodic shape.
 
 **Pitch amount** keeps it a minority of the loop - it works best as an accident
 you notice, not as a wash. The detected key is shown next to the tempo and both

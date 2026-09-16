@@ -158,12 +158,22 @@ test("ACTIVITY controls how much of the loop is touched, and nothing else has to
 
 test("RESTRAINT: at low activity, whole bars come back untouched", () => {
   const map = loopMap("1/16");
-  const untouchedBars = (activity) =>
-    sample(map, { activity }, (r) => r.plan.bars.filter((b) => b.treatment === "untouched").length / r.plan.bars.length);
+  const untouchedBars = (activity, from = 0) =>
+    sample(map, { activity }, (r) => {
+      const bars = r.plan.bars.slice(from);
+      return bars.filter((b) => b.treatment === "untouched").length / bars.length;
+    });
   const low = untouchedBars(15);
   const high = untouchedBars(95);
-  assert.ok(low > 0.6, `at activity 15 most bars should be untouched, got ${(low * 100).toFixed(0)}%`);
+  assert.ok(low > 0.5, `at activity 15 most bars should be untouched, got ${(low * 100).toFixed(0)}%`);
   assert.ok(low > high, `and fewer should survive at 95 (${(high * 100).toFixed(0)}%)`);
+
+  // The opening is measured separately and held to a lower bar on purpose. Relocating where the
+  // loop starts is a deliberate, frequent move - eight variations that all begin identically read
+  // as one result - so bar 1 is "touched" far more often than the rest. Restraint is a claim about
+  // the body of the phrase.
+  const body = untouchedBars(15, 1);
+  assert.ok(body > 0.6, `away from the opening, bars should mostly survive at activity 15, got ${(body * 100).toFixed(0)}%`);
 });
 
 test("DEPTH controls how far an intervention goes, not how many there are", () => {
@@ -370,30 +380,31 @@ test("PITCH amount controls how much of the loop is transposed, and pitch stays 
   assert.ok(share(90) > share(20), `and more at 90: ${(share(90) * 100).toFixed(0)}%`);
 });
 
-test("PITCH: transposition lands on repeats and rolls, not on arbitrary isolated slices", () => {
-  // Measured per SLICE against the regions the arrangement produced, deliberately not as "runs of
-  // equal pitch". A roll that rises through the scale gives every slot a different transposition,
-  // which is one of the most musical things this feature does and would score as a pile of
-  // scattered single notes under a run-length metric.
+test("PITCH: transposition covers musical spans, not arbitrary isolated slices", () => {
+  // Measured as "is this transposed slice part of a transposed SPAN" rather than "is it inside a
+  // repeat", because a whole bar moved down a third is a legitimate target that belongs to no
+  // repetition at all - and it is one of the most musical things FLIP does. What must not happen is
+  // single slices transposed on their own, which read as wrong notes rather than as an idea.
   const map = loopMap("1/16");
-  let inside = 0;
-  let outside = 0;
+  let inSpan = 0;
+  let isolated = 0;
   for (let seed = 1; seed <= 90; seed++) {
-    const recipe = gen(map, { seed: seed * 104729, pitchAmount: 70 });
-    const covered = new Set();
-    for (const edit of recipe.edits) {
-      if (edit.op !== "roll" && edit.family !== "structural") continue;
-      for (let i = edit.at; i < Math.min(map.count, edit.at + edit.span); i++) covered.add(i);
-    }
-    recipe.steps.forEach((step, i) => {
+    const steps = gen(map, { seed: seed * 104729, pitchAmount: 70 }).steps;
+    steps.forEach((step, i) => {
       if (!step.pitch) return;
-      if (covered.has(i)) inside++;
-      else outside++;
+      const prev = steps[i - 1];
+      const next = steps[i + 1];
+      const joined = (prev && prev.pitch === step.pitch) || (next && next.pitch === step.pitch);
+      // A roll that rises through the scale gives every slot its own pitch by design, so a slice
+      // inside a roll counts as part of a span even when its neighbours differ.
+      const inRoll = step.op === "roll";
+      if (joined || inRoll) inSpan++;
+      else isolated++;
     });
   }
-  const total = inside + outside;
+  const total = inSpan + isolated;
   assert.ok(total > 200, `expected plenty of transposed slices to inspect, got ${total}`);
-  assert.ok(inside / total > 0.8, `pitch should follow the arrangement: ${((inside / total) * 100).toFixed(0)}% of transposed slices were inside a repeat or a roll`);
+  assert.ok(inSpan / total > 0.85, `pitch should cover spans: ${((inSpan / total) * 100).toFixed(0)}% were part of one`);
 });
 
 test("melodicPattern: a repeated fragment gets a shape, and the first repetition is the original", () => {

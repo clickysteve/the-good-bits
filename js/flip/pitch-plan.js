@@ -45,18 +45,21 @@ export function resolvePitchMode(key) {
  * semitones and filtering to the scale would make thirds sometimes major and sometimes minor for no
  * reason, and would rank a tritone as closer than an octave.
  */
-export function scaleDegreeOffsets(mode, maxDegrees = 7) {
+/** Semitones for a signed scale-degree movement, wrapping through octaves. A "third" is two
+ *  degrees whether that happens to be three semitones or four - which is what diatonic means. */
+export function degreeToSemitones(mode, degree) {
   const intervals = SCALE_INTERVALS[normalizeMode(mode)] || SCALE_INTERVALS.minor;
   const size = intervals.length;
+  const octave = Math.floor(degree / size);
+  const step = ((degree % size) + size) % size;
+  return intervals[step] + octave * 12;
+}
+
+export function scaleDegreeOffsets(mode, maxDegrees = 7) {
   const out = [];
   for (let degree = -maxDegrees; degree <= maxDegrees; degree++) {
     if (degree === 0) continue;
-    // Wrap through the scale, adding an octave for each full turn, so degree +9 is a third up an
-    // octave rather than falling off the end of the array.
-    const octave = Math.floor(degree / size);
-    const step = ((degree % size) + size) % size;
-    const semitones = intervals[step] + octave * 12;
-    out.push({ degree, semitones });
+    out.push({ degree, semitones: degreeToSemitones(mode, degree) });
   }
   return out;
 }
@@ -89,23 +92,34 @@ export function pitchCandidates({ mode = "minor", pitchMode = DEFAULT_PITCH_MODE
     return candidates;
   }
 
-  // IN KEY and MIXED both start from scale degrees, weighted by how far they move. A second or a
-  // third is the bread and butter; a seventh is an event.
+  // IN KEY and MIXED both start from scale degrees - but NOT weighted by how far they move, which
+  // was the original mistake here and the reason transposed fragments sounded wrong rather than
+  // surprising.
+  //
+  // Transposing a SAMPLED fragment leaves the rest of the loop where it is, so the moved fragment
+  // has to agree with harmony that is still sounding. That makes the useful intervals the CHORD
+  // TONES - third, fifth, octave, and the fourth as the fifth's inversion - because those are
+  // consonant against whatever the loop is sitting on. A second or a seventh is a passing note: it
+  // is the smallest move on paper and the most dissonant one in practice, and weighting it highest
+  // (it was, at 1.0 against the third's 0.9) is why in-key shifts still sounded like wrong notes.
+  //
+  // Steps stay in the vocabulary as colour, and open up with Depth, but they stop being the default.
   for (const { degree, semitones } of scaleDegreeOffsets(mode)) {
     const distance = Math.abs(degree);
     let weight;
-    if (distance === 1) weight = 1.0; // step
-    else if (distance === 2) weight = 0.9; // third
-    else if (distance === 3) weight = 0.45 + 0.35 * depth; // fourth
-    else if (distance === 4) weight = 0.4 + 0.4 * depth; // fifth
-    else if (distance === 7) weight = 0.3 + 0.5 * depth; // octave, via the scale
-    else weight = 0.08 + 0.5 * depth; // sixths, sevenths - deliberate leaps
+    if (distance === 2) weight = 1.4; // third - the workhorse
+    else if (distance === 4) weight = 1.2; // fifth
+    else if (distance === 7) weight = 0.9; // octave, via the scale
+    else if (distance === 3) weight = 0.8; // fourth
+    else if (distance === 5) weight = 0.35 + 0.3 * depth; // sixth
+    else if (distance === 1) weight = 0.3 + 0.5 * depth; // second - passing colour
+    else weight = 0.1 + 0.45 * depth; // sevenths and beyond - deliberate leaps
     // Down tends to sit under a loop more comfortably than up, which pokes out.
     if (semitones > 0) weight *= 0.85;
     push(semitones, weight);
   }
-  push(-12, 0.5 + 0.2 * depth);
-  push(12, 0.35 + 0.2 * depth);
+  push(-12, 0.7 + 0.2 * depth);
+  push(12, 0.5 + 0.2 * depth);
 
   if (resolved === "mixed") {
     if (depth > 0.55) {
@@ -143,45 +157,49 @@ export function choosePitch(rng, candidates) {
  * A fragment repeated four times with the offsets [0, 3, 7, 3] is an arpeggio; the same four
  * repetitions with four independent random pitches is noise. Shapes are chosen, not accumulated.
  */
-export function melodicPattern(rng, count, candidates, { depth = 0.5 } = {}) {
+export function melodicPattern(rng, count, candidates, { depth = 0.5, mode = "minor", pitchMode = DEFAULT_PITCH_MODE } = {}) {
   const flat = new Array(count).fill(0);
   if (count < 2 || !candidates || !candidates.length) return flat;
 
+  const semi = (degree) => degreeToSemitones(mode, degree);
   const a = choosePitch(rng, candidates);
+  // A diatonic sequence walks the SCALE, which is the wrong vocabulary when the user asked for
+  // octaves only - "Octaves" has to mean octaves, including inside a melodic shape. Those modes
+  // keep the shapes that are built from the candidate list instead, which is already constrained.
+  const sequences = resolvePitchMode(pitchMode).key !== "octaves";
+
+  // A SEQUENCE - restate the figure transposed by a consistent interval each time - is the oldest
+  // and most reliable way to turn a repeated fragment into a melodic idea. Descending thirds and
+  // descending fifths are the strongest; ascending steps read as a build. Keeping the step constant
+  // is the whole point: four independent transpositions of the same figure is noise, four
+  // transpositions a third apart is a line going somewhere.
   const shapes = [
-    // Alternate: original, up, original, up. The most reliably musical of the lot.
-    { w: 1.2, build: () => flat.map((_, i) => (i % 2 === 1 ? a : 0)) },
-    // Climb: step up through the available tones.
-    {
-      w: 0.9,
-      build: () => {
-        const sorted = candidates.filter((c) => c.semitones > 0).sort((x, y) => x.semitones - y.semitones);
-        if (!sorted.length) return flat.map((_, i) => (i % 2 === 1 ? a : 0));
-        return flat.map((_, i) => (i === 0 ? 0 : sorted[Math.min(sorted.length - 1, i - 1)].semitones));
-      },
-    },
-    // Fall: the same, downwards.
-    {
-      w: 0.7,
-      build: () => {
-        const sorted = candidates.filter((c) => c.semitones < 0).sort((x, y) => y.semitones - x.semitones);
-        if (!sorted.length) return flat.map((_, i) => (i % 2 === 1 ? a : 0));
-        return flat.map((_, i) => (i === 0 ? 0 : sorted[Math.min(sorted.length - 1, i - 1)].semitones));
-      },
-    },
-    // Arch: away and back. Reads as a phrase rather than a drift.
-    { w: 0.8, build: () => flat.map((_, i) => (i === 0 || i === count - 1 ? 0 : a)) },
-    // Last one only - a turnaround at the end of the repetition.
-    { w: 1.0 + depth, build: () => flat.map((_, i) => (i === count - 1 ? a : 0)) },
+    { w: sequences ? 1.5 : 0, build: () => flat.map((_, i) => semi(-2 * i)) }, // descending thirds
+    { w: sequences ? 1.1 : 0, build: () => flat.map((_, i) => semi(2 * i)) }, // ascending thirds
+    { w: sequences ? 1.0 : 0, build: () => flat.map((_, i) => semi(-4 * i)) }, // descending fifths
+    { w: sequences ? 0.7 : 0, build: () => flat.map((_, i) => semi(i)) }, // ascending steps - a build
+    { w: sequences ? 0.6 : 0, build: () => flat.map((_, i) => semi(-i)) }, // descending steps
+    // Not sequences, but the shapes that make a repetition sound answered rather than restated.
+    { w: 1.3, build: () => flat.map((_, i) => (i % 2 === 1 ? a : 0)) }, // alternate: call/answer
+    { w: 0.9, build: () => flat.map((_, i) => (i === 0 || i === count - 1 ? 0 : a)) }, // arch: away and back
+    { w: 1.0 + depth, build: () => flat.map((_, i) => (i === count - 1 ? a : 0)) }, // turnaround on the last one
+    { w: 0.5, build: () => flat.map(() => a) }, // the whole figure moved - a transposed restatement
   ];
 
-  const total = shapes.reduce((sum, s) => sum + s.w, 0);
+  const usable = shapes.filter((shape) => shape.w > 0);
+  const total = usable.reduce((sum, s) => sum + s.w, 0);
   let r = rng.next() * total;
-  for (const shape of shapes) {
+  let picked = usable[0];
+  for (const shape of usable) {
     r -= shape.w;
-    if (r <= 0) return shape.build();
+    if (r <= 0) {
+      picked = shape;
+      break;
+    }
   }
-  return shapes[0].build();
+  // Clamp: a long sequence of descending fifths walks off the bottom of the instrument.
+  const limit = depth > 0.7 ? 24 : 12;
+  return picked.build().map((v) => Math.max(-limit, Math.min(limit, v)));
 }
 
 /** "A minor" from whatever detection or the user gave us, with a safe fallback. */

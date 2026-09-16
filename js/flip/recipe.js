@@ -149,7 +149,13 @@ export function generateRecipe({ map, style, structure = 65, activity = 45, dept
   // report those bars as untouched - a description that says "bars 1-2 untouched" next to "25%
   // changed" is worse than no description.
   let entryRewrote = 0;
-  const entryRate = clamp01((0.1 + 0.6 * (1 - S)) * (0.4 + 1.2 * A));
+  // WHERE THE LOOP STARTS IS THE FIRST THING YOU HEAR, so it is the first thing that has to differ
+  // between one variation and the next. At the original rate the opening slice changed in 32% of
+  // variations, which meant five or six of every eight began identically - and clicking down a list
+  // of eight results that all announce themselves the same way reads as one result, however
+  // different the middles are. Structure still protects it (the phrase beginning is part of the
+  // shape), it just no longer protects it almost absolutely.
+  const entryRate = clamp01((0.5 + 0.45 * (1 - S)) * (0.85 + 0.3 * A) * (prof.entry || 1));
   const canMoveEntry = map.count >= map.perBar * 2 && rng.next() < entryRate;
 
   if (canMoveEntry) {
@@ -185,6 +191,33 @@ export function generateRecipe({ map, style, structure = 65, activity = 45, dept
   // =============================================================================================
 
   const bars = hier.levels.bar.length ? hier.levels.bar : hier.levels.phrase;
+
+  // PHRASE FORM. Deciding each bar independently produces a scatter of treated and untreated bars;
+  // music produces shapes - ABAB, AABA, AAAB. The RS7000's Loop Remix exposes the same idea as an
+  // INTERVAL parameter ("remix every other measure"), and it is most of why its results sound
+  // arranged rather than processed: the listener hears a pattern of change, not just change.
+  //
+  // Applied as a weighting rather than a rule, so a form bends the per-bar decisions below without
+  // making them mechanical, and high Structure reaches for a form more often than low does.
+  const FORMS = [
+    { key: "ABAB", at: (i) => (i % 2 === 0 ? "A" : "B") },
+    { key: "AABA", at: (i, n) => (i === Math.floor(n * 0.5) ? "B" : i === n - 1 ? "B" : "A") },
+    { key: "AAAB", at: (i, n) => (i === n - 1 ? "B" : "A") },
+    { key: "ABAC", at: (i) => (i % 2 === 0 ? "A" : "B") },
+  ];
+  let form = null;
+  if (bars.length >= 4 && rng.next() < 0.3 + 0.35 * S) {
+    form = FORMS[rng.int(FORMS.length)];
+    plan.phrase.push(form.key.toLowerCase());
+  }
+  /** A-bars are the ones the form wants left recognisable; B-bars are where it wants the change. */
+  // Mean-neutral by construction: a form REDISTRIBUTES activity, it doesn't add any. Weights that
+  // average above 1 quietly make every form-bearing variation busier than the Activity slider said,
+  // which showed up as whole-bar restraint dropping from 66% to 54% at Activity 15.
+  const formWeight = (bar) => {
+    if (!form) return 1;
+    return form.at(bar.index, bars.length) === "A" ? 0.35 : 1.65;
+  };
 
   /** Which hierarchy scale to work at. Structure pushes coarse scales away (edits happen INSIDE the
    *  existing structure); depth pulls fine ones in (micro-slicing is a deep intervention). */
@@ -244,7 +277,7 @@ export function generateRecipe({ map, style, structure = 65, activity = 45, dept
 
     // Should anything happen in this bar at all? Structure protects the first bar and the strong
     // positions; the remix type's position bias pulls activity towards wherever it likes to work.
-    const appeal = positionAppeal(bar, st.positionBias);
+    const appeal = positionAppeal(bar, st.positionBias) * formWeight(bar);
     const protection = S * (bar.isFirst ? 0.5 : 0.2);
     if (rng.next() >= clamp01(A * appeal * (1 - protection))) continue;
 
@@ -318,56 +351,81 @@ export function generateRecipe({ map, style, structure = 65, activity = 45, dept
   // rolls are the targets, because a transposed repetition is a melodic idea ("the same figure, a
   // third up") while a transposed lone slice is usually just a wrong note.
   const resolvedPitchMode = resolvePitchMode(pitchMode).key;
-  const candidates = resolvedPitchMode === "off" ? [] : pitchCandidates({ mode: key && key.mode, pitchMode: resolvedPitchMode, depth: D });
+  const keyMode = (key && key.mode) || "minor";
+  const candidates = resolvedPitchMode === "off" ? [] : pitchCandidates({ mode: keyMode, pitchMode: resolvedPitchMode, depth: D });
   let pitched = 0;
+  const pitchedSlots = new Set();
+
+  /** Write one melodic shape across `parts` equal spans starting at `at`. */
+  function applyShape(at, span, parts) {
+    const unit = Math.floor(span / parts);
+    if (unit < 1) return false;
+    const pattern = melodicPattern(rng, parts, candidates, { depth: D, mode: keyMode, pitchMode: resolvedPitchMode });
+    let wrote = false;
+    for (let p = 0; p < parts; p++) {
+      if (!pattern[p]) continue;
+      for (let i = 0; i < unit; i++) {
+        const slot = at + p * unit + i;
+        if (slot >= map.count || pitchedSlots.has(slot)) continue;
+        steps[slot].pitch = pattern[p];
+        pitchedSlots.add(slot);
+        pitched++;
+        wrote = true;
+      }
+    }
+    return wrote;
+  }
 
   if (pitchRate > 0 && candidates.length) {
-    // (a) Rolls: a roll that rises through the scale as it goes is one of the most useful accidents
-    //     this whole feature can produce.
+    // (a) Rolls. A roll that rises or falls through the scale as it goes is one of the most useful
+    //     accidents this whole feature can produce.
     for (const edit of edits.filter((e) => e.op === "roll")) {
       if (rng.next() >= pitchRate) continue;
       const span = Math.min(edit.span, map.count - edit.at);
-      if (span < 2) continue;
-      const pattern = melodicPattern(rng, span, candidates, { depth: D });
-      for (let i = 0; i < span; i++) {
-        if (!pattern[i]) continue;
-        steps[edit.at + i].pitch = pattern[i];
-        pitched++;
-      }
+      if (span >= 2) applyShape(edit.at, span, span);
     }
 
-    // (b) Repetitions: find runs of identical source material and shape them melodically.
-    for (const edit of edits.filter((e) => e.family === "structural" && e.span >= 2)) {
+    // (b) Repetitions. A figure restated a third down is a SEQUENCE - the oldest melodic
+    //     development technique there is - and it is the single most musical thing that can be done
+    //     to a repeated fragment.
+    for (const edit of edits.filter((e) => e.family === "structural" && e.span >= 4)) {
       if (rng.next() >= pitchRate) continue;
       const parts = edit.op === "aba" ? Math.max(2, edit.parts || 3) : 2;
-      const unit = Math.floor(edit.span / parts);
-      // A part shorter than two slices can't carry a melodic idea - it is a single transposed slice
-      // wearing a pattern's clothes, and those are exactly what this pass exists to avoid making.
-      if (unit < 2) continue;
-      const pattern = melodicPattern(rng, parts, candidates, { depth: D });
-      for (let p = 0; p < parts; p++) {
-        if (!pattern[p]) continue;
-        for (let i = 0; i < unit; i++) {
-          const at = edit.at + p * unit + i;
-          if (at >= map.count) break;
-          steps[at].pitch = pattern[p];
-          pitched++;
+      applyShape(edit.at, edit.span, parts);
+    }
+
+    // (c) A WHOLE BAR OR HALF-BAR, transposed. This is the target the first version didn't have and
+    //     the reason pitch barely registered: on a short loop there are few repeats to decorate, so
+    //     pitch simply never fired. "Bar 3 is bar 3, a third down" is an obvious, instantly musical
+    //     variation that needs no repetition to hang off - and it moves enough material to be heard
+    //     as a key change in the phrase rather than as one odd note.
+    const pitchLevels = ["bar", "halfBar"].filter((l) => hier.levels[l] && hier.levels[l].length > 1);
+    if (pitchLevels.length && rng.next() < pitchRate * 1.25) {
+      const level = pitchLevels[rng.int(pitchLevels.length)];
+      const nodes = hier.levels[level].filter((n) => n.start >= protectUntil && n.start > 0);
+      if (nodes.length) {
+        const node = nodes[rng.int(nodes.length)];
+        const shift = choosePitch(rng, candidates);
+        if (shift) {
+          for (let i = node.start; i < Math.min(map.count, node.end); i++) {
+            if (pitchedSlots.has(i)) continue;
+            steps[i].pitch = shift;
+            pitchedSlots.add(i);
+            pitched++;
+          }
         }
       }
     }
 
-    // (c) A scattering of individual slices. Deliberately last and deliberately rare: a transposed
-    //     lone slice is usually just a wrong note, where a transposed REPETITION is a melodic idea,
-    //     so this stays far below the passes above it. At a quarter of the rate it swamped them -
-    //     measured at 93% of all transpositions landing on a single slice, which is the wash this
-    //     whole design is meant to avoid. At this rate it is roughly one slice every three
-    //     variations: seasoning, which is what it was always supposed to be.
-    const loneRate = pitchRate * 0.006;
+    // (d) A scattering of individual slices. Deliberately last and deliberately rare: a transposed
+    //     lone slice is usually just a wrong note, where a transposed REPETITION is a melodic idea.
+    const loneRate = pitchRate * 0.02;
     for (let i = 0; i < map.count; i++) {
       if (steps[i].pitch || steps[i].silent) continue;
       if (map.slices[i].isDownbeat && S > rng.next()) continue;
       if (rng.next() >= loneRate) continue;
       steps[i].pitch = choosePitch(rng, candidates);
+      pitchedSlots.add(i);
       pitched++;
     }
   }
