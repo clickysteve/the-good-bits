@@ -37,9 +37,40 @@
 //   * The loop seam (last slot back to first) is treated as one more boundary, so a variation still
 //     loops cleanly when the last slot is no longer the source's last slice.
 //
+// PITCH is applied last, over the assembled output, and only where a step asked for it. It uses the
+// app's existing duration-preserving shifter (js/dsp/pitch-shift.js - stretch then resample, the
+// same one PLAY NICE conforms keys with) rather than a playback-rate change, because a rate change
+// would make a transposed slot play a different amount of the source and drag everything after it
+// out of time. Contiguous slots sharing a transposition are shifted as ONE region: a melodic
+// pattern usually pitches a whole beat or half-bar at a time, and shifting that in one pass is both
+// far cheaper and better-sounding than shifting each slice separately and butting them together.
+//
 // Provenance tracking (readStart/readEnd below) is what makes "is this boundary natural?" answerable
 // for reversed and stuttered slots too, rather than only for plain ones.
 import { toMono } from "../dsp.js";
+import { pitchShiftChannels } from "../dsp/pitch-shift.js";
+
+/**
+ * Below this a pitch shift isn't worth attempting: the stretch pass underneath it needs a window
+ * to work with, and on a fragment this short the result is mush rather than a note. Such a step
+ * simply renders unpitched, which is a better outcome than a smeared one.
+ */
+const MIN_PITCH_SAMPLES = 1024;
+
+/**
+ * Extra audio fed to the pitch shifter past the end of a region, then thrown away.
+ *
+ * js/dsp/pitch-shift.js stretches and then resamples, and the stretch pass leaves an artefact in
+ * its last window - measured on a pure sine at a 0.6 full-scale jump about 500 samples from the
+ * end, on UPWARD shifts only. That is invisible where PLAY NICE uses it, transposing a whole loop
+ * once at a point the conform fade covers anyway. FLIP transposes many short regions, so the same
+ * artefact lands in the middle of the loop over and over.
+ *
+ * Giving the shifter real audio past the region and keeping only the part we asked for puts the
+ * artefact in the discarded tail. Sized well past the observed length, since it costs one short
+ * extra window of work and nothing else.
+ */
+const PITCH_TAIL_PAD = 4096;
 
 /** Default crossfade length. Long enough to bridge a splice, short enough to sit inside one cycle
  *  of anything above ~700Hz - i.e. audible as continuity, not as a fade. */
@@ -260,7 +291,90 @@ export function renderRecipe({ recipe, map, channels, crossfadeMs = DEFAULT_CROS
     }
   }
 
+  applyPitch(out, steps, count, map, fadeLen);
+
   return { channels: out, length: total };
+}
+
+/**
+ * Transpose the regions that asked for it, in place.
+ *
+ * Runs of consecutive slots sharing a transposition are handled as one region, then crossfaded back
+ * into their neighbours at both ends - the shifted audio no longer lines up with what surrounds it,
+ * so the joins need the same treatment any other edit boundary gets.
+ */
+function applyPitch(out, steps, count, map, fadeLen) {
+  if (!out.length) return;
+  let i = 0;
+  while (i < count) {
+    const semitones = steps[i] && steps[i].pitch ? steps[i].pitch : 0;
+    if (!semitones) {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < count && steps[j] && steps[j].pitch === semitones) j++;
+
+    const start = map.bounds[i];
+    const end = map.bounds[j];
+    const length = end - start;
+    if (length >= MIN_PITCH_SAMPLES) {
+      // Real audio past the region, wrapping at the end because the source is a loop, so the
+      // shifter's tail artefact happens in samples we are going to throw away.
+      const total = out[0].length;
+      const padded = Math.min(length + PITCH_TAIL_PAD, length + total);
+      const region = out.map((ch) => {
+        const buf = new Float32Array(padded);
+        for (let k = 0; k < padded; k++) buf[k] = ch[(start + k) % total];
+        return buf;
+      });
+      // seed is pinned, not derived: the shifter's internal engine may use randomness, and a
+      // variation has to render identically every time it is rendered.
+      const shifted = pitchShiftChannels(region, map.sampleRate, semitones, { seed: 1 });
+      // The phase-vocoder pass inside the shifter can overshoot - measured at 1.83x full scale on a
+      // hot loop, which clips the moment it is encoded. Pull a region that got louder back to the
+      // level it came in at, using ONE scalar across every channel so the stereo image is untouched.
+      // Only ever downwards: a transposition that happens to come out quieter is the shifter being
+      // honest about the material, not something to make up for.
+      // Measured over the part we keep, not the discarded tail, so the artefact can't set the gain.
+      const gain = levelGuard(region, shifted, length);
+      const fade = Math.max(0, Math.min(fadeLen, Math.floor(length / 4)));
+      for (let c = 0; c < out.length; c++) {
+        const src = shifted[c] || region[c];
+        const dst = out[c];
+        for (let k = 0; k < length; k++) {
+          let value = src[k] * gain;
+          // Ease in from, and back out to, the untransposed neighbours.
+          if (fade > 0 && k < fade) value = dst[start + k] * (1 - (k + 0.5) / fade) + value * ((k + 0.5) / fade);
+          else if (fade > 0 && k >= length - fade) {
+            const w = (length - k - 0.5) / fade;
+            value = dst[start + k] * (1 - w) + value * w;
+          }
+          dst[start + k] = value;
+        }
+      }
+    }
+    i = j;
+  }
+}
+
+/** A scale factor that stops a transposed region coming back louder than it went in. Never boosts. */
+function levelGuard(before, after, length) {
+  let peakBefore = 0;
+  let peakAfter = 0;
+  for (let c = 0; c < before.length; c++) {
+    const a = before[c];
+    const b = after[c] || a;
+    const n = Math.min(length != null ? length : a.length, a.length, b.length);
+    for (let i = 0; i < n; i++) {
+      const va = Math.abs(a[i]);
+      if (va > peakBefore) peakBefore = va;
+      const vb = Math.abs(b[i]);
+      if (vb > peakAfter) peakAfter = vb;
+    }
+  }
+  if (peakAfter <= peakBefore || peakAfter <= 0) return 1;
+  return peakBefore / peakAfter;
 }
 
 /** Rendered audio in the shape the audition players and the exporter both want. */

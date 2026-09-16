@@ -28,6 +28,8 @@ export function makeStep(src, op = "source") {
     keepHead: 0,
     /** 0..1 offset into the source slice that the stutter fragment is taken from. */
     fragFrom: 0,
+    /** Transposition in semitones, 0 for none. Decided musically - see js/flip/pitch-plan.js. */
+    pitch: 0,
   };
 }
 
@@ -44,5 +46,5 @@ export function identitySteps(count) {
 
 /** True when this slot plays source slice `index` exactly as it is in the original. */
 export function isUntouched(step, index) {
-  return !!step && step.src === index && !step.reverse && !step.silent && !step.stutter;
+  return !!step && step.src === index && !step.reverse && !step.silent && !step.stutter && !step.pitch;
 }

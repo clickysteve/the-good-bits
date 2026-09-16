@@ -24,8 +24,10 @@ site on GitHub Pages.
     key, so samples that had nothing to do with each other can be used
     together. See [Play nice](#play-nice) below.
   - **Flip** takes one loop and hands it back to you wrong - a batch of
-    automatic remixes of it, eight at a time, to click through until one of
-    them is better than what you started with. See [Flip](#flip) below.
+    automatic remixes of it, eight at a time, rearranged at every scale from
+    whole bars down to micro-fragments, with key-aware pitch mutation. Click
+    through until one of them is better than what you started with. See
+    [Flip](#flip) below.
 
   This replaced a Simple/Advanced toggle, which was the wrong axis: it
   described how much of the interface you could see, said nothing about what
@@ -630,10 +632,11 @@ with it. **Flip** decides for you, eight times, and lets you throw seven of
 them away.
 
 Drop in one ordinary musical loop - a boring four-bar piano part will do -
-and Flip slices it on the beat grid, rearranges the slices, and gives you a
-batch of alternative versions to audition. Some will still be recognisably
-your loop with something odd in the second half. Some will be much stranger.
-The whole point is that you didn't have to think of any of them.
+and Flip analyses it, understands it as a piece of music with bars and beats
+in it, and proposes a batch of alternative arrangements. Sometimes it rewrites
+the phrase. Sometimes it repeats something unexpectedly. Sometimes it leaves
+almost everything alone and does one ridiculous roll. Sometimes it finds a new
+melody in the one you already had.
 
 It is deliberately **not** a manual slicer, a pad instrument or a sequencer.
 There is no way to specify an individual edit, because specifying individual
@@ -643,10 +646,11 @@ gets proposed.
 ### The workflow
 
 1. Pick **Flip** in the top bar and drop a loop on the page.
-2. Check the tempo it detected. That tempo *is* the slice grid, so this is
-   the one thing worth looking at before you generate - see
-   [When the tempo is wrong](#when-the-tempo-is-wrong) below.
-3. Choose a slice size, an intensity and a style.
+2. Check the tempo and key it detected. The tempo *is* the slice grid and the
+   key constrains every transposition, so these are the two things worth a
+   glance before you generate - both are correctable in place.
+3. Choose a remix type. Adjust **Structure**, **Activity** and **Depth** if you
+   want to; the defaults are chosen to be useful.
 4. Press **GENERATE**.
 5. Click down the list. **ORIGINAL** sits at the top in the same shape as the
    variations, so `ORIGINAL → FLIP 01 → FLIP 02` is one continuous audition
@@ -654,156 +658,232 @@ gets proposed.
 6. Press **GENERATE 8 MORE** until something is interesting. Export the ones
    that are.
 
-### The controls
+### Hierarchical remixing
 
-**Slice size** - `1/4`, `1/8`, `1/16`, `1/32`. Where the cuts are, in musical
-subdivisions of the detected tempo. `1/16` is the useful default for most
-material; `1/8` is more conservative and more obviously musical; `1/32` gets
-choppy fast.
+A loop is not a flat list of slices, and the difference between a remix and a
+glitch plugin is whether the machine knows that. Flip understands the source at
+seven scales at once:
 
-**Intensity** - conservative to destructive, and it means two things at once:
-how *often* something happens, and how *far* it goes. Low intensity makes a
-handful of small changes, leaves the downbeats alone and usually holds the
-opening of the phrase completely intact. High intensity restructures freely,
-ignores the metric grid and starts cutting below the slice size.
+```
+PHRASE
+└── BAR 1 / BAR 2 / BAR 3 / BAR 4
+    └── half-bars
+        └── beats
+            └── half-beats
+                └── slices
+                    └── micro-fragments
+```
 
-**Style** - the remix personality. Each one is a different weighting over the
-same set of transformations, so they share a vocabulary but not a temperament:
+Every intervention picks a scale first and a place second, so one variation can
+combine sizes the way an arrangement does:
 
-| Style | What it does |
+```
+bar 1  untouched
+bar 2  repeat, roll
+bar 3  reverse a slice, return to an earlier motif
+bar 4  substitute
+```
+
+That bar-by-bar summary is what each variation row actually prints, so you can
+see the shape of a result before you play it, and see at a glance which ones
+left most of your loop alone.
+
+**Why this matters:** the first version of Flip walked the phrase one beat at a
+time and applied one operation per beat it decided to touch. Every edit was
+therefore roughly one beat wide, everywhere - and a remix that edits uniformly
+has no shape. It sounded like generic glitch processing because structurally
+that is what it was.
+
+### Restraint
+
+Flip is comfortable doing nothing. Bars are left alone by *explicit decision*,
+not by failing to be picked, and at low **Activity** most of them will be. A
+good remix might only touch 20-30% of the source; the original material is
+what supplies the musical coherence, and Flip should exploit that rather than
+feel obliged to demonstrate itself constantly.
+
+### Three controls, not one
+
+A single "intensity" slider conflates three different musical intentions.
+These are separate because you want them in different combinations:
+
+| | |
 | --- | --- |
-| **Shuffle** | Reorders whole chunks and swaps neighbours. The material survives; the order doesn't. |
-| **Repeat** | Builds motifs out of what's already there - repeats, A/B alternation, call and response. |
-| **Jump** | Skips backwards and forwards through the phrase, mostly to somewhere nearby. |
-| **Stutter** | Breaks individual slices into rapid fragments, usually running into the next downbeat. |
-| **Reverse** | Turns slices and groups round - the audio inside them, not just their order. |
-| **Sparse** | Takes things away. Slices drop out to deliberate silence, and what's left gets room. |
-| **Mixed** | A bit of everything, but still trying to sound like a version of your loop. |
-| **Chaos** | Everything at once, further and more often. Expect to throw most of these away. |
+| **Structure** | How much of the large-scale shape survives. High keeps bars where they are, protects downbeats and the opening, borrows material from nearby, and pushes edits to finer scales so they happen *inside* the existing structure. Low lets bars move, repeat and be substituted wholesale, and takes edits off the beat grid entirely. |
+| **Activity** | How often Flip intervenes at all. Low leaves whole bars untouched. |
+| **Depth** | How far any one intervention goes. Low substitutes a neighbour or repeats a beat; high jumps across the phrase, subdivides into micro-slices, reverses and reaches for wider intervals. |
 
-**Mixed** and **Chaos** draw on the same operations; the difference is
-temperament, not vocabulary. Mixed works at a normal rate and reach and leaves
-the destructive techniques alone until you ask for them, so it reads as a
-considered remix that happens to use several ideas. Chaos turns the rate and
-the reach up *and* unlocks micro-editing, silence and displacement
-immediately.
+So **Structure 85 / Activity 25 / Depth 75** gives you something recognisably
+your phrase, mostly left alone, that occasionally does something dramatic -
+which is not expressible with one slider at all.
 
-### Why the results sound like music and not like a shuffle
+### Remix types
 
-The obvious implementation - put the slices in an array and shuffle it -
-produces something that is recognisably made of your loop and recognisably not
-music. Flip is built around mutating the original sequence instead. Given
+Not effect presets. A type changes which hierarchy levels are worked at, which
+families of transformation are reached for, where in the bar it prefers to
+intervene, and how it bends your three settings. Two types on identical
+settings produce structurally different music.
 
-```
-1 2 3 4 5 6 7 8
-```
+| Type | What it does |
+| --- | --- |
+| **Gentle** | Barely touches it. Repeats a beat, substitutes a neighbour, leaves most of the loop alone. |
+| **Groove** | Rhythmic reinterpretation - beats and half-beats move around inside bars that stay put. |
+| **Phrase** | Large-scale restructuring. Bars and half-bars move, repeat and answer each other. Best on melodic material. |
+| **Fill** | Leaves the loop alone and adds fills - rolls, repeats and reverses at the ends of bars and the end of the phrase. |
+| **Repeater** | Builds motifs by repeating what's there - beats, half-bars, groups. Not stutter. |
+| **Cut-up** | Aggressive small-scale rearrangement. Where the glitchier end of Flip lives. |
+| **Reconstruct** | Rebuilds the phrase. Bars and beats change places. |
+| **Wild** | The whole vocabulary at every scale at once. Expect to throw most of these away. |
+| **Mixed** | A bit of everything at every scale, still trying to sound like a version of your loop. The default. |
 
-a conservative result looks like
+### The transformation vocabulary
 
-```
-1 2 3 4 5 6 5 6
-```
+Every operation declares a **family** and the **scales** it makes sense at, so
+the same idea - repeat, reverse, substitute - is written once and applied to a
+bar, a beat or a single slice depending on what was chosen.
 
-not
+- **Structural** — repeat, repeat half, substitute a neighbour, swap halves,
+  jump, return to an earlier motif, A/B/A, call and response, relocate the
+  entry point, and *preserve* (doing nothing, deliberately and on the record).
+- **Micro** — rearrange inside a node, repeat the tail, reverse a group,
+  reverse a slice, stutter.
+- **Break** — drop out, cut a rhythmic gap.
+- **Roll** — its own family and its own pass.
+- **Pitch** — a decoration pass over what the arrangement produced.
 
-```
-7 1 4 8 2 6 3 5
-```
+Operations compose: call-and-response can answer itself with a reversal, a
+stutter or a rest - but only ones the chosen type would reach for anyway, so
+Repeater never silences anything and Gentle never micro-edits.
 
-The rules that get it there:
+### Roll
 
-- **Everything is anchored to a beat.** No operation starts in an arbitrary
-  place; they all begin on a beat boundary and work in musical group lengths -
-  a beat, two beats, a bar.
-- **Strong positions are protected.** Every slice carries a metric weight
-  (bar downbeat highest, then beat 3, then the other beats, then off-beats),
-  and at low intensity the chance of disturbing a slice scales against it.
-  By maximum intensity the protection is gone entirely.
-- **Conservative settings hold a contiguous opening.** A low-intensity result
-  is usually "the original, and then something happens", not an even wash of
-  small edits across the whole phrase.
-- **Chunks move, not samples.** Swaps, jumps and repeats operate on groups.
-- **Jumps prefer somewhere near.** Distances are whole numbers of beats, and
-  short ones are likelier than long ones.
-- **There's a floor as well as a ceiling.** Low intensity means *few* changes,
-  not none: a variation identical to the source is a wasted slot in the batch,
-  so Flip never returns one.
+Roll is a first-class transformation, not a synonym for stutter. It takes one
+fragment and repeats it rapidly to fill a fixed region of musical time, at a
+rate expressed relative to the slice grid so it stays musical whatever the
+slice size is:
+
+- **coarser than a slot** — the roll repeats a *group* of whole slots (a 1/8
+  roll on a 1/16 grid)
+- **finer than a slot** — each slot is subdivided into 2, 3, 4, 6 or 8
+  fragments (1/32, 1/64 and beyond), which is Flip's micro-slicing, now with a
+  musical reason to be where it is
+
+Rolls vary in length (a beat, half a beat, a short burst), can run backwards,
+and can accelerate by doubling their rate as they go. They are placed by
+**musical position** in a pass of their own, independently of wherever the
+structural walk happened to be: a roll belongs at the end of a beat, a bar or
+the phrase. **Fill** weights those positions enormously; **Wild** doesn't care.
+Two rolls are never allowed to overlap.
+
+A roll always *replaces* the time it occupies. It cannot lengthen anything.
+
+### Pitch, and the key
+
+Flip reuses the app's existing key detection rather than growing a second one,
+and constrains transposition to the detected key. Moving a fragment by an
+arbitrary chromatic amount is not a musical accident, it is just wrong notes -
+in A minor, up three semitones lands on C and belongs; up one lands on A# and
+does not.
+
+The unit is **scale degrees**, not semitones, so a third is a third whether it
+happens to be three semitones or four, and small movements are strongly
+favoured over large ones with **Depth** opening up the leaps.
+
+**Pitch modes:** `Off`, `Octaves` (always safe - an octave is the same note),
+`In key` (scale-degree moves inside the detected key), `Mixed` (in-key plus
+octaves, with the occasional deliberate surprise once Depth is high).
+
+**Pitch lands on repeats and rolls**, not on scattered single slices, and as
+*melodic shapes* rather than independent random notes. A fragment repeated four
+times might come back as `original / up a third / original / up a third`, or
+climb through the scale; a roll can rise through several allowed pitches as it
+goes. Over 90% of transposed slices sit inside a repeat or a roll.
+
+**Pitch amount** keeps it a minority of the loop - it works best as an accident
+you notice, not as a wash. The detected key is shown next to the tempo and both
+the root and the mode can be corrected; detection gets the mode wrong often
+enough that this matters.
+
+### Batch diversity
+
+Eight seeds on one set of parameters explores one region of the space eight
+times: the details differ, the character doesn't, and you conclude Flip has one
+trick. So each slot in a batch gets a **profile** - a modest push in a
+different direction. One variation stays close to the original, one leans on
+phrase rearrangement, one goes after pitch, one leaves almost everything alone
+and does one big gesture, one fractures at every scale.
+
+Profiles *lean*, they don't override: with Activity at 10, nothing in the batch
+will come back busy. The order is reshuffled per batch so pressing GENERATE
+again deals fresh, but slot 1 is always the most faithful one - the top of the
+list is where you look first.
 
 ### Timing: the exported file is always exactly as long as the original
 
 This is structural rather than something the code checks afterwards. A
-variation is a list of instructions with **exactly one instruction per slice
-of the original**, and the renderer writes each one into its own pre-computed
+variation is a list of instructions with **exactly one instruction per slice of
+the original**, and the renderer writes each one into its own pre-computed
 window. There is no path through it that can produce a longer or shorter file,
-whatever a repeat or a stutter asked for - a stutter with eight fragments
-fills its slot eight times faster, it does not take eight slots.
+whatever a repeat or an eight-way roll asked for.
 
 So a four-bar 120 BPM loop comes back as a four-bar 120 BPM loop. Drag it into
 Logic and it occupies the same four bars.
-
-### Micro-editing
-
-At higher intensities Flip can work *below* the slice size: an individual
-slice gets subdivided into 2, 3, 4, 6 or 8 fragments and filled with repeats
-of one of them. On a sixteenth-note grid that's a sixty-fourth-note roll. The
-fine subdivisions only unlock as intensity rises, and only **Stutter** - where
-it's the entire point of the style - reaches for it straight away.
 
 ### Clicks, gaps and levels
 
 Flip rearranges audio; it should not damage it. The naive fix - a fade in and
 out on every slice - dips the level at every boundary and blunts every attack
-that lands on one, which is exactly what makes chopped-up audio *sound*
-chopped up. Instead:
+that lands on one, which is exactly what makes chopped-up audio *sound* chopped
+up. Instead:
 
-- A boundary where the incoming audio genuinely continues the outgoing audio
-  is left completely alone. **Stretches you didn't edit come out bit-identical
-  to the original**, including the loop seam.
-- A boundary that *is* an edit gets a real crossfade, about 1.5ms long, using
-  **pre-roll**: the source samples that naturally precede the incoming slice.
-  The outgoing tail fades out against genuine incoming material rather than
-  against silence, and the crossfade finishes *at* the boundary, so the
-  incoming slice's own attack is at full level and completely untouched.
+- A boundary where the incoming audio genuinely continues the outgoing audio is
+  left completely alone. **Stretches you didn't edit come out bit-identical to
+  the original**, including an untouched loop seam.
+- An edit boundary gets a real crossfade, about 1.5ms, using **pre-roll**: the
+  source samples that naturally precede the incoming slice. The crossfade
+  finishes *at* the boundary, so the incoming attack is at full level and
+  completely untouched.
+- Boundaries are counted at fragment level, not slice level. A roll is several
+  hard splices *inside* one slice and they click just as loudly.
 - Pre-roll that falls off either end of the file wraps around, because the
-  source is a loop - what comes before sample 0 is the loop's own tail.
-- Crossfades are linear, not constant-power, because Flip's two sides are very
-  often the same material (a repeated fragment crossfading into another copy
-  of itself) where constant-power overshoots by up to 3dB and clips the
-  export. A linear crossfade can never exceed the louder of its two inputs.
-- Boundaries are counted at fragment level, not slice level. A stutter is
-  several hard splices *inside* one slice and they click just as loudly.
-- Silence from **Sparse** is written zeros, crossfaded in and out like
-  anything else. It's a deliberate drop-out, not a hole.
+  source is a loop.
+- Crossfades are linear, not constant-power, because Flip's two sides are often
+  the same material (a repeated fragment crossfading into another copy of
+  itself) where constant-power overshoots and clips.
+- Transposition uses the app's existing duration-preserving pitch shifter, not
+  a playback-rate change, and is applied to whole contiguous regions at once. A
+  transposed region is level-guarded back to the level it came in at, and the
+  shifter is given extra audio past the region so its tail artefact lands in
+  samples that get thrown away.
+- Silence from a drop-out is written zeros, crossfaded in and out like anything
+  else. It's a deliberate rest, not a hole.
 
 ### Seeds
 
-Every variation shows its seed, and the seed box is an input, not a label.
-The same **source + settings + seed** always produces the same arrangement, so
-a take you liked is recoverable: write the number down (or read it off the
+Every variation shows its seed, and the seed box is an input, not a label. The
+same **source + settings + key + seed** always produces the same arrangement,
+so a take you liked is recoverable: write the number down (or read it off the
 exported filename), type it into any row, press Enter, and it comes back.
 
 All the randomness in Flip runs through one seeded generator - the same
 `mulberry32` used by the creative time-stretch engines. The only
-non-deterministic thing in the whole feature is where the seeds themselves
-come from.
+non-deterministic thing in the whole feature is where the seeds themselves come
+from.
 
 ### Regenerating one at a time
 
-Seven good ones and one dud shouldn't cost you the seven. The **⟳** button on
-a row replaces just that variation, in place, with a fresh take on the same
-settings.
+Seven good ones and one dud shouldn't cost you the seven. The **⟳** button on a
+row replaces just that variation, in place, keeping its profile.
 
-Changing a setting after generating doesn't throw the batch away either - the
-existing variations stay playable and are flagged **settings changed**, so you
-can still compare them against whatever you generate next.
+Changing a setting doesn't throw the batch away either - the existing
+variations stay playable and are flagged **settings changed**.
 
 ### When the tempo is wrong
 
 The detected tempo *is* the slice grid, so a half-time reading doesn't just
-mislabel the file, it halves the resolution of every variation you generate
-from it. Flip reuses the same detection the rest of the app uses, with the
-same **analysis proposes, user overrides** correction controls as Stretch:
-type a tempo, or use **½** / **×2** for the usual octave error.
+mislabel the file, it halves the resolution of every variation. Flip reuses the
+app's detection with the same **analysis proposes, user overrides** correction
+Stretch has: type a tempo, or use **½** / **×2**.
 
 Two things happen automatically:
 
@@ -811,15 +891,12 @@ Two things happen automatically:
   true 120 BPM four-bar loop comes back as 119.87 and asks for 256.3
   sixteenths - so when a whole-bar count is within reach the grid snaps to it
   and is then fitted to the file's exact length. This is what keeps bar-level
-  operations lined up with the music instead of drifting a slice further out
-  of phase every bar.
+  operations lined up with the music.
 - **When nothing musical is within reach, it says so.** A file that comes out
-  as 3.13 bars is almost always a detection failure rather than a strange
-  loop, and Flip tells you that rather than quietly generating against a grid
-  that doesn't line up.
+  as 3.13 bars is almost always a detection failure rather than a strange loop.
 
 If there's no confident tempo at all, Flip divides the loop evenly into four
-bars' worth of slices and says so. Typing a tempo switches that off.
+bars' worth of slices and says so.
 
 ### Export
 
@@ -837,11 +914,13 @@ Dusty Piano Cm 80 BPM_FLIP_03_seed458577206.wav
 ### Limits
 
 - One loop at a time. Flip is not a batch tool; it's a slot machine.
-- It rearranges **time**, not pitch or tempo. Nothing is stretched or
-  transposed - use **Stretch** or **Play nice** for that.
+- It rearranges **time and pitch**, not tempo. Nothing is time-stretched - use
+  **Stretch** or **Play nice** for that.
 - Slices are capped at 512 per loop, so a very long file at `1/32` will be
   sliced more coarsely than the setting implies.
 - It assumes 4/4.
+- Pitch needs a region of at least ~1024 samples to shift, so transpositions on
+  extremely short micro-fragments are skipped rather than smeared.
 
 ## Quick start
 

@@ -2,248 +2,487 @@
 //
 // FLIP stage 2: SLICE MAP -> TRANSFORMATION RECIPE.
 //
-// A recipe is a list of INSTRUCTIONS, not audio. One step per output slot, in output order, each
-// saying which source slice to take and what to do to it. Nothing here touches a sample; rendering
-// is a separate stage (js/flip/render.js) that can be run, re-run, thrown away and run again from
-// the same recipe, and a recipe is small enough to log, diff, describe in the UI and reproduce from
-// a seed.
+// A recipe is INSTRUCTIONS, not audio. One step per output slot, each saying which source slice to
+// take and what to do to it. Nothing here touches a sample; rendering is a separate stage
+// (js/flip/render.js) that can be run, thrown away and run again from the same recipe, and a recipe
+// is small enough to log, diff, describe in the UI and reproduce from a seed.
 //
-// That indirection is the whole reason FLIP can promise identical duration: the step list is always
-// exactly as long as the slice map, every step occupies exactly one slot's worth of time, and
-// there is no operation anywhere in this module that can add or remove a step. Repeats and stutters
-// REPLACE time, they never append it.
+// That indirection is why FLIP can promise identical duration: the step list is always exactly as
+// long as the slice map, every step occupies exactly one slot's worth of time, and nothing in this
+// module can add or remove one. Repeats and rolls REPLACE time, they never append it.
 //
-// MUSICALITY LIVES HERE, not in the operations. The operations (js/flip/operations.js) are dumb and
-// reusable - "repeat this group", "jump back from here". What makes a result sound intentional is
-// WHERE and HOW OFTEN they're applied, which is this file's job:
+// ---------------------------------------------------------------------------------------------
+// WHAT CHANGED, AND WHY
 //
-//   - work in musical chunks (a beat at a time), never per-sample or per-arbitrary-index
-//   - weight against mutating strong metric positions, hard at low intensity, barely at high
-//   - at conservative settings, protect a contiguous opening section outright, so the result reads
-//     as "the original, then something happens" rather than as an even wash of small edits
-//   - cap the number of edits, so low intensity means FEW changes as well as SMALL ones
-//   - guarantee at least one edit, because a variation identical to the source is not a variation
+// The first version walked the phrase one beat at a time and applied one operation per beat it
+// decided to touch. Every edit was therefore roughly one beat wide, everywhere, which is precisely
+// why the results sounded like generic glitch processing rather than arrangements: a remix that
+// edits uniformly has no shape. It also had no way to say "leave bar 1 completely alone".
 //
-// SEEDING: one generator, made once, consumed by everything downstream (see js/dsp/stretch/rng.js,
-// shared with the stretch engines rather than duplicated). Same source + same settings + same seed
-// is the same recipe, every time, on any machine.
+// Generation is now HIERARCHICAL and works in four passes:
+//
+//   1. PHRASE   the entry point, and whether the whole opening is held
+//   2. BARS     each bar is independently left alone or given one to three interventions, each at
+//               its own chosen scale (bar / half-bar / beat / half-beat / slice / micro)
+//   3. ROLL     a separate pass placing rolls by musical position, not by whatever was left over
+//   4. PITCH    a separate pass decorating repeats and rolls with key-constrained transposition
+//
+// Passes 3 and 4 are separate on purpose: a roll and a transposition are COLOUR applied to an
+// arrangement, not ways of arranging. Folding them into the structural walk is what made rolls turn
+// up wherever the walk happened to be rather than at the end of a bar where they belong.
+//
+// RESTRAINT IS A FIRST-CLASS OUTCOME. Bars are left untouched by explicit decision, not by failing
+// to be picked, and at low Activity most of them will be. The original material is what supplies
+// the musical coherence; FLIP should exploit that rather than feel obliged to demonstrate itself.
+//
+// THREE CONTROLS, NOT ONE:
+//   STRUCTURE  how much of the large-scale shape survives - protects bar positions, downbeats and
+//              the opening, keeps borrowed material nearby, and pushes edits to finer scales so
+//              they happen INSIDE the existing structure rather than rearranging it
+//   ACTIVITY   how often FLIP intervenes at all
+//   DEPTH      how far any single intervention goes
+//
+// SEEDING: one generator, made once, consumed by everything downstream (js/dsp/stretch/rng.js,
+// shared with the stretch engines). Same source + same settings + same key + same seed is the same
+// recipe, every time, on any machine.
 import { makeRng, hashSeed } from "../dsp/stretch/rng.js";
-import { OPERATIONS, operationByKey } from "./operations.js";
-import { resolveStyle } from "./styles.js";
-import { identitySteps, isUntouched } from "./step.js";
+import { OPERATIONS, operationByKey, FAMILIES } from "./operations.js";
+import { resolveStyle, describeIntensity } from "./styles.js";
+import { identitySteps, isUntouched, makeStep } from "./step.js";
+import { buildHierarchy, positionAppeal, levelSpan, LEVEL_LABELS } from "./hierarchy.js";
+import { pitchCandidates, choosePitch, melodicPattern, DEFAULT_PITCH_MODE, resolvePitchMode } from "./pitch-plan.js";
+import { NEUTRAL_PROFILE } from "./diversity.js";
+
+const EDIT_LEVELS = ["bar", "halfBar", "beat", "halfBeat", "slice", "micro"];
 
 function clamp01(v) {
   return Math.max(0, Math.min(1, v));
+}
+
+function pct(value, fallback = 50) {
+  const n = Number(value);
+  return clamp01((Number.isFinite(n) ? n : fallback) / 100);
+}
+
+function weightedPick(rng, candidates) {
+  const usable = candidates.filter((c) => c && c.w > 0);
+  if (!usable.length) return null;
+  const total = usable.reduce((sum, c) => sum + c.w, 0);
+  let r = rng.next() * total;
+  for (const c of usable) {
+    r -= c.w;
+    if (r <= 0) return c;
+  }
+  return usable[usable.length - 1];
 }
 
 /**
  * Generate one variation's recipe.
  *
  * @param {object} opts
- * @param {object} opts.map        a slice map (js/flip/slice-map.js)
- * @param {string} opts.style      a style key (js/flip/styles.js)
- * @param {number} opts.intensity  0..100, conservative -> destructive
+ * @param {object} opts.map            a slice map (js/flip/slice-map.js)
+ * @param {string} opts.style          a remix type key (js/flip/styles.js)
+ * @param {number} opts.structure      0..100, how much large-scale shape survives
+ * @param {number} opts.activity       0..100, how often FLIP intervenes
+ * @param {number} opts.depth          0..100, how far one intervention goes
+ * @param {number} [opts.rollAmount]   0..100
+ * @param {string} [opts.pitchMode]    off | octaves | inkey | mixed
+ * @param {number} [opts.pitchAmount]  0..100
+ * @param {{root:string, mode:string, known:boolean}} [opts.key]
+ * @param {object} [opts.profile]      a batch-diversity profile (js/flip/diversity.js)
  * @param {number|string} opts.seed
- * @param {boolean} [opts.keepDownbeats]  weight edits away from strong metric positions
- * @returns {{seed:number, style:string, intensity:number, sliceCount:number, subdivision:string, steps:object[], edits:object[]}}
  */
-export function generateRecipe({ map, style, intensity, seed, keepDownbeats = true }) {
+export function generateRecipe({ map, style, structure = 65, activity = 45, depth = 50, rollAmount = 35, pitchMode = DEFAULT_PITCH_MODE, pitchAmount = 20, key = null, profile = NEUTRAL_PROFILE, seed }) {
   const st = resolveStyle(style);
-  const t = clamp01((Number(intensity) || 0) / 100);
+  const prof = profile || NEUTRAL_PROFILE;
   const rng = makeRng(hashSeed(seed));
+  const hier = buildHierarchy(map);
   const steps = identitySteps(map.count);
   const edits = [];
+  const plan = { bars: [], phrase: [] };
 
-  // Severity is what every operation reads to decide "how far": jump distance, group size, stutter
-  // subdivision, how many repeats. Styles scale it so Chaos at 50 is already rougher than Shuffle
-  // at 50, without the intensity slider having to mean different things per style.
-  const severity = clamp01(t * st.severityScale);
+  // The user's three controls, bent by the remix type's personality and then by this variation's
+  // slot in the batch. Clamped, so no combination of multipliers can escape the range the sliders
+  // describe - a type or profile can lean, it can't override.
+  const S = clamp01(pct(structure, 65) * (st.structureBias || 1) * (prof.structure || 1));
+  const A = clamp01(pct(activity, 45) * (st.activityBias || 1) * (prof.activity || 1));
+  const D = clamp01(pct(depth, 50) * (st.depthBias || 1) * (prof.depth || 1));
+  const roll = clamp01(pct(rollAmount, 35) * (st.rollBias || 1) * (prof.roll || 1));
+  const pitchRate = clamp01(pct(pitchAmount, 20) * (st.pitchBias || 1) * (prof.pitch || 1));
 
-  // How often a chunk gets touched at all. The floor matters: at intensity 0 this is still non-zero,
-  // because "generate me a variation" that returns the original is a bug, not conservatism.
-  const baseRate = clamp01((0.18 + 0.62 * t) * st.rateScale);
+  /** "Would this type do X at this depth, on this material?" Shared by the pick lists and by the
+   *  composite operations that borrow a technique from another one (see ctx.allows). */
+  function allows(opKey, node) {
+    const op = operationByKey(opKey);
+    if (!op) return false;
+    if ((st.opWeights[opKey] || 0) <= 0) return false;
+    const gate = st.unlocks && st.unlocks[opKey] != null ? st.unlocks[opKey] : op.minDepth || 0;
+    if (D < gate) return false;
+    return op.fits(map, node || { start: 0, end: map.count, span: map.count });
+  }
 
-  // Chunk = one beat, or one slice when the subdivision IS the beat. Anchoring every operation to a
-  // beat boundary is most of what stops results sounding like an accident rather than an edit.
-  const chunk = Math.max(1, map.perBeat);
-  const chunkCount = Math.ceil(map.count / chunk);
+  const ctx = { rng, map, hier, steps, structure: S, activity: A, depth: D, style: st, allows };
 
   /**
-   * "Is this personality allowed to do X, at this intensity, on this material?"
-   *
-   * The single answer, used both to build the pick list and - via ctx.allows - by the composite
-   * operations that borrow a technique from another one. Without that second use the gates leak:
-   * call-and-response would silence its response under REPEAT (silence is SPARSE's whole identity)
-   * and keep the downbeat would stutter under MIXED at intensity 15 (micro-editing is meant to
-   * unlock much later). An operation may only reach for a technique the style itself would reach for.
+   * Log what happened. An operation may report its OWN region via `at`/`span` in its detail - a roll
+   * usually fills only part of the node it was chosen for - and that has to win over the node's
+   * extent, because pass 4 transposes by exactly these coordinates. Recording the node's start with
+   * the roll's length pointed the pitch pass at slots the roll never touched.
    */
-  function allows(key) {
-    const op = operationByKey(key);
-    if (!op) return false;
-    const weight = st.weights[key] || 0;
-    if (weight <= 0) return false;
-    // Gated operations (micro-editing, silence, wholesale displacement) only unlock as intensity
-    // rises - unless this style is ABOUT that operation, in which case it's the point of picking it.
-    const gate = st.unlocks && st.unlocks[key] != null ? st.unlocks[key] : op.minT || 0;
-    if (t < gate) return false;
-    return op.fits(map);
+  function record(op, node, detail, level) {
+    const d = detail || {};
+    edits.push({ op: op.key, label: op.label, family: op.family, level, at: d.at != null ? d.at : node.start, span: d.span != null ? d.span : node.span, ...d });
+    return edits[edits.length - 1];
   }
 
-  // `new-entry` is deliberately excluded: it always rewrites the opening, so firing it from a
-  // mid-phrase anchor would be meaningless. It gets its own single, explicit chance below.
-  const available = OPERATIONS.filter((op) => op.key !== "new-entry" && allows(op.key));
-
-  if (!available.length) {
-    return { seed: hashSeed(seed), style: st.key, intensity: Math.round(t * 100), keepDownbeats: !!keepDownbeats, sliceCount: map.count, subdivision: map.subdivision, steps, edits };
-  }
-
-  const totalWeight = available.reduce((sum, op) => sum + (st.weights[op.key] || 0), 0);
-
-  function pickOperation() {
-    let r = rng.next() * totalWeight;
-    for (const op of available) {
-      r -= st.weights[op.key] || 0;
-      if (r <= 0) return op;
-    }
-    return available[available.length - 1];
-  }
-
-  const ctx = { rng, map, steps, t, severity, style: st, allows, keepDownbeats };
-
-  // ---- the opening ----------------------------------------------------------------------------
+  // =============================================================================================
+  // Pass 1 - the phrase
+  // =============================================================================================
   //
-  // Two competing truths, resolved here rather than left to chance:
+  // Two competing truths about the opening, resolved explicitly rather than left to chance.
   //
-  // HOLD IT. The example in the brief - 1 2 3 4 5 6 5 6 - is not "a few small random edits", it's
-  // "the first half is the original, then it breaks". Getting that shape reliably at low intensity
-  // needs an explicit contiguous hold: a per-chunk rate low enough to usually leave the opening
-  // alone is also too low to do anything interesting later.
-  //
-  // MOVE IT. Held too faithfully and every variation in a batch announces itself identically for
-  // the first beat, which is the one thing that makes eight alternatives feel like one. Measured
-  // before this existed: at intensity 45 the opening slice changed in 2-13% of variations, so a
-  // batch of eight essentially always started the same way. Relocating the entry to another bar
-  // line is the fix that doesn't cost downbeat preservation - see the "new-entry" operation.
-  //
-  // They are mutually exclusive by construction, and which one is likelier flips as intensity
-  // rises: conservative settings mostly hold, destructive settings mostly move.
+  // HOLD IT: a variation that keeps its first bars and then breaks reads as a version of the loop.
+  // MOVE IT: held too faithfully and every variation in a batch announces itself identically for
+  // the first beat, which is the fastest way to make eight alternatives feel like one.
   let protectUntil = 0;
-  const entryOp = operationByKey("new-entry");
-  const entryRate = clamp01((0.08 + 0.55 * t) * (st.weights["new-entry"] || 0));
-  const movedEntry = allows("new-entry") && entryOp.fits(map) && rng.next() < entryRate;
+  // How much of the opening the entry relocation rewrote, so the bar pass below doesn't go on to
+  // report those bars as untouched - a description that says "bars 1-2 untouched" next to "25%
+  // changed" is worse than no description.
+  let entryRewrote = 0;
+  const entryRate = clamp01((0.1 + 0.6 * (1 - S)) * (0.4 + 1.2 * A));
+  const canMoveEntry = map.count >= map.perBar * 2 && rng.next() < entryRate;
 
-  if (movedEntry) {
-    const result = entryOp.apply({ ...ctx, at: 0 });
-    if (result) edits.push({ op: entryOp.key, label: entryOp.label, at: 0, ...result });
-  } else if (map.count >= map.perBar * 2 && rng.next() < 0.78 - 0.68 * t) {
-    // A whole number of bars, so the hold ends where the ear expects a change. Half the phrase is
-    // right at conservative settings and far too much at destructive ones, where it would leave a
-    // two-bar dead zone in something the user asked to be wrecked.
-    const holdBars = t < 0.35 ? Math.max(1, Math.floor(map.bars / 2)) : 1;
+  if (canMoveEntry) {
+    // Bar-aligned while structure is being preserved, so the loop still opens ON a downbeat - just
+    // not the one it opened on. With structure low, any beat will do.
+    const align = S > rng.next() ? Math.max(1, map.perBar) : Math.max(1, map.perBeat);
+    const slots = Math.floor(map.count / align);
+    if (slots >= 2) {
+      const beat = Math.max(1, map.perBeat);
+      const len = weightedPick(rng, [
+        { len: beat, w: 1.3 - D },
+        { len: Math.max(1, map.perBar >> 1), w: 0.6 + 0.4 * D },
+        { len: Math.max(1, map.perBar), w: 0.15 + 1.1 * D },
+      ]);
+      const span = len ? Math.min(len.len, Math.floor(map.count / 2)) : beat;
+      const from = (1 + rng.int(slots - 1)) * align;
+      if (span >= 1 && from + span <= map.count) {
+        for (let i = 0; i < span; i++) steps[i] = makeStep(from + i, "new-entry");
+        edits.push({ op: "new-entry", label: "start somewhere else", family: "structural", level: "phrase", at: 0, span, from });
+        plan.phrase.push(`opens from ${Math.floor(from / Math.max(1, map.perBar)) + 1}`);
+        entryRewrote = span;
+      }
+    }
+  } else if (map.count >= map.perBar * 2 && rng.next() < 0.2 + 0.6 * S) {
+    // A whole number of bars, so the hold ends where the ear expects a change.
+    const holdBars = S > 0.6 && rng.bool(0.5) ? Math.max(1, Math.floor(map.bars / 2)) : 1;
     protectUntil = Math.min(map.count - map.perBeat, holdBars * map.perBar);
+    plan.phrase.push(`holds ${holdBars} bar${holdBars === 1 ? "" : "s"}`);
   }
 
-  // Which chunks this variation is even allowed to touch, after the protected opening.
+  // =============================================================================================
+  // Pass 2 - bars
+  // =============================================================================================
+
+  const bars = hier.levels.bar.length ? hier.levels.bar : hier.levels.phrase;
+
+  /** Which hierarchy scale to work at. Structure pushes coarse scales away (edits happen INSIDE the
+   *  existing structure); depth pulls fine ones in (micro-slicing is a deep intervention). */
+  function pickLevel(bar) {
+    const scale = {
+      bar: 0.2 + 1.7 * (1 - S),
+      halfBar: 0.45 + 1.1 * (1 - S),
+      beat: 1,
+      halfBeat: 0.75 + 0.6 * D,
+      slice: 0.3 + 1.3 * D,
+      micro: 0.1 + 1.2 * D,
+    };
+    const candidates = EDIT_LEVELS.filter((level) => levelSpan(map, level) > 0 && hier.levels[level] && hier.levels[level].length).map((level) => ({
+      level,
+      w: (st.levelWeights[level] || 0) * (prof.levels && prof.levels[level] != null ? prof.levels[level] : 1) * scale[level],
+    }));
+    const picked = weightedPick(rng, candidates);
+    return picked ? picked.level : "beat";
+  }
+
+  function pickNode(bar, level) {
+    if (level === "bar") return bar;
+    // MICRO has no span of its own: it is a slice worked at sub-slice resolution, which is what the
+    // stutter and roll counts express. Treating it as a slice here keeps the level list honest.
+    const effective = level === "micro" ? "slice" : level;
+    const children = hier.childrenOf(bar, effective);
+    if (!children.length) return bar;
+    const candidates = children.map((node) => ({ node, w: positionAppeal(node, st.positionBias) * (1 - S * 0.55 * node.strength) }));
+    const picked = weightedPick(rng, candidates);
+    return picked ? picked.node : children[0];
+  }
+
+  function pickOperation(node, level) {
+    const family = weightedPick(
+      rng,
+      FAMILIES.filter((f) => f !== "roll").map((f) => ({
+        family: f,
+        w: (st.familyWeights[f] || 0) * (prof.families && prof.families[f] != null ? prof.families[f] : 1),
+      }))
+    );
+    const wanted = family ? family.family : "structural";
+    const candidates = OPERATIONS.filter((op) => op.family === wanted && op.key !== "roll" && op.levels.includes(level) && allows(op.key, node)).map((op) => ({
+      op,
+      w: st.opWeights[op.key] || 0,
+    }));
+    const picked = weightedPick(rng, candidates);
+    return picked ? picked.op : null;
+  }
+
+  for (const bar of bars) {
+    const entry = { index: bar.index, treatment: "untouched", ops: [] };
+    plan.bars.push(entry);
+    // Bars the relocated entry already rewrote are not untouched, whatever happens next.
+    if (entryRewrote > bar.start) entry.treatment = "edited";
+
+    if (bar.start < protectUntil) continue;
+
+    // Should anything happen in this bar at all? Structure protects the first bar and the strong
+    // positions; the remix type's position bias pulls activity towards wherever it likes to work.
+    const appeal = positionAppeal(bar, st.positionBias);
+    const protection = S * (bar.isFirst ? 0.5 : 0.2);
+    if (rng.next() >= clamp01(A * appeal * (1 - protection))) continue;
+
+    // One intervention usually, two or three when the loop is busy or the settings are deep.
+    let interventions = 1;
+    if (rng.next() < A * 0.6) interventions++;
+    if (D > 0.6 && rng.next() < A * 0.35) interventions++;
+
+    for (let i = 0; i < interventions; i++) {
+      const level = pickLevel(bar);
+      const node = pickNode(bar, level);
+      const op = pickOperation(node, level);
+      if (!op) continue;
+      const detail = op.apply({ ...ctx, node, level });
+      if (!detail) continue;
+      entry.treatment = "edited";
+      entry.ops.push({ key: op.key, label: op.label, level });
+      record(op, node, { ...detail, levelLabel: LEVEL_LABELS[level] }, level);
+    }
+  }
+
+  // =============================================================================================
+  // Pass 3 - rolls
+  // =============================================================================================
   //
-  // ANCHORS ARE THE REAL MECHANISM. Weighting the *choice* of chunk against strong positions barely
-  // moves the result on its own, because operations work in beat multiples from beat boundaries, so
-  // downbeat material lands on downbeats however the anchors are picked - it's the grid, not the
-  // weighting, that preserves them. Turning downbeat preservation off therefore has to take the
-  // anchors off the grid as well, otherwise the setting reads as broken: measured with only the
-  // weighting relaxed, it changed how often a downbeat survived intact by four percentage points.
-  const eligible = [];
-  for (let c = 0; c < chunkCount; c++) {
-    const base = c * chunk;
-    const at = keepDownbeats || chunk < 2 ? base : Math.min(map.count - 1, base + rng.int(chunk));
-    if (at >= protectUntil && at < map.count) eligible.push(at);
-  }
-  if (!eligible.length) eligible.push(Math.max(0, map.count - chunk));
+  // Placed by musical position, independently of where the structural walk happened to be. A roll
+  // belongs at the end of a beat, the end of a bar or the end of the phrase; FILL weights those
+  // enormously, WILD doesn't care. Rolls always REPLACE the time they occupy.
+  const rollOp = operationByKey("roll");
+  if (roll > 0 && rollOp) {
+    const barCount = Math.max(1, bars.length);
+    const expected = roll * barCount * (0.45 + 0.9 * A);
+    let rolls = Math.floor(expected);
+    if (rng.next() < expected - rolls) rolls++;
+    rolls = Math.min(rolls, barCount * 2);
 
-  // A CEILING AND A FLOOR. The ceiling is what makes low intensity mean FEW changes rather than
-  // just small ones. The floor is what makes the slider honest: a probabilistic walk over eight
-  // beats at a 45% rate lands on one edit often enough that half a batch comes back as "the
-  // original with a hiccup in it", which is a waste of eight slots and reads as the tool not
-  // working. The top-up pass below spends whatever the walk didn't.
-  const maxEdits = Math.max(1, Math.round(eligible.length * baseRate * 1.6));
-  const minEdits = Math.max(1, Math.min(maxEdits, Math.round(eligible.length * baseRate * 0.7)));
-
-  function attempt(at) {
-    const op = pickOperation();
-    const result = op.apply({ ...ctx, at });
-    if (!result) return false;
-    edits.push({ op: op.key, label: op.label, at, ...result });
-    return true;
-  }
-
-  for (const at of eligible) {
-    if (edits.length >= maxEdits) break;
-    // Metric protection: the stronger the position, the less likely it is to be disturbed - and the
-    // higher the intensity, the less that matters. At t = 1 this term disappears on its own.
-    //
-    // Switched off entirely, every position is equally fair game, which is the point: preserving
-    // downbeats is a musical preference, not a law, and a tool whose whole premise is "give me this
-    // loop back, but wrong" has no business refusing to touch the strong beats when asked.
-    const strength = map.slices[at] ? map.slices[at].strength : 0.5;
-    const protection = keepDownbeats ? (0.72 - 0.72 * t) * strength : 0;
-    if (rng.next() >= baseRate * (1 - protection)) continue;
-    attempt(at);
+    const bias = st.rollPosition || st.positionBias;
+    const levels = ["beat", "halfBeat"].filter((l) => hier.levels[l] && hier.levels[l].length);
+    // Two rolls on top of each other is not two rolls, it is one mangled one - the second overwrites
+    // part of the first, leaving a region that is recorded as a roll but no longer sounds like one
+    // (and which pass 4 would then transpose as though it did).
+    const rolled = new Set();
+    for (let i = 0; i < rolls && levels.length; i++) {
+      const level = levels[rng.int(levels.length)];
+      const candidates = hier.levels[level]
+        .filter((node) => node.start >= protectUntil)
+        .filter((node) => {
+          for (let k = node.start; k < node.end; k++) if (rolled.has(k)) return false;
+          return true;
+        })
+        .map((node) => ({ node, w: positionAppeal(node, bias) * (node.endsBar ? 1 : 0.55) * (1 - S * 0.35 * node.strength) }));
+      const picked = weightedPick(rng, candidates);
+      if (!picked) continue;
+      const detail = rollOp.apply({ ...ctx, node: picked.node, level });
+      if (!detail) continue;
+      for (let k = picked.node.start; k < picked.node.end; k++) rolled.add(k);
+      const bar = plan.bars[Math.floor((detail.at != null ? detail.at : picked.node.start) / Math.max(1, map.perBar))];
+      if (bar) {
+        bar.treatment = "edited";
+        bar.ops.push({ key: "roll", label: "roll", level });
+      }
+      record(rollOp, picked.node, { ...detail, levelLabel: LEVEL_LABELS[level] }, level);
+    }
   }
 
-  // Top-up. Not every operation fits every anchor (a bar-long swap near the end has nowhere to go),
-  // so a refusal costs an edit the intensity had already budgeted for; this spends what's left,
-  // still only inside the eligible region and still one operation per attempt. The try budget stops
-  // a short phrase where nothing fits from spinning.
-  for (let guard = 0; edits.length < minEdits && guard < 40; guard++) {
-    attempt(eligible[rng.int(eligible.length)]);
+  // =============================================================================================
+  // Pass 4 - pitch
+  // =============================================================================================
+  //
+  // Decorates what the arrangement already produced rather than transposing at random. Repeats and
+  // rolls are the targets, because a transposed repetition is a melodic idea ("the same figure, a
+  // third up") while a transposed lone slice is usually just a wrong note.
+  const resolvedPitchMode = resolvePitchMode(pitchMode).key;
+  const candidates = resolvedPitchMode === "off" ? [] : pitchCandidates({ mode: key && key.mode, pitchMode: resolvedPitchMode, depth: D });
+  let pitched = 0;
+
+  if (pitchRate > 0 && candidates.length) {
+    // (a) Rolls: a roll that rises through the scale as it goes is one of the most useful accidents
+    //     this whole feature can produce.
+    for (const edit of edits.filter((e) => e.op === "roll")) {
+      if (rng.next() >= pitchRate) continue;
+      const span = Math.min(edit.span, map.count - edit.at);
+      if (span < 2) continue;
+      const pattern = melodicPattern(rng, span, candidates, { depth: D });
+      for (let i = 0; i < span; i++) {
+        if (!pattern[i]) continue;
+        steps[edit.at + i].pitch = pattern[i];
+        pitched++;
+      }
+    }
+
+    // (b) Repetitions: find runs of identical source material and shape them melodically.
+    for (const edit of edits.filter((e) => e.family === "structural" && e.span >= 2)) {
+      if (rng.next() >= pitchRate) continue;
+      const parts = edit.op === "aba" ? Math.max(2, edit.parts || 3) : 2;
+      const unit = Math.floor(edit.span / parts);
+      // A part shorter than two slices can't carry a melodic idea - it is a single transposed slice
+      // wearing a pattern's clothes, and those are exactly what this pass exists to avoid making.
+      if (unit < 2) continue;
+      const pattern = melodicPattern(rng, parts, candidates, { depth: D });
+      for (let p = 0; p < parts; p++) {
+        if (!pattern[p]) continue;
+        for (let i = 0; i < unit; i++) {
+          const at = edit.at + p * unit + i;
+          if (at >= map.count) break;
+          steps[at].pitch = pattern[p];
+          pitched++;
+        }
+      }
+    }
+
+    // (c) A scattering of individual slices. Deliberately last and deliberately rare: a transposed
+    //     lone slice is usually just a wrong note, where a transposed REPETITION is a melodic idea,
+    //     so this stays far below the passes above it. At a quarter of the rate it swamped them -
+    //     measured at 93% of all transpositions landing on a single slice, which is the wash this
+    //     whole design is meant to avoid. At this rate it is roughly one slice every three
+    //     variations: seasoning, which is what it was always supposed to be.
+    const loneRate = pitchRate * 0.006;
+    for (let i = 0; i < map.count; i++) {
+      if (steps[i].pitch || steps[i].silent) continue;
+      if (map.slices[i].isDownbeat && S > rng.next()) continue;
+      if (rng.next() >= loneRate) continue;
+      steps[i].pitch = choosePitch(rng, candidates);
+      pitched++;
+    }
   }
+
+  // A variation identical to the source is a wasted slot in the batch. Every pass above can
+  // legitimately decline - Activity at 0 with Rolls and Pitch off leaves nothing with permission to
+  // fire - so the guarantee is made here rather than assumed. One intervention, in the second half
+  // where a change reads as intended, at whatever scale this type prefers.
+  if (!edits.length) {
+    const fallbackBars = bars.length > 1 ? bars.slice(Math.floor(bars.length / 2)) : bars;
+    for (let tries = 0; tries < 12 && !edits.length; tries++) {
+      const bar = fallbackBars[rng.int(fallbackBars.length)];
+      const level = pickLevel(bar);
+      const node = pickNode(bar, level);
+      const op = pickOperation(node, level);
+      if (!op) continue;
+      const detail = op.apply({ ...ctx, node, level });
+      if (!detail) continue;
+      const entry = plan.bars[bar.index];
+      if (entry) {
+        entry.treatment = "edited";
+        entry.ops.push({ key: op.key, label: op.label, level });
+      }
+      record(op, node, { ...detail, levelLabel: LEVEL_LABELS[level] }, level);
+    }
+  }
+
+  if (pitched) {
+    edits.push({ op: "pitch", label: resolvedPitchMode === "octaves" ? "octave shifts" : "pitch", family: "pitch", level: "slice", at: 0, span: pitched, slices: pitched });
+  }
+
+  // A single "how far is this from the source" number, derived rather than asked for, so a row can
+  // be sorted by ear at a glance.
+  const intensity = Math.round(100 * clamp01(A * 0.45 + D * 0.35 + (1 - S) * 0.2));
 
   return {
     seed: hashSeed(seed),
     style: st.key,
-    intensity: Math.round(t * 100),
-    keepDownbeats: !!keepDownbeats,
+    profile: prof.key,
+    structure: Math.round(S * 100),
+    activity: Math.round(A * 100),
+    depth: Math.round(D * 100),
+    rollAmount: Math.round(roll * 100),
+    pitchMode: resolvedPitchMode,
+    pitchAmount: Math.round(pitchRate * 100),
+    key: key && key.known ? { root: key.root, mode: key.mode } : null,
+    intensity,
     sliceCount: map.count,
     subdivision: map.subdivision,
     steps,
     edits,
+    plan,
   };
 }
 
-/** True when the recipe leaves the source completely untouched (nothing to hear, nothing to export). */
+/** True when the recipe leaves the source completely untouched. */
 export function isIdentityRecipe(recipe) {
   if (!recipe || !recipe.steps) return true;
   return recipe.steps.every((s, i) => isUntouched(s, i));
 }
 
-/** How much of the original survives in place, 0..1 - the headline "how far from the source is this?". */
+/** How much of the original survives in place, 0..1. */
 export function recipeDeparture(recipe) {
   if (!recipe || !recipe.steps || !recipe.steps.length) return 0;
   let intact = 0;
-  for (let i = 0; i < recipe.steps.length; i++) {
-    if (isUntouched(recipe.steps[i], i)) intact++;
-  }
+  for (let i = 0; i < recipe.steps.length; i++) if (isUntouched(recipe.steps[i], i)) intact++;
   return 1 - intact / recipe.steps.length;
 }
 
 /**
- * "repeat group ×2 · jump back · stutter" - what actually happened, in the order it happened,
- * de-duplicated into counts. Short enough to sit on a variation row.
+ * What actually happened, bar by bar - "bar 1 untouched · bar 2 repeat, roll · bar 3 substitute".
+ *
+ * Bar-wise rather than a flat tally because that is how the result is heard, and because seeing
+ * which bars were left alone is the fastest way to judge whether a variation is worth auditioning.
  */
 export function describeRecipe(recipe) {
-  if (!recipe || !recipe.edits || !recipe.edits.length) return "untouched";
-  const counts = new Map();
-  for (const edit of recipe.edits) {
-    const label = edit.label || edit.op;
-    counts.set(label, (counts.get(label) || 0) + 1);
+  if (!recipe) return "untouched";
+  const plan = recipe.plan;
+  if (!plan || !plan.bars || !plan.bars.length) {
+    if (!recipe.edits || !recipe.edits.length) return "untouched";
+    const counts = new Map();
+    for (const edit of recipe.edits) counts.set(edit.label, (counts.get(edit.label) || 0) + 1);
+    return [...counts.entries()].map(([label, n]) => (n > 1 ? `${label} ×${n}` : label)).join(" · ");
   }
-  return [...counts.entries()].map(([label, n]) => (n > 1 ? `${label} ×${n}` : label)).join(" · ");
+
+  const parts = [];
+  if (plan.phrase && plan.phrase.length) parts.push(plan.phrase.join(", "));
+
+  // Consecutive untouched bars collapse - "bars 1-2 untouched" rather than the same word twice.
+  let run = 0;
+  const flush = (upto) => {
+    if (!run) return;
+    parts.push(run === 1 ? `bar ${upto} untouched` : `bars ${upto - run + 1}-${upto} untouched`);
+    run = 0;
+  };
+  plan.bars.forEach((bar, i) => {
+    const n = i + 1;
+    if (bar.treatment === "untouched") {
+      run++;
+      return;
+    }
+    flush(n - 1);
+    const labels = [...new Set(bar.ops.map((o) => o.label))];
+    // A bar rewritten only by the phrase-level entry move has no ops of its own; the opening is
+    // already named in plan.phrase, so naming the bar again would just repeat it.
+    if (labels.length) parts.push(`bar ${n} ${labels.join(", ")}`);
+  });
+  flush(plan.bars.length);
+
+  const pitch = (recipe.edits || []).find((e) => e.op === "pitch");
+  if (pitch) parts.push(pitch.label);
+  return parts.join(" · ") || "untouched";
 }
 
-/**
- * The step list as a readable sequence - "1 2 3 4 5 6 5 6" for the brief's own example. Used for
- * the row's tooltip and for tests; long recipes are elided in the middle rather than truncated, so
- * the end (where most of the interesting material ends up) is still visible.
- */
+/** The step list as a readable sequence, for the row tooltip and for tests. */
 export function recipePattern(recipe, maxSlices = 64) {
   if (!recipe || !recipe.steps) return "";
   const token = (s) => {
@@ -251,6 +490,7 @@ export function recipePattern(recipe, maxSlices = 64) {
     let out = String(s.src + 1);
     if (s.reverse) out = `<${out}`;
     if (s.stutter) out += `×${s.stutter}`;
+    if (s.pitch) out += `${s.pitch > 0 ? "+" : ""}${s.pitch}`;
     return out;
   };
   const steps = recipe.steps;
@@ -260,11 +500,24 @@ export function recipePattern(recipe, maxSlices = 64) {
   return `${head} … ${tail}`;
 }
 
-/** Everything that decides what a recipe renders to. Used to spot a stale variation after a settings change. */
+/** Everything that decides what a recipe renders to - used to spot a stale variation. */
 export function recipeSignature(recipe, map) {
   if (!recipe) return "";
-  return JSON.stringify([recipe.seed, recipe.style, recipe.intensity, !!recipe.keepDownbeats, map ? map.subdivision : recipe.subdivision, map ? map.count : recipe.sliceCount, map ? Math.round((map.bpm || 0) * 100) : 0]);
+  return JSON.stringify([
+    recipe.seed,
+    recipe.style,
+    recipe.structure,
+    recipe.activity,
+    recipe.depth,
+    recipe.rollAmount,
+    recipe.pitchMode,
+    recipe.pitchAmount,
+    recipe.key,
+    map ? map.subdivision : recipe.subdivision,
+    map ? map.count : recipe.sliceCount,
+    map ? Math.round((map.bpm || 0) * 100) : 0,
+  ]);
 }
 
-export { operationByKey };
+export { operationByKey, describeIntensity };
 export { makeStep, cloneStep, identitySteps } from "./step.js";

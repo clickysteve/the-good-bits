@@ -32,7 +32,9 @@
 import { createSliceMap, sliceMapReadiness, describeSliceMap, SUBDIVISIONS, DEFAULT_SUBDIVISION, resolveSubdivision } from "./slice-map.js";
 import { generateRecipe, describeRecipe, recipePattern, recipeDeparture } from "./recipe.js";
 import { renderVariationAudio } from "./render.js";
-import { STYLES, DEFAULT_STYLE, resolveStyle, describeIntensity } from "./styles.js";
+import { STYLES, DEFAULT_STYLE, resolveStyle, describeIntensity, describeStructure, describeActivity, describeDepth } from "./styles.js";
+import { PITCH_MODES, DEFAULT_PITCH_MODE, resolvePitchMode, resolveKey, NOTE_NAMES, formatKey } from "./pitch-plan.js";
+import { profilesForBatch } from "./diversity.js";
 import { variationFileName, batchFolderName, uniqueName } from "./naming.js";
 import { createVariationRow } from "./variation-row.js";
 import { makeRng } from "../dsp/stretch/rng.js";
@@ -89,10 +91,22 @@ export function createFlip(deps) {
     status: "empty", // empty | decoding | analysing | ready | error
     error: null,
     subdivision: DEFAULT_SUBDIVISION,
-    intensity: 45,
     style: DEFAULT_STYLE,
-    // A musical preference, not a law - see the checkbox in the controls panel.
-    keepDownbeats: true,
+    // THREE controls, not one. See js/flip/recipe.js for what each actually does; the short version
+    // is that a single "intensity" conflated "how much of the loop is touched" with "how far each
+    // edit goes" with "is the large-scale shape allowed to change", and those are three different
+    // musical intentions that people want in different combinations. Structure 85 / Activity 25 /
+    // Depth 75 - recognisably the original, mostly left alone, but occasionally does something
+    // dramatic - is not expressible with one slider at all.
+    structure: 65,
+    activity: 45,
+    depth: 50,
+    rollAmount: 35,
+    pitchMode: DEFAULT_PITCH_MODE,
+    pitchAmount: 20,
+    // Manual key correction, same "analysis proposes, user overrides" split as the tempo above it.
+    keyRoot: null,
+    keyMode: null,
     batchSize: DEFAULT_BATCH_SIZE,
     bitDepth: DEFAULT_BIT_DEPTH,
     looping: true,
@@ -192,10 +206,85 @@ export function createFlip(deps) {
   const tempoNote = el("span", "flip-tempo-note");
   tempoRow.append(bpmInput, halveBtn, doubleBtn, resetBpmBtn, tempoNote);
   loaded.appendChild(tempoRow);
+
+  // Key sits with the loop rather than with the pitch controls, for the same reason tempo does:
+  // it's a fact about the source, not a setting. Detection proposes; these override. Nothing here
+  // is a music-theory interface - a root and a mode is all the pitch planner needs.
+  const keyRow = el("div", "flip-tempo-row");
+  keyRow.appendChild(el("span", "flip-tempo-label", "Key"));
+  const keyRootSelect = el("select", "flip-key-select");
+  const anyOpt = el("option", null, "—");
+  anyOpt.value = "";
+  keyRootSelect.appendChild(anyOpt);
+  for (const note of NOTE_NAMES) {
+    const opt = el("option", null, note);
+    opt.value = note;
+    keyRootSelect.appendChild(opt);
+  }
+  const keyModeSelect = el("select", "flip-key-select");
+  for (const mode of ["minor", "major"]) {
+    const opt = el("option", null, mode);
+    opt.value = mode;
+    keyModeSelect.appendChild(opt);
+  }
+  const keyNote = el("span", "flip-tempo-note");
+  const onKeyChange = () => {
+    state.keyRoot = keyRootSelect.value || null;
+    state.keyMode = keyModeSelect.value || null;
+    save();
+    markStale();
+    render();
+  };
+  keyRootSelect.addEventListener("change", onKeyChange);
+  keyModeSelect.addEventListener("change", onKeyChange);
+  keyRow.append(keyRootSelect, keyModeSelect, keyNote);
+  loaded.appendChild(keyRow);
   sourcePanel.appendChild(loaded);
   root.appendChild(sourcePanel);
 
   // ---- controls ----------------------------------------------------------
+
+  /** One labelled slider with a live word next to it - there are five of these now. */
+  function makeSlider({ id, label, hint, value, describe, onChange }) {
+    const field = el("div", "field flip-field");
+    const labelEl = el("label", null, label);
+    labelEl.htmlFor = id;
+    field.appendChild(labelEl);
+    const row = el("div", "slider-row");
+    const slider = el("input");
+    slider.id = id;
+    slider.type = "range";
+    slider.min = "0";
+    slider.max = "100";
+    slider.step = "1";
+    slider.value = String(value);
+    const number = el("input", "slider-number");
+    number.type = "number";
+    number.min = "0";
+    number.max = "100";
+    number.step = "1";
+    number.value = String(value);
+    const word = el("span", "flip-slider-word");
+    row.append(slider, number, word);
+    field.appendChild(row);
+    if (hint) field.appendChild(el("p", "mod-note flip-slider-hint", hint));
+
+    const commit = (raw) => {
+      const v = Math.max(0, Math.min(100, Math.round(Number(raw) || 0)));
+      onChange(v);
+    };
+    slider.addEventListener("input", () => commit(slider.value));
+    number.addEventListener("change", () => commit(number.value));
+
+    return {
+      field,
+      sync(v) {
+        if (document.activeElement !== slider) slider.value = String(v);
+        if (document.activeElement !== number) number.value = String(v);
+        word.textContent = describe ? describe(v) : "";
+      },
+    };
+  }
 
   const controlsPanel = el("section", "flip-panel flip-controls");
   const controlsHead = el("div", "flip-panel-head");
@@ -204,6 +293,68 @@ export function createFlip(deps) {
   controlsHead.appendChild(gridSummary);
   controlsPanel.appendChild(controlsHead);
 
+  // REMIX TYPE first: it decides which hierarchy scales and which transformation families are in
+  // play at all, so the three sliders below are read as modifiers of it rather than as peers.
+  const styleField = el("div", "field flip-field");
+  styleField.appendChild(el("label", null, "Remix type"));
+  const styleChips = el("div", "flip-chips");
+  const styleButtons = new Map();
+  for (const style of STYLES) {
+    const chip = el("button", "flip-chip", style.label);
+    chip.type = "button";
+    chip.title = style.blurb;
+    chip.addEventListener("click", () => setStyle(style.key));
+    styleChips.appendChild(chip);
+    styleButtons.set(style.key, chip);
+  }
+  styleField.appendChild(styleChips);
+  const styleBlurb = el("p", "mod-note flip-style-blurb");
+  styleField.appendChild(styleBlurb);
+  controlsPanel.appendChild(styleField);
+
+  // The three that matter most, in the order you reach for them.
+  const structureSlider = makeSlider({
+    id: "flip-structure",
+    label: "Structure",
+    hint: "How much of the large-scale shape survives. High keeps bars where they are and edits inside them; low lets bars move, repeat and be substituted wholesale.",
+    value: state.structure,
+    describe: describeStructure,
+    onChange: (v) => setParam("structure", v),
+  });
+  controlsPanel.appendChild(structureSlider.field);
+
+  const activitySlider = makeSlider({
+    id: "flip-activity",
+    label: "Activity",
+    hint: "How often FLIP intervenes at all. Low leaves whole bars untouched - which is usually what makes a variation usable.",
+    value: state.activity,
+    describe: describeActivity,
+    onChange: (v) => setParam("activity", v),
+  });
+  controlsPanel.appendChild(activitySlider.field);
+
+  const depthSlider = makeSlider({
+    id: "flip-depth",
+    label: "Depth",
+    hint: "How far any one intervention goes. Low substitutes a neighbour; high jumps across the phrase, subdivides into micro-slices and reverses.",
+    value: state.depth,
+    describe: describeDepth,
+    onChange: (v) => setParam("depth", v),
+  });
+  controlsPanel.appendChild(depthSlider.field);
+
+  const rollSlider = makeSlider({
+    id: "flip-roll",
+    label: "Rolls",
+    hint: "How often a fragment is rapidly repeated to fill a beat. Placed at the ends of beats, bars and the phrase, where a fill belongs.",
+    value: state.rollAmount,
+    describe: (v) => (v === 0 ? "none" : v < 25 ? "rare" : v < 55 ? "occasional" : v < 80 ? "frequent" : "constant"),
+    onChange: (v) => setParam("rollAmount", v),
+  });
+  controlsPanel.appendChild(rollSlider.field);
+
+  // The grid everything else is measured against. Below the creative controls because it is a
+  // property of the material more than a choice about the remix.
   const sliceField = el("div", "field flip-field");
   sliceField.appendChild(el("label", null, "Slice size"));
   const sliceSeg = el("div", "seg flip-seg");
@@ -221,67 +372,46 @@ export function createFlip(deps) {
   sliceField.appendChild(sliceSeg);
   controlsPanel.appendChild(sliceField);
 
-  const intensityField = el("div", "field flip-field");
-  const intensityLabel = el("label", null, "Intensity");
-  intensityLabel.htmlFor = "flip-intensity";
-  intensityField.appendChild(intensityLabel);
-  const intensityRow = el("div", "slider-row");
-  const intensitySlider = el("input");
-  intensitySlider.id = "flip-intensity";
-  intensitySlider.type = "range";
-  intensitySlider.min = "0";
-  intensitySlider.max = "100";
-  intensitySlider.step = "1";
-  const intensityNumber = el("input", "slider-number");
-  intensityNumber.type = "number";
-  intensityNumber.min = "0";
-  intensityNumber.max = "100";
-  intensityNumber.step = "1";
-  const intensityWord = el("span", "flip-intensity-word");
-  intensityRow.append(intensitySlider, intensityNumber, intensityWord);
-  intensityField.appendChild(intensityRow);
-  intensityField.appendChild(el("p", "mod-note", "Low keeps most of the phrase and edits around the downbeats. High restructures freely and starts cutting below the slice size."));
-  controlsPanel.appendChild(intensityField);
+  // ---- pitch -------------------------------------------------------------
+  //
+  // Its own disclosure: the defaults are good, most sessions never open it, and four more controls
+  // permanently on screen is how a tool that should take seconds turns into a cockpit.
+  const pitchDetails = el("details", "flip-advanced");
+  const pitchSummary = el("summary", "flip-advanced-summary", "Pitch");
+  pitchDetails.appendChild(pitchSummary);
 
-  const styleField = el("div", "field flip-field");
-  styleField.appendChild(el("label", null, "Style"));
-  const styleChips = el("div", "flip-chips");
-  const styleButtons = new Map();
-  for (const style of STYLES) {
-    const chip = el("button", "flip-chip", style.label);
-    chip.type = "button";
-    chip.title = style.blurb;
-    chip.addEventListener("click", () => setStyle(style.key));
-    styleChips.appendChild(chip);
-    styleButtons.set(style.key, chip);
+  const pitchModeField = el("div", "field flip-field");
+  const pitchModeLabel = el("label", null, "Pitch mode");
+  pitchModeLabel.htmlFor = "flip-pitch-mode";
+  pitchModeField.appendChild(pitchModeLabel);
+  const pitchModeSelect = el("select");
+  pitchModeSelect.id = "flip-pitch-mode";
+  for (const mode of PITCH_MODES) {
+    const opt = el("option", null, mode.label);
+    opt.value = mode.key;
+    pitchModeSelect.appendChild(opt);
   }
-  styleField.appendChild(styleChips);
-  const styleBlurb = el("p", "mod-note flip-style-blurb");
-  styleField.appendChild(styleBlurb);
-  controlsPanel.appendChild(styleField);
-
-  // Downbeat preservation. On by default because it is what makes most results sound intentional,
-  // and switchable because "give me this loop back, but wrong" is a poor reason to refuse to touch
-  // the strong beats. Off, edits stop being weighted away from strong positions AND stop being
-  // anchored to the beat grid at all - see generateRecipe() and groupLen()/jumpDistance().
-  const downbeatField = el("label", "check flip-check");
-  const downbeatCheckbox = el("input");
-  downbeatCheckbox.type = "checkbox";
-  downbeatCheckbox.addEventListener("change", () => {
-    state.keepDownbeats = downbeatCheckbox.checked;
+  pitchModeSelect.addEventListener("change", () => {
+    state.pitchMode = resolvePitchMode(pitchModeSelect.value).key;
     save();
     markStale();
     render();
   });
-  downbeatField.append(downbeatCheckbox, el("span", null, "Keep downbeats"));
-  controlsPanel.appendChild(downbeatField);
-  controlsPanel.appendChild(
-    el(
-      "p",
-      "mod-note flip-check-note",
-      "On, edits land on the beat and mostly leave the strong beats alone. Off, FLIP cuts wherever it likes - groups and jumps stop being whole numbers of beats, so things land off the grid and the phrase drags out of phase."
-    )
-  );
+  pitchModeField.appendChild(pitchModeSelect);
+  const pitchBlurb = el("p", "mod-note");
+  pitchModeField.appendChild(pitchBlurb);
+  pitchDetails.appendChild(pitchModeField);
+
+  const pitchSlider = makeSlider({
+    id: "flip-pitch-amount",
+    label: "Pitch amount",
+    hint: "How much of the loop gets transposed. Kept low on purpose - pitch works best on repeats and rolls, as an accident you notice, not as a wash.",
+    value: state.pitchAmount,
+    describe: (v) => (v === 0 ? "none" : v < 20 ? "a touch" : v < 45 ? "occasional" : v < 75 ? "prominent" : "everywhere"),
+    onChange: (v) => setParam("pitchAmount", v),
+  });
+  pitchDetails.appendChild(pitchSlider.field);
+  controlsPanel.appendChild(pitchDetails);
 
   const gridWarning = el("p", "flip-warning");
   gridWarning.hidden = true;
@@ -382,9 +512,6 @@ export function createFlip(deps) {
   // Settings
   // -------------------------------------------------------------------------
 
-  intensitySlider.addEventListener("input", () => setIntensity(Number(intensitySlider.value)));
-  intensityNumber.addEventListener("change", () => setIntensity(Number(intensityNumber.value)));
-
   function setSubdivision(key) {
     if (state.subdivision === key) return;
     state.subdivision = resolveSubdivision(key).key;
@@ -393,10 +520,11 @@ export function createFlip(deps) {
     render();
   }
 
-  function setIntensity(value) {
+  /** Every 0-100 control funnels through here, so they all invalidate and persist the same way. */
+  function setParam(name, value) {
     const v = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
-    if (state.intensity === v) return;
-    state.intensity = v;
+    if (state[name] === v) return;
+    state[name] = v;
     save();
     markStale();
     render();
@@ -413,12 +541,16 @@ export function createFlip(deps) {
   function save() {
     writeJSON(STORAGE_KEY, {
       subdivision: state.subdivision,
-      intensity: state.intensity,
+      structure: state.structure,
+      activity: state.activity,
+      depth: state.depth,
+      rollAmount: state.rollAmount,
+      pitchMode: state.pitchMode,
+      pitchAmount: state.pitchAmount,
       style: state.style,
       batchSize: state.batchSize,
       bitDepth: state.bitDepth,
       looping: state.looping,
-      keepDownbeats: state.keepDownbeats,
     });
   }
 
@@ -426,12 +558,14 @@ export function createFlip(deps) {
     const saved = readJSON(STORAGE_KEY);
     if (!saved) return;
     if (saved.subdivision) state.subdivision = resolveSubdivision(saved.subdivision).key;
-    if (Number.isFinite(saved.intensity)) state.intensity = Math.max(0, Math.min(100, Math.round(saved.intensity)));
+    for (const name of ["structure", "activity", "depth", "rollAmount", "pitchAmount"]) {
+      if (Number.isFinite(saved[name])) state[name] = Math.max(0, Math.min(100, Math.round(saved[name])));
+    }
+    if (saved.pitchMode) state.pitchMode = resolvePitchMode(saved.pitchMode).key;
     if (saved.style) state.style = resolveStyle(saved.style).key;
     if (BATCH_SIZES.includes(saved.batchSize)) state.batchSize = saved.batchSize;
     if (saved.bitDepth === 16 || saved.bitDepth === 24) state.bitDepth = saved.bitDepth;
     if (typeof saved.looping === "boolean") state.looping = saved.looping;
-    if (typeof saved.keepDownbeats === "boolean") state.keepDownbeats = saved.keepDownbeats;
   }
 
   // -------------------------------------------------------------------------
@@ -575,10 +709,34 @@ export function createFlip(deps) {
     });
   }
 
+  /**
+   * The key a pitch decision should use: the manual override where there is one, detection
+   * otherwise. Same shape as effectiveBpm() above, and the same reason for existing.
+   */
+  function effectiveKey() {
+    const root = state.keyRoot || (state.detected && state.detected.key) || null;
+    const mode = state.keyMode || (state.detected && state.detected.scale) || null;
+    return resolveKey({ root, mode });
+  }
+
   /** Everything a generated variation depends on besides its own seed. */
   function settingsSignature() {
     const map = currentMap();
-    return JSON.stringify([state.name, state.subdivision, state.intensity, state.style, state.keepDownbeats, map ? map.count : 0, map ? Math.round((map.bpm || 0) * 100) : 0]);
+    const key = effectiveKey();
+    return JSON.stringify([
+      state.name,
+      state.subdivision,
+      state.style,
+      state.structure,
+      state.activity,
+      state.depth,
+      state.rollAmount,
+      state.pitchMode,
+      state.pitchAmount,
+      key.known ? `${key.root} ${key.mode}` : "",
+      map ? map.count : 0,
+      map ? Math.round((map.bpm || 0) * 100) : 0,
+    ]);
   }
 
   /** Flag the on-screen batch as generated under settings that have since changed. */
@@ -628,13 +786,24 @@ export function createFlip(deps) {
     const signature = settingsSignature();
     const count = state.batchSize;
     const styleLabel = resolveStyle(state.style).label;
-    log(`FLIP generating ${count} variations - ${describeSliceMap(map)}, ${styleLabel}, intensity ${state.intensity} (${describeIntensity(state.intensity)})${state.keepDownbeats ? "" : ", downbeats unprotected"}.`);
+    const key = effectiveKey();
+    const pitchLabel = state.pitchMode === "off" || !state.pitchAmount ? "no pitch" : `${resolvePitchMode(state.pitchMode).label.toLowerCase()} pitch${key.known ? ` in ${formatKey(key.root, key.mode)}` : ""}`;
+    log(
+      `FLIP generating ${count} variations - ${describeSliceMap(map)}, ${styleLabel}, ` +
+        `structure ${state.structure} (${describeStructure(state.structure)}), activity ${state.activity} (${describeActivity(state.activity)}), ` +
+        `depth ${state.depth} (${describeDepth(state.depth)}), ${pitchLabel}.`
+    );
+
+    // A batch of eight seeds explores one region of the space eight times. Profiles spread it -
+    // see js/flip/diversity.js. Derived from a seed of their own so pressing GENERATE again deals
+    // a fresh order rather than the same eight characters in the same eight slots.
+    const profiles = profilesForBatch(makeRng(mintSeed()), count);
 
     for (let i = 0; i < count; i++) {
       if (myGeneration !== generation) break; // superseded - stop rather than filling a stale list
       state.progress = `generating ${i + 1}/${count}`;
       renderBar();
-      const variation = buildVariation({ map, signature, index: i + 1, seed: mintSeed() });
+      const variation = buildVariation({ map, signature, index: i + 1, seed: mintSeed(), profile: profiles[i] });
       state.variations.push(variation);
       rowList.appendChild(variation.row.el);
       refreshVariationRow(variation);
@@ -651,9 +820,25 @@ export function createFlip(deps) {
     render();
   }
 
+  /** Everything the generator needs from the session, in one place so the batch path and the
+   *  single-row regenerate path can never drift apart. */
+  function generationSettings(map) {
+    return {
+      map,
+      style: state.style,
+      structure: state.structure,
+      activity: state.activity,
+      depth: state.depth,
+      rollAmount: state.rollAmount,
+      pitchMode: state.pitchMode,
+      pitchAmount: state.pitchAmount,
+      key: effectiveKey(),
+    };
+  }
+
   /** Generate + render one variation. Pure inputs -> everything the row needs. */
-  function buildVariation({ map, signature, index, seed }) {
-    const recipe = generateRecipe({ map, style: state.style, intensity: state.intensity, seed, keepDownbeats: state.keepDownbeats });
+  function buildVariation({ map, signature, index, seed, profile }) {
+    const recipe = generateRecipe({ ...generationSettings(map), seed, profile });
     const audio = renderVariationAudio({
       recipe,
       map,
@@ -668,6 +853,7 @@ export function createFlip(deps) {
       audio,
       signature,
       stale: false,
+      profile,
       row: createVariationRow({
         id: `FLIP ${String(index).padStart(2, "0")}`,
         getAudioContext,
@@ -698,7 +884,7 @@ export function createFlip(deps) {
     const wasPlaying = old.row.isPlaying();
     old.row.stop();
 
-    const recipe = generateRecipe({ map, style: state.style, intensity: state.intensity, seed, keepDownbeats: state.keepDownbeats });
+    const recipe = generateRecipe({ ...generationSettings(map), seed, profile: old.profile });
     old.recipe = recipe;
     old.seed = recipe.seed;
     old.audio = renderVariationAudio({ recipe, map, channels: state.audio.channels, sampleRate: state.audio.sampleRate });
@@ -844,10 +1030,23 @@ export function createFlip(deps) {
     for (const [key, btn] of sliceButtons) btn.classList.toggle("is-active", key === state.subdivision);
     for (const [key, chip] of styleButtons) chip.classList.toggle("is-active", key === state.style);
     styleBlurb.textContent = resolveStyle(state.style).blurb;
-    if (document.activeElement !== intensitySlider) intensitySlider.value = String(state.intensity);
-    if (document.activeElement !== intensityNumber) intensityNumber.value = String(state.intensity);
-    intensityWord.textContent = describeIntensity(state.intensity);
-    downbeatCheckbox.checked = state.keepDownbeats;
+    structureSlider.sync(state.structure);
+    activitySlider.sync(state.activity);
+    depthSlider.sync(state.depth);
+    rollSlider.sync(state.rollAmount);
+    pitchSlider.sync(state.pitchAmount);
+    pitchModeSelect.value = state.pitchMode;
+    pitchBlurb.textContent = resolvePitchMode(state.pitchMode).blurb;
+
+    const key = effectiveKey();
+    keyRow.hidden = !hasSource;
+    keyRootSelect.value = key.known ? key.root : "";
+    keyModeSelect.value = key.mode;
+    keyModeSelect.disabled = !key.known;
+    const detectedKey = state.detected && state.detected.key ? formatKey(state.detected.key, state.detected.scale) : null;
+    const manualKey = !!(state.keyRoot || state.keyMode);
+    if (!key.known) keyNote.textContent = state.pitchMode === "off" ? "no key needed" : "no key detected - in-key pitch needs one";
+    else keyNote.textContent = manualKey ? `${formatKey(key.root, key.mode)} (manual)` : detectedKey ? `${detectedKey} (detected)` : formatKey(key.root, key.mode);
 
     const warning = hasSource ? readiness.reason || readiness.warning : null;
     gridWarning.hidden = !warning;

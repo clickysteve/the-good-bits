@@ -1,29 +1,32 @@
 // operations.js
 //
-// The FLIP transformation vocabulary: small, reusable, single-purpose edits to a recipe's step list
-// (js/flip/recipe.js). Deliberately NOT one big randomise function - adding a new remix behaviour
-// later should mean writing one more entry here and giving it a weight in one or more styles, not
-// touching the generator, the renderer or the UI.
+// FLIP's transformation vocabulary: small, reusable, single-purpose edits to a recipe's step list.
 //
-// Every operation obeys three rules, and the renderer relies on all three:
+// Every operation now declares two things the first version didn't have, and both are what stopped
+// results all sounding like the same processing at the same rate:
 //
-//   1. It never changes steps.length. Phrase length is preserved by construction, not by checking.
-//   2. It only ever writes inside the bounds it was given, and no-ops (returns falsy) when the
-//      material is too short for it. A style that weights an impossible operation heavily just
-//      spends fewer edits, rather than producing a half-applied one.
-//   3. It decides WHAT to do; the generator decides WHERE and HOW OFTEN. Nothing in here reads the
-//      intensity slider directly - only `severity`, which is intensity already scaled by the style.
+//   FAMILY  structural / micro / break / roll. A remix type weights families, so "rearrange this
+//           phrase" and "chop this to bits" stop being the same decision with a different number.
+//   LEVELS  which hierarchy scales it makes sense at (js/flip/hierarchy.js). The same operation -
+//           repeat, reverse, substitute - is a different musical idea applied to a bar, a beat or a
+//           single slice, so it is written once and applied at whatever scale was chosen.
 //
-// A COMPOSITE OPERATION MAY ONLY BORROW WHAT ITS STYLE WOULD REACH FOR ANYWAY. Two operations here
-// (call-and-response, keep-the-downbeat) vary their result by applying a second technique - a
-// reverse, a stutter, a rest. Left ungated that quietly defeats the whole style system: REPEAT
-// would produce silences even though dropping things out is SPARSE's entire identity, and MIXED
-// would micro-edit at intensity 15 when the slider says it shouldn't until 30. They ask ctx.allows()
-// first, which is the same availability test the generator uses to build its own pick list.
+// Operations receive a NODE (a span of slots that means something musically) rather than a bare
+// anchor index, and work inside it. That is what makes "bar 2's second half repeats its first" and
+// "the last beat of bar 4 rolls at 1/32" expressible at all.
 //
-// Each operation returns a small descriptor ({len, ...}) when it did something, so the generator can
-// record what happened and the UI can say so.
+// The three rules from the first version still hold, and the renderer still relies on all three:
+//
+//   1. Never change steps.length. Phrase length is preserved by construction, not by checking.
+//   2. Only ever write inside the node given, and return falsy when the material is too short.
+//   3. Decide WHAT to do; the generator decides WHERE, HOW OFTEN and AT WHAT SCALE.
+//
+// A COMPOSITE OPERATION MAY ONLY BORROW WHAT ITS TYPE WOULD REACH FOR ANYWAY - see ctx.allows().
+// Left ungated, call-and-response silences its response under a type that never drops anything out,
+// and keep-the-downbeat micro-edits under one that is supposed to be gentle.
 import { makeStep, cloneStep } from "./step.js";
+
+export const FAMILIES = ["structural", "micro", "break", "roll"];
 
 /** Copy a run of steps out of the list, detached, so an overlapping write can't read its own output. */
 function snapshot(steps, start, len) {
@@ -34,106 +37,36 @@ function snapshot(steps, start, len) {
 
 function writeRun(steps, dest, run, op) {
   for (let i = 0; i < run.length; i++) {
-    if (dest + i >= steps.length) break;
+    if (dest + i >= steps.length || dest + i < 0) break;
     steps[dest + i] = { ...run[i], op };
   }
 }
 
+/** Fresh source material, straight from the map - not whatever has already happened at that spot. */
+function sourceRun(from, len, op) {
+  const run = [];
+  for (let i = 0; i < len; i++) run.push(makeStep(from + i, op));
+  return run;
+}
+
 function weightedPick(rng, candidates) {
-  const total = candidates.reduce((sum, c) => sum + c.w, 0);
-  if (total <= 0) return candidates[0];
+  const usable = candidates.filter((c) => c && c.w > 0);
+  if (!usable.length) return null;
+  const total = usable.reduce((sum, c) => sum + c.w, 0);
   let r = rng.next() * total;
-  for (const c of candidates) {
+  for (const c of usable) {
     r -= c.w;
     if (r <= 0) return c;
   }
-  return candidates[candidates.length - 1];
+  return usable[usable.length - 1];
 }
 
-/**
- * A musical group length in slices - a beat, two beats, a bar, or (when `allowSub`) half a beat.
- * Everything that moves more than one slice picks its size here, which is what keeps FLIP swapping
- * musical chunks rather than arbitrary runs of samples. Bigger groups get likelier as severity rises.
- */
-function groupLen(ctx, { allowSub = false } = {}) {
-  const { map, rng, severity } = ctx;
-  const beat = Math.max(1, map.perBeat);
-  const bar = Math.max(beat, map.perBar);
-  const candidates = [];
-  if (allowSub && beat >= 2) candidates.push({ len: beat >> 1, w: 0.25 + 0.55 * severity });
-  candidates.push({ len: beat, w: 1 });
-  candidates.push({ len: beat * 2, w: 0.5 + 0.25 * severity });
-  candidates.push({ len: bar, w: 0.12 + 0.5 * severity });
-  const usable = candidates.filter((c) => c.len >= 1 && c.len * 2 <= map.count);
-  if (!usable.length) return 1;
-  const len = weightedPick(rng, usable).len;
-  // Off the grid: a group that isn't a whole number of beats is what turns "rearranged" into
-  // "displaced", and is the point of switching downbeat preservation off.
-  if (!ctx.keepDownbeats && len > 1 && rng.bool(0.5)) {
-    const skew = 1 + rng.int(Math.max(1, len - 1));
-    return Math.max(1, Math.min(len + (rng.bool() ? skew : -skew), Math.floor(map.count / 2)));
-  }
-  return len;
-}
-
-/** A jump distance: always a whole number of beats, near before far. */
-function jumpDistance(ctx, maxDistance) {
-  const { map, rng, severity } = ctx;
-  const beat = Math.max(1, map.perBeat);
-  const candidates = [
-    { len: beat, w: 1 },
-    { len: beat * 2, w: 0.75 },
-    { len: map.perBar, w: 0.4 + 0.4 * severity },
-    { len: map.perBar * 2, w: 0.1 + 0.6 * severity },
-  ];
-  const usable = candidates.filter((c) => c.len >= 1 && c.len <= maxDistance);
-  if (!usable.length) return 0;
-  const distance = weightedPick(rng, usable).len;
-  // A jump that doesn't land on a beat drags the whole phrase out of phase - deliberately.
-  if (!ctx.keepDownbeats && rng.bool(0.5)) {
-    const offset = 1 + rng.int(Math.max(1, beat - 1));
-    return Math.max(1, Math.min(distance + (rng.bool() ? offset : -offset), maxDistance));
-  }
-  return distance;
-}
-
-/**
- * How many fragments a stutter breaks its slot into. This is FLIP's micro-editing: 4 on a
- * sixteenth-note grid is a 64th-note roll. The coarse counts are always available; the fine ones
- * unlock with severity, so a conservative setting stutters audibly but never turns into a buzz.
- */
-function stutterCount(ctx) {
-  const { rng, severity } = ctx;
-  const candidates = [
-    { len: 2, w: 1 },
-    { len: 3, w: 0.45 },
-    { len: 4, w: 0.55 + 0.5 * severity },
-  ];
-  if (severity > 0.45) candidates.push({ len: 6, w: 0.3 * severity });
-  if (severity > 0.6) candidates.push({ len: 8, w: 0.45 * severity });
-  return weightedPick(rng, candidates).len;
-}
-
-/** "Would this style do X at this intensity?" - see ctx.allows() in js/flip/recipe.js. Permissive
- *  when absent, so an operation can still be exercised standalone (a unit test, a future caller). */
+/** "Would this type do X at this depth?" - see ctx.allows() in js/flip/recipe.js. */
 function permits(ctx, key) {
   return typeof ctx.allows === "function" ? ctx.allows(key) : true;
 }
 
-/**
- * Where inside [from, from+len) should an edit that only needs ONE slice land?
- *
- * With downbeat preservation on, the weakest metric position - a rest or a reversed slice hurts
- * least there, and the beat still lands. With it off, anywhere in the span, which is what makes the
- * setting audible rather than notional: reversing the slice that carries the downbeat is exactly
- * the kind of damage someone turning this off is asking for.
- */
-function pickTarget(ctx, from, len) {
-  if (!ctx.keepDownbeats) return Math.min(ctx.map.count - 1, from + ctx.rng.int(Math.max(1, len)));
-  return weakestIn(ctx.map, from, len);
-}
-
-/** The weakest metric position inside [from, from+len) - where a silence or a stutter hurts least. */
+/** The weakest metric position inside a span - where a rest or a reversal hurts least. */
 function weakestIn(map, from, len) {
   let best = from;
   let bestStrength = Infinity;
@@ -147,364 +80,249 @@ function weakestIn(map, from, len) {
   return best;
 }
 
-/** A beat-aligned position elsewhere in the phrase, at least one beat away from `avoid`. */
-function otherBeatStart(ctx, avoid, len) {
-  const { map, rng } = ctx;
-  const beat = Math.max(1, map.perBeat);
-  const beats = Math.floor((map.count - len) / beat) + 1;
-  if (beats <= 1) return -1;
-  for (let tries = 0; tries < 12; tries++) {
-    const pos = rng.int(beats) * beat;
-    if (Math.abs(pos - avoid) >= beat && pos + len <= map.count) return pos;
+/**
+ * Where inside a span should a single-slice edit land?
+ *
+ * High structure: the weakest metric position, so the beat still lands. Low structure: anywhere,
+ * which is what makes the setting audible rather than notional - reversing the slice carrying the
+ * downbeat is exactly the damage someone pulling Structure down is asking for.
+ */
+function pickTarget(ctx, from, len) {
+  if (ctx.structure > ctx.rng.next()) return weakestIn(ctx.map, from, len);
+  return Math.min(ctx.map.count - 1, from + ctx.rng.int(Math.max(1, len)));
+}
+
+/**
+ * A source span of `len` slots to borrow from, biased by STRUCTURE towards somewhere near.
+ *
+ * "Nearby source material should generally be favoured over distant material at conservative
+ * settings" is most of what makes a substitution sound like a variation rather than a collage, and
+ * it is a weighting rather than a rule so that low structure really can reach across the phrase.
+ */
+function borrowFrom(ctx, node, len, { alignTo = 0 } = {}) {
+  const { map, rng, structure } = ctx;
+  const align = Math.max(1, alignTo || len);
+  const slots = Math.floor(map.count / align);
+  if (slots < 2) return -1;
+  const home = Math.round(node.start / align);
+  const candidates = [];
+  for (let i = 0; i < slots; i++) {
+    const from = i * align;
+    if (from === node.start || from + len > map.count) continue;
+    const distance = Math.abs(i - home);
+    // Near is likelier than far, and the more structure is being preserved the steeper that is.
+    const nearness = 1 / Math.pow(distance, 0.6 + 1.9 * structure);
+    candidates.push({ from, w: nearness });
   }
-  return -1;
+  const picked = weightedPick(rng, candidates);
+  return picked ? picked.from : -1;
+}
+
+/**
+ * ROLL - a first-class transformation, not a synonym for stutter.
+ *
+ * A roll takes one fragment and repeats it rapidly to fill a fixed region of musical time. The
+ * region is chosen by the caller (a beat, half a beat, the tail of a bar); the RATE is how finely
+ * that region is chopped, and it is expressed relative to the slot grid so it stays musical
+ * whatever the slice size is:
+ *
+ *   fragmentSlots >= 1  the roll repeats a GROUP of whole slots (a 1/8 roll on a 1/16 grid)
+ *   fragmentSlots < 1   each slot is subdivided (a 1/32 or 1/64 roll on a 1/16 grid), which is the
+ *                       existing micro-slicing, now with a musical reason to be where it is
+ *
+ * Critically it cannot lengthen anything: it writes into exactly the slots it was given, and a
+ * subdivided slot is filled faster rather than taking more room. `divisions` lets the rate change
+ * across the roll, which is what an accelerating roll is.
+ */
+export function applyRoll(ctx, { start, span, fragmentSlots, from, reverse = false, accelerate = false, label = "roll" }) {
+  const { steps, map, rng } = ctx;
+  const end = Math.min(map.count, start + span);
+  if (end <= start) return null;
+
+  if (fragmentSlots >= 1) {
+    // Coarser than a slot: repeat a group of whole slots across the region. Capped at half the
+    // region, because a "roll" whose group is as long as the region it fills repeats nothing - it
+    // is the original material with a label on it, which is not what anybody means by a roll.
+    const groupLen = Math.max(1, Math.min(Math.round(fragmentSlots), Math.floor((end - start) / 2)));
+    const source = from >= 0 ? from : start;
+    for (let i = start; i < end; i++) {
+      const offset = (i - start) % groupLen;
+      const src = Math.min(map.count - 1, source + offset);
+      steps[i] = { ...makeStep(src, label), reverse };
+    }
+    return { at: start, span: end - start, fragmentSlots: groupLen, reverse };
+  }
+
+  // Finer than a slot: each slot is filled with N copies of a fragment of itself.
+  const base = Math.max(2, Math.round(1 / fragmentSlots));
+  const source = from >= 0 ? from : start;
+  const count = end - start;
+  for (let i = 0; i < count; i++) {
+    // An accelerating roll doubles up as it goes, which is the gesture people actually mean by
+    // "roll" far more often than a constant rate is.
+    const sub = accelerate ? Math.min(16, base * Math.pow(2, Math.floor((i / Math.max(1, count - 1)) * 2))) : base;
+    const step = makeStep(Math.min(map.count - 1, source), label);
+    step.stutter = Math.max(2, Math.round(sub));
+    step.keepHead = 0;
+    step.fragFrom = 0;
+    step.reverse = reverse;
+    steps[start + i] = step;
+  }
+  return { at: start, span: count, fragmentSlots, reverse, accelerate };
+}
+
+/** Roll rates that are worth having, relative to one slot, coarse to fine. */
+export function rollRates(ctx, node) {
+  const { depth, map } = ctx;
+  const beat = Math.max(1, map.perBeat);
+  const out = [];
+  if (node.span >= 2) out.push({ fragmentSlots: 2, w: 0.5 + 0.4 * (1 - depth), name: "half" });
+  out.push({ fragmentSlots: 1, w: 1, name: "slot" });
+  out.push({ fragmentSlots: 0.5, w: 0.7 + 0.7 * depth, name: "double" });
+  if (depth > 0.4) out.push({ fragmentSlots: 0.25, w: 0.5 * depth, name: "quad" });
+  // 1/64-and-beyond territory: only where a slot is long enough for the fragments to survive.
+  if (depth > 0.7 && beat >= 4) out.push({ fragmentSlots: 0.125, w: 0.35 * depth, name: "octuple" });
+  return out;
 }
 
 export const OPERATIONS = [
+  // ---------------------------------------------------------------- structural
   {
-    key: "repeat-slice",
-    label: "repeat slice",
-    minT: 0,
-    fits: (map) => map.count >= 2,
-    apply(ctx) {
-      const { steps, at, rng, severity, map } = ctx;
-      // One repeat is a hiccup; three is a roll. Longer runs need the intensity to justify them.
-      let reps = 1;
-      if (severity > 0.4 && rng.bool(0.45)) reps = 2;
-      if (severity > 0.7 && rng.bool(0.3)) reps = 3;
-      if (at + reps >= map.count) reps = map.count - at - 1;
-      if (reps < 1) return null;
-      const source = cloneStep(steps[at]);
-      for (let i = 1; i <= reps; i++) steps[at + i] = { ...source, op: "repeat-slice" };
-      return { len: reps + 1, reps };
-    },
-  },
-
-  {
-    key: "repeat-group",
-    label: "repeat group",
-    minT: 0,
-    fits: (map) => map.count >= Math.max(2, map.perBeat * 2),
-    apply(ctx) {
-      const { steps, at, map } = ctx;
-      const len = groupLen(ctx);
-      if (at + len * 2 > map.count) return null;
-      writeRun(steps, at + len, snapshot(steps, at, len), "repeat-group");
-      return { len: len * 2, group: len };
-    },
-  },
-
-  {
-    key: "swap-groups",
-    label: "swap groups",
-    minT: 0,
-    fits: (map) => map.count >= Math.max(2, map.perBeat * 2),
-    apply(ctx) {
-      const { steps, at, map } = ctx;
-      const len = groupLen(ctx);
-      if (at + len * 2 > map.count) return null;
-      const a = snapshot(steps, at, len);
-      const b = snapshot(steps, at + len, len);
-      writeRun(steps, at, b, "swap-groups");
-      writeRun(steps, at + len, a, "swap-groups");
-      return { len: len * 2, group: len };
-    },
-  },
-
-  {
-    key: "jump-back",
-    label: "jump back",
-    minT: 0,
-    fits: (map) => map.count >= Math.max(2, map.perBeat * 2),
-    apply(ctx) {
-      const { steps, at, map } = ctx;
-      const len = groupLen(ctx);
-      if (at + len > map.count) return null;
-      const distance = jumpDistance(ctx, at);
-      if (distance < 1) return null;
-      writeRun(steps, at, snapshot(steps, at - distance, len), "jump-back");
-      return { len, distance };
-    },
-  },
-
-  {
-    key: "jump-forward",
-    label: "jump forward",
-    minT: 0.12,
-    fits: (map) => map.count >= Math.max(2, map.perBeat * 2),
-    apply(ctx) {
-      const { steps, at, map } = ctx;
-      const len = groupLen(ctx);
-      if (at + len > map.count) return null;
-      const room = map.count - len - at;
-      const distance = jumpDistance(ctx, room);
-      if (distance < 1) return null;
-      writeRun(steps, at, snapshot(steps, at + distance, len), "jump-forward");
-      return { len, distance };
-    },
-  },
-
-  {
-    key: "reverse-slice",
-    label: "reverse slice",
-    minT: 0,
+    key: "preserve",
+    label: "leave it alone",
+    family: "structural",
+    levels: ["bar", "halfBar", "beat"],
     fits: () => true,
-    apply(ctx) {
-      const { steps, at, map, rng } = ctx;
-      // Reversing the slice that lands ON a downbeat swallows the transient the whole bar hangs
-      // off, so bias towards the weaker positions in this beat - unless downbeat preservation is off.
-      const target = !ctx.keepDownbeats || rng.bool(0.7) ? pickTarget(ctx, at, Math.max(1, map.perBeat)) : at;
-      steps[target].reverse = !steps[target].reverse;
-      steps[target].op = "reverse-slice";
-      return { len: 1, target };
-    },
+    // Doing nothing, deliberately and on the record. Having it in the vocabulary means a type can
+    // WEIGHT restraint rather than only arriving at it by failing to pick something else.
+    apply: () => null,
   },
 
   {
-    key: "reverse-group",
-    label: "reverse group",
-    minT: 0.2,
-    fits: (map) => map.count >= Math.max(2, map.perBeat),
+    key: "repeat-node",
+    label: "repeat",
+    family: "structural",
+    levels: ["bar", "halfBar", "beat", "halfBeat", "slice"],
+    fits: (map, node) => node.start >= node.span,
     apply(ctx) {
-      const { steps, at, map } = ctx;
-      const len = groupLen(ctx, { allowSub: true });
-      if (at + len > map.count) return null;
-      // A real group reverse is both: the audio inside each slice runs backwards AND the slices
-      // play in the opposite order. Doing only the second is just a shuffle; only the first is a
-      // stutter of backwards fragments. Together they sound like the tape ran the other way.
-      const run = snapshot(steps, at, len).reverse();
-      for (const step of run) step.reverse = !step.reverse;
-      writeRun(steps, at, run, "reverse-group");
-      return { len, group: len };
-    },
-  },
-
-  {
-    key: "silence-slice",
-    label: "drop to silence",
-    minT: 0.15,
-    fits: (map) => map.count >= 4,
-    apply(ctx) {
-      const { steps, at, map, rng, severity } = ctx;
-      const beat = Math.max(1, map.perBeat);
-      const start = pickTarget(ctx, at, beat);
-      // A gap longer than a beat stops reading as a drop-out and starts reading as a missing bar.
-      let len = 1;
-      if (severity > 0.5 && beat >= 2 && rng.bool(0.4)) len = Math.min(beat, 2);
-      if (severity > 0.75 && rng.bool(0.25)) len = Math.min(beat, len + 1);
-      let applied = 0;
-      for (let i = start; i < Math.min(map.count, start + len); i++) {
-        steps[i].silent = true;
-        steps[i].stutter = 0;
-        steps[i].op = "silence-slice";
-        applied++;
-      }
-      return applied ? { len: applied } : null;
-    },
-  },
-
-  {
-    key: "stutter-slice",
-    label: "stutter",
-    minT: 0.3,
-    fits: (map) => map.count >= 2,
-    apply(ctx) {
-      const { steps, at, map, rng, severity } = ctx;
-      const beat = Math.max(1, map.perBeat);
-      // Landing the stutter on the LAST slice of the beat makes it a run-up into the next downbeat,
-      // which is where a stutter sounds deliberate. Anywhere in the beat, once it's rough enough -
-      // or straight away, when downbeat preservation is off.
-      const target = !ctx.keepDownbeats || (severity > 0.55 && rng.bool(0.5)) ? at + rng.int(beat) : Math.min(map.count - 1, at + beat - 1);
-      const step = steps[Math.min(map.count - 1, target)];
-      if (step.silent) return null;
-      step.stutter = stutterCount(ctx);
-      step.keepHead = 0;
-      step.fragFrom = 0;
-      step.op = "stutter-slice";
-      return { len: 1, count: step.stutter };
-    },
-  },
-
-  {
-    key: "stutter-tail",
-    label: "stutter the tail",
-    minT: 0.3,
-    fits: (map) => map.count >= 2,
-    apply(ctx) {
-      const { steps, at, map, rng } = ctx;
-      const beat = Math.max(1, map.perBeat);
-      const target = Math.min(map.count - 1, !ctx.keepDownbeats ? at + rng.int(beat) : rng.bool(0.65) ? at + beat - 1 : at);
-      const step = steps[target];
-      if (step.silent) return null;
-      // The slice starts normally and only breaks up halfway through, so the attack is intact and
-      // the edit reads as an ornament on the end of the note rather than a replacement for it.
-      step.stutter = stutterCount(ctx);
-      step.keepHead = 0.5;
-      step.fragFrom = 0.5;
-      step.op = "stutter-tail";
-      return { len: 1, count: step.stutter };
-    },
-  },
-
-  {
-    key: "alternate",
-    label: "alternate A/B",
-    minT: 0.15,
-    fits: (map) => map.count >= Math.max(4, map.perBeat * 2),
-    apply(ctx) {
-      const { steps, at, map } = ctx;
-      const len = groupLen(ctx, { allowSub: true });
-      if (at + len * 4 > map.count) return null;
-      const a = snapshot(steps, at, len);
-      const b = snapshot(steps, at + len, len);
-      writeRun(steps, at + len * 2, a, "alternate");
-      writeRun(steps, at + len * 3, b, "alternate");
-      return { len: len * 4, group: len };
-    },
-  },
-
-  {
-    key: "move-fragment",
-    label: "move a fragment",
-    minT: 0.2,
-    fits: (map) => map.count >= Math.max(4, map.perBeat * 2),
-    apply(ctx) {
-      const { steps, at, map } = ctx;
-      const len = groupLen(ctx);
-      if (at + len > map.count) return null;
-      const from = otherBeatStart(ctx, at, len);
+      const { steps, node } = ctx;
+      const from = node.start - node.span;
       if (from < 0) return null;
-      // Straight from the slice map, not from the current step list: a moved fragment should be the
-      // original material arriving somewhere new, not a copy of whatever has already happened there.
-      const run = [];
-      for (let i = 0; i < len; i++) run.push(makeStep(from + i, "move-fragment"));
-      writeRun(steps, at, run, "move-fragment");
-      return { len, from };
+      writeRun(steps, node.start, snapshot(steps, from, node.span), "repeat-node");
+      return { from, span: node.span };
     },
   },
 
   {
-    key: "repeat-half-beat",
-    label: "repeat half a beat",
-    minT: 0,
-    fits: (map) => map.perBeat >= 2 && map.count >= map.perBeat,
+    key: "repeat-half",
+    label: "repeat the first half",
+    family: "structural",
+    levels: ["bar", "halfBar", "beat"],
+    fits: (map, node) => node.span >= 2,
     apply(ctx) {
-      const { steps, at, map, rng } = ctx;
-      const beat = map.perBeat;
-      const half = beat >> 1;
-      if (at + beat > map.count) return null;
-      if (rng.bool(0.5)) {
-        // First half twice - the beat stammers and then resolves on the next downbeat.
-        writeRun(steps, at + half, snapshot(steps, at, half), "repeat-half-beat");
-      } else {
-        // Second half twice - the beat's attack is replaced by its own tail, a classic lurch.
-        writeRun(steps, at, snapshot(steps, at + half, half), "repeat-half-beat");
+      const { steps, node, rng } = ctx;
+      const half = node.span >> 1;
+      if (half < 1) return null;
+      if (rng.bool(0.65)) {
+        // First half twice - it stammers and then resolves on the next downbeat.
+        writeRun(steps, node.start + half, snapshot(steps, node.start, half), "repeat-half");
+        return { half, which: "first" };
       }
-      return { len: beat, half };
+      // Second half twice - the attack is replaced by its own tail, a classic lurch.
+      writeRun(steps, node.start, snapshot(steps, node.start + half, half), "repeat-half");
+      return { half, which: "second" };
     },
   },
 
   {
-    key: "hold-downbeat",
-    label: "keep the downbeat, change the rest",
-    minT: 0,
-    fits: (map) => map.perBeat >= 2 && map.count >= map.perBeat * 2,
+    key: "substitute-near",
+    label: "substitute",
+    family: "structural",
+    levels: ["bar", "halfBar", "beat", "halfBeat", "slice"],
+    fits: (map, node) => map.count >= node.span * 2,
     apply(ctx) {
-      const { steps, at, map, rng, severity } = ctx;
-      const beat = map.perBeat;
-      if (at + beat > map.count) return null;
-      const rest = beat - 1;
-      const canReverse = permits(ctx, "reverse-group") || permits(ctx, "reverse-slice");
-      // Re-roll the choice into the permitted range rather than skipping - a style that can't
-      // reverse should still get the other two variants at their usual relative frequency.
-      const choice = canReverse ? rng.next() : rng.next() * 0.8;
-      if (choice < 0.45) {
-        // The rest of the beat becomes repeats of the slice right after the downbeat.
-        const source = cloneStep(steps[at + 1]);
-        for (let i = 1; i < beat; i++) steps[at + i] = { ...source, op: "hold-downbeat" };
-      } else if (choice < 0.8) {
-        // The rest of the beat comes from another beat entirely - the downbeat still anchors it.
-        const from = otherBeatStart(ctx, at, beat);
-        if (from < 0) return null;
-        for (let i = 1; i < beat; i++) steps[at + i] = makeStep(from + i, "hold-downbeat");
-      } else {
-        // The rest of the beat runs backwards behind an intact attack.
-        const run = snapshot(steps, at + 1, rest).reverse();
-        for (const step of run) step.reverse = !step.reverse;
-        writeRun(steps, at + 1, run, "hold-downbeat");
-      }
-      if (severity > 0.7 && (permits(ctx, "stutter-slice") || permits(ctx, "stutter-tail")) && rng.bool(0.3)) {
-        steps[at + beat - 1].stutter = stutterCount(ctx);
-        steps[at + beat - 1].keepHead = 0;
-      }
-      return { len: beat };
+      const { steps, node } = ctx;
+      const from = borrowFrom(ctx, node, node.span, { alignTo: node.span });
+      if (from < 0) return null;
+      writeRun(steps, node.start, sourceRun(from, node.span, "substitute-near"), "substitute-near");
+      return { from, span: node.span };
     },
   },
 
   {
-    key: "new-entry",
-    label: "start somewhere else",
-    minT: 0.05,
-    fits: (map) => map.count >= map.perBar * 2,
+    key: "swap-halves",
+    label: "swap halves",
+    family: "structural",
+    levels: ["bar", "halfBar", "beat"],
+    fits: (map, node) => node.span >= 2,
     apply(ctx) {
-      const { steps, map, rng, severity } = ctx;
-      // ALWAYS the opening, whatever anchor it was handed - this operation is about where the loop
-      // begins, and the generator calls it exactly once, at the top. See generateRecipe().
-      //
-      // The material comes from another BAR LINE, not an arbitrary offset, which is the whole point:
-      // "preserve important downbeats" means edits should land on strong positions, not that slice 0
-      // is sacred. Opening on bar 3's downbeat is still opening on a downbeat - it just isn't the one
-      // the source opened on, which is the difference between eight variations that announce
-      // themselves identically for the first beat and eight that don't.
-      // WHERE the new opening comes from and HOW MUCH of the opening it replaces are separate
-      // decisions, and conflating them was a bug: tying the length to the alignment meant a whole
-      // bar got relocated even at intensity 10, which is a quarter of a four-bar loop rewritten by
-      // something the user asked to barely touch anything.
-      //
-      // Alignment: bar lines while downbeats are being preserved, so the loop still opens ON a
-      // downbeat. With that off, any beat will do - starting mid-bar is a legitimate thing to want.
-      const align = Math.max(1, ctx.keepDownbeats ? map.perBar : map.perBeat);
-      const slots = Math.floor(map.count / align);
-      if (slots < 2) return null;
+      const { steps, node } = ctx;
+      const half = node.span >> 1;
+      if (half < 1) return null;
+      const a = snapshot(steps, node.start, half);
+      const b = snapshot(steps, node.start + half, node.span - half);
+      writeRun(steps, node.start, b, "swap-halves");
+      writeRun(steps, node.start + b.length, a, "swap-halves");
+      return { half };
+    },
+  },
 
-      // Length: a beat when gentle, up to a full bar when not. The opening changes either way -
-      // that's the point of the operation - but by a proportionate amount.
-      const beat = Math.max(1, map.perBeat);
-      const sizes = [{ len: beat, w: 1.3 - severity }];
-      if (map.perBar >= 2 && (map.perBar >> 1) !== beat) sizes.push({ len: map.perBar >> 1, w: 0.6 + 0.4 * severity });
-      if (map.perBar !== beat) sizes.push({ len: map.perBar, w: 0.15 + 1.1 * severity });
-      const len = weightedPick(rng, sizes.filter((c) => c.len >= 1 && c.len * 2 <= map.count)).len;
-      if (!len || len < 1) return null;
+  {
+    key: "motif-return",
+    label: "return to an earlier motif",
+    family: "structural",
+    levels: ["bar", "halfBar", "beat"],
+    fits: (map, node) => node.start >= node.span,
+    apply(ctx) {
+      const { steps, node, rng, map } = ctx;
+      // Deliberately biased towards the OPENING rather than merely backwards: a phrase that comes
+      // back to its first bar sounds composed, which is the single cheapest way to make a
+      // rearrangement read as an arrangement.
+      const slots = Math.floor(node.start / node.span);
+      if (slots < 1) return null;
+      const from = (rng.bool(0.6) ? 0 : rng.int(slots)) * node.span;
+      if (from + node.span > map.count) return null;
+      writeRun(steps, node.start, sourceRun(from, node.span, "motif-return"), "motif-return");
+      return { from, span: node.span };
+    },
+  },
 
-      // Any aligned start but the one it already had.
-      const from = (1 + rng.int(slots - 1)) * align;
-      if (from + len > map.count) return null;
-      for (let i = 0; i < len; i++) steps[i] = makeStep(from + i, "new-entry");
-      return { len, from };
+  {
+    key: "aba",
+    label: "A/B/A",
+    family: "structural",
+    levels: ["bar", "halfBar", "beat"],
+    fits: (map, node) => node.span >= 3,
+    apply(ctx) {
+      const { steps, node, rng } = ctx;
+      const parts = node.span >= 4 && rng.bool(0.6) ? 4 : 3;
+      const unit = Math.floor(node.span / parts);
+      if (unit < 1) return null;
+      const a = snapshot(steps, node.start, unit);
+      const b = snapshot(steps, node.start + unit, unit);
+      writeRun(steps, node.start + unit * 2, a, "aba");
+      if (parts === 4) writeRun(steps, node.start + unit * 3, b, "aba");
+      return { parts, unit };
     },
   },
 
   {
     key: "call-response",
     label: "call and response",
-    minT: 0.1,
-    fits: (map) => map.count >= Math.max(4, map.perBeat * 2),
+    family: "structural",
+    levels: ["bar", "halfBar", "beat"],
+    fits: (map, node) => node.span >= 2,
     apply(ctx) {
-      const { steps, at, map, rng } = ctx;
-      const len = groupLen(ctx);
-      if (at + len * 2 > map.count) return null;
-      // Say it, then say it differently. A/A' is the single most reliable way to make a rearrangement
+      const { steps, node, rng } = ctx;
+      const half = node.span >> 1;
+      if (half < 1) return null;
+      // Say it, then say it differently. A/A' is the most reliable way to make a rearrangement
       // sound composed rather than shuffled, which is why it gets its own operation.
-      //
-      // How the response differs depends on what this personality is allowed to do. The turnaround
-      // - the response ending on the call's own first slice instead of its last - is pure
-      // reordering, so it's always available and keeps this operation useful under REPEAT and
-      // SHUFFLE rather than collapsing it into a plain repeat.
-      const response = snapshot(steps, at, len);
+      const response = snapshot(steps, node.start, half);
       const variants = ["turnaround"];
-      if (permits(ctx, "reverse-group") || permits(ctx, "reverse-slice")) variants.push("reverse");
-      if (permits(ctx, "stutter-slice") || permits(ctx, "stutter-tail")) variants.push("stutter");
-      if (permits(ctx, "silence-slice")) variants.push("rest");
+      if (permits(ctx, "reverse-node")) variants.push("reverse");
+      if (permits(ctx, "stutter")) variants.push("stutter");
+      if (permits(ctx, "silence")) variants.push("rest");
       const variant = variants[rng.int(variants.length)];
       const last = response[response.length - 1];
 
@@ -512,7 +330,7 @@ export const OPERATIONS = [
         response.reverse();
         for (const step of response) step.reverse = !step.reverse;
       } else if (variant === "stutter" && !last.silent) {
-        last.stutter = stutterCount(ctx);
+        last.stutter = 2 + 2 * ctx.rng.int(2);
         last.keepHead = rng.bool(0.5) ? 0.5 : 0;
         last.fragFrom = last.keepHead;
       } else if (variant === "rest") {
@@ -521,8 +339,213 @@ export const OPERATIONS = [
       } else {
         response[response.length - 1] = cloneStep(response[0]);
       }
-      writeRun(steps, at + len, response, "call-response");
-      return { len: len * 2, group: len, variant };
+      writeRun(steps, node.start + half, response, "call-response");
+      return { half, variant };
+    },
+  },
+
+  {
+    key: "jump",
+    label: "jump",
+    family: "structural",
+    levels: ["bar", "halfBar", "beat", "halfBeat"],
+    fits: (map, node) => map.count >= node.span * 2,
+    apply(ctx) {
+      const { steps, node, map, rng, depth } = ctx;
+      const beat = Math.max(1, map.perBeat);
+      // Whole beats while structure is being preserved; anything once it isn't, which is what
+      // drags the phrase out of phase on purpose.
+      const stride = ctx.structure > rng.next() ? beat : 1;
+      const maxSteps = Math.max(1, Math.floor((map.count - node.span) / stride));
+      const reach = Math.max(1, Math.round(maxSteps * (0.15 + 0.85 * depth)));
+      const distance = (1 + rng.int(reach)) * stride * (rng.bool(0.6) ? -1 : 1);
+      const from = node.start + distance;
+      if (from < 0 || from + node.span > map.count) return null;
+      writeRun(steps, node.start, sourceRun(from, node.span, "jump"), "jump");
+      return { from, distance };
+    },
+  },
+
+  // ---------------------------------------------------------------- micro
+  {
+    key: "micro-shuffle",
+    label: "rearrange inside",
+    family: "micro",
+    levels: ["halfBar", "beat", "halfBeat"],
+    minDepth: 0.2,
+    fits: (map, node) => node.span >= 3,
+    apply(ctx) {
+      const { steps, node, rng } = ctx;
+      // A rotation, not a shuffle: the material stays contiguous and only its phase changes, which
+      // is musical. A genuine permutation of small slices is what CUT-UP's stutter is for.
+      const by = 1 + rng.int(node.span - 1);
+      const run = snapshot(steps, node.start, node.span);
+      const rotated = run.slice(by).concat(run.slice(0, by));
+      writeRun(steps, node.start, rotated, "micro-shuffle");
+      return { by };
+    },
+  },
+
+  {
+    key: "micro-repeat",
+    label: "repeat the tail",
+    family: "micro",
+    levels: ["beat", "halfBeat", "slice"],
+    fits: (map, node) => node.span >= 2,
+    apply(ctx) {
+      const { steps, node, rng, depth } = ctx;
+      const unit = Math.max(1, Math.round(node.span * (rng.bool(0.6) ? 0.25 : 0.5)));
+      const source = Math.max(node.start, node.end - unit * 2);
+      const reps = 1 + (depth > 0.5 && rng.bool(0.4) ? 1 : 0);
+      for (let r = 1; r <= reps; r++) {
+        const dest = node.end - unit * r;
+        if (dest < node.start) break;
+        writeRun(steps, dest, snapshot(steps, source, unit), "micro-repeat");
+      }
+      return { unit, reps };
+    },
+  },
+
+  {
+    key: "reverse-node",
+    label: "reverse",
+    family: "micro",
+    levels: ["bar", "halfBar", "beat", "halfBeat"],
+    minDepth: 0.15,
+    fits: (map, node) => node.span >= 2,
+    apply(ctx) {
+      const { steps, node } = ctx;
+      // A real group reverse is both: the audio inside each slot runs backwards AND the slots play
+      // in the opposite order. Only the second is a shuffle; only the first is backwards stuttering.
+      const run = snapshot(steps, node.start, node.span).reverse();
+      for (const step of run) step.reverse = !step.reverse;
+      writeRun(steps, node.start, run, "reverse-node");
+      return { span: node.span };
+    },
+  },
+
+  {
+    key: "reverse-slice",
+    label: "reverse a slice",
+    family: "micro",
+    levels: ["beat", "halfBeat", "slice"],
+    fits: () => true,
+    apply(ctx) {
+      const { steps, node } = ctx;
+      const target = pickTarget(ctx, node.start, node.span);
+      steps[target].reverse = !steps[target].reverse;
+      steps[target].op = "reverse-slice";
+      return { target };
+    },
+  },
+
+  {
+    key: "stutter",
+    label: "stutter",
+    family: "micro",
+    levels: ["beat", "halfBeat", "slice", "micro"],
+    minDepth: 0.25,
+    fits: () => true,
+    apply(ctx) {
+      const { steps, node, rng, depth, map } = ctx;
+      // Landing on the LAST slot of the node makes it a run-up into whatever follows, which is
+      // where a stutter sounds deliberate rather than sprinkled.
+      const target = ctx.structure > rng.next() ? Math.min(map.count - 1, node.end - 1) : node.start + rng.int(node.span);
+      const step = steps[Math.min(map.count - 1, target)];
+      if (step.silent) return null;
+      const counts = [2, 3, 4];
+      if (depth > 0.5) counts.push(6);
+      if (depth > 0.7) counts.push(8);
+      step.stutter = counts[rng.int(counts.length)];
+      step.keepHead = rng.bool(0.4) ? 0.5 : 0;
+      step.fragFrom = step.keepHead;
+      step.op = "stutter";
+      return { target, count: step.stutter };
+    },
+  },
+
+  // ---------------------------------------------------------------- break
+  {
+    key: "silence",
+    label: "drop out",
+    family: "break",
+    levels: ["beat", "halfBeat", "slice"],
+    minDepth: 0.1,
+    fits: (map) => map.count >= 4,
+    apply(ctx) {
+      const { steps, node, rng, depth, map } = ctx;
+      const start = pickTarget(ctx, node.start, node.span);
+      let len = 1;
+      if (depth > 0.45 && node.span >= 2 && rng.bool(0.45)) len = 2;
+      if (depth > 0.75 && node.span >= 4 && rng.bool(0.3)) len = Math.min(node.span, 4);
+      let applied = 0;
+      for (let i = start; i < Math.min(map.count, start + len); i++) {
+        steps[i].silent = true;
+        steps[i].stutter = 0;
+        steps[i].op = "silence";
+        applied++;
+      }
+      return applied ? { start, len: applied } : null;
+    },
+  },
+
+  {
+    key: "gap",
+    label: "cut a gap",
+    family: "break",
+    levels: ["bar", "halfBar", "beat"],
+    minDepth: 0.3,
+    fits: (map, node) => node.span >= 2,
+    apply(ctx) {
+      const { steps, node, map } = ctx;
+      // Silence at the END of a node reads as a rhythmic gap - a rest written into the bar -
+      // rather than as a dropout somewhere in the middle of a phrase.
+      const unit = Math.max(1, Math.round(node.span * 0.25));
+      let applied = 0;
+      for (let i = node.end - unit; i < Math.min(map.count, node.end); i++) {
+        if (i < 0) continue;
+        steps[i].silent = true;
+        steps[i].stutter = 0;
+        steps[i].op = "gap";
+        applied++;
+      }
+      return applied ? { len: applied } : null;
+    },
+  },
+
+  // ---------------------------------------------------------------- roll
+  {
+    key: "roll",
+    label: "roll",
+    family: "roll",
+    levels: ["halfBar", "beat", "halfBeat", "slice"],
+    fits: (map, node) => node.span >= 1,
+    apply(ctx) {
+      const { node, rng, depth } = ctx;
+      const rate = weightedPick(rng, rollRates(ctx, node));
+      if (!rate) return null;
+      // Rolls are usually shorter than the node they were chosen for - a whole bar of roll is a
+      // statement, a beat of it is a fill.
+      const maxSpan = node.span;
+      const spanChoices = [
+        { span: maxSpan, w: 0.35 + 0.5 * depth },
+        { span: Math.max(1, maxSpan >> 1), w: 1 },
+        { span: Math.max(1, maxSpan >> 2), w: 0.7 },
+      ];
+      const span = weightedPick(rng, spanChoices).span;
+      // Anchored to the END of the node: a roll that runs into the next downbeat is a fill, one
+      // that starts on the downbeat and stops is a mistake.
+      const start = Math.max(node.start, node.end - span);
+      const source = rng.bool(0.7) ? start : borrowFrom(ctx, { start, span }, 1, { alignTo: 1 });
+      return applyRoll(ctx, {
+        start,
+        span,
+        fragmentSlots: rate.fragmentSlots,
+        from: source >= 0 ? source : start,
+        reverse: depth > 0.4 && rng.bool(0.18),
+        accelerate: rate.fragmentSlots < 1 && rng.bool(0.3 + 0.4 * depth),
+        label: "roll",
+      });
     },
   },
 ];
@@ -535,4 +558,8 @@ export function operationByKey(key) {
 
 export function operationKeys() {
   return OPERATIONS.map((op) => op.key);
+}
+
+export function operationsInFamily(family) {
+  return OPERATIONS.filter((op) => op.family === family);
 }
