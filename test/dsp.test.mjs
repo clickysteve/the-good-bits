@@ -16,6 +16,7 @@ import {
   pickOnsets,
   snapToBeatGrid,
   refineGridStart,
+  fitBeatGrid,
   drumRegions,
   findNearestZeroCrossing,
   applyFades,
@@ -296,6 +297,79 @@ test("refineGridStart: refuses a correction too large to be editing slop", () =>
   // coarse anchor has to stand rather than the grid jumping onto a different subdivision.
   const anchor = 0.02 + bar / 8;
   assert.equal(refineGridStart(sig, SR, bpm, anchor, 4), anchor);
+});
+
+/**
+ * A rock beat at an exact tempo: kick on 1 and 3, snare on 2 and 4, quiet hats on every eighth.
+ * Hits are placed at absolute sample positions so the tempo really is exact over the whole file.
+ * `startBeat` shifts which beat of the bar the file opens on (3 = a snare pickup on beat 4).
+ */
+function rockBeat(bpm, seconds, { phase = 0.1, startBeat = 0 } = {}) {
+  const out = new Float32Array(Math.round(seconds * SR));
+  const beat = 60 / bpm;
+  let seed = 12345;
+  const noise = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 1073741824) - 1;
+  const add = (t, len, fn) => {
+    const s0 = Math.round(t * SR);
+    for (let i = 0; i < Math.round(len * SR) && s0 + i < out.length; i++) out[s0 + i] += fn(i / SR);
+  };
+  for (let e = 0; phase + (e / 2) * beat < seconds; e++) {
+    const t = phase + (e / 2) * beat;
+    add(t, 0.03, (x) => 0.08 * noise() * Math.exp(-x * 150));
+    if (e % 2) continue;
+    const beatInBar = (e / 2 + startBeat) % 4;
+    if (beatInBar === 0 || beatInBar === 2) add(t, 0.15, (x) => 0.9 * Math.sin(2 * Math.PI * 60 * x) * Math.exp(-x * 25));
+    else add(t, 0.12, (x) => 0.6 * noise() * Math.exp(-x * 30));
+  }
+  return out;
+}
+
+test("fitBeatGrid: corrects a tempo estimate that is a few hundredths of a BPM out", () => {
+  // The real failure: Essentia read a straight 123.00 break as 123.047, and cut boundaries
+  // walked tens of milliseconds off the downbeat by the end of the file.
+  const sig = rockBeat(123, 60, { phase: 0.1 });
+  const grid = fitBeatGrid(sig, SR, 123.046875);
+  assert.ok(grid, "expected a fit on a steady beat");
+  const lastBeat = Math.floor((60 - 0.2) / (60 / 123));
+  const driftMs = Math.abs(lastBeat * (60 / grid.bpm - 60 / 123)) * 1000;
+  assert.ok(driftMs < 3, `fitted ${grid.bpm} BPM drifts ${driftMs.toFixed(1)}ms by the end of the file`);
+  assert.ok(grid.downbeat <= 0.1 + 0.001 && grid.downbeat > 0.1 - 0.006, `downbeat ${grid.downbeat}s should sit on or just before the kick at 0.1s`);
+});
+
+test("fitBeatGrid: bar 1 is the kick, not a snare pickup the file happens to open on", () => {
+  const bpm = 120;
+  const sig = rockBeat(bpm, 40, { phase: 0.1, startBeat: 3 }); // opens on beat 4
+  const grid = fitBeatGrid(sig, SR, bpm);
+  assert.ok(grid, "expected a fit");
+  const expected = 0.1 + 60 / bpm; // the first kick
+  assert.ok(Math.abs(grid.downbeat - expected) < 0.006, `downbeat ${grid.downbeat}s, expected the kick at ${expected}s`);
+});
+
+test("fitBeatGrid: no fit on material with no pulse", () => {
+  assert.equal(fitBeatGrid(tone(10, 220, 0.5), SR, 120), null);
+  assert.equal(fitBeatGrid(silence(10), SR, 120), null);
+});
+
+test("drumRegions: chops stay on the downbeat across a long file despite a slightly wrong tempo", () => {
+  const sig = rockBeat(123, 90, { phase: 0.1 });
+  const est = 123.046875;
+  const chop = barsToSeconds(4, est);
+  const { regions, bpm } = drumRegions(sig, SR, { preferred: chop, minLen: chop / 2, maxLen: chop * 1.5, onsetSensitivity: 0.65 }, est);
+  const bar = (4 * 60) / 123;
+  for (let i = 0; i < regions.length - 1; i++) {
+    const barsIn = (regions[i][0] - 0.1) / bar;
+    const offMs = Math.abs(barsIn - Math.round(barsIn)) * bar * 1000;
+    assert.ok(offMs < 6, `chop ${i + 1} starts ${offMs.toFixed(1)}ms off the downbeat (tempo used ${bpm})`);
+    assert.ok(Math.abs((regions[i][1] - regions[i][0]) / bar - 4) < 0.002, `chop ${i + 1} is not 4 bars`);
+  }
+});
+
+test("drumRegions: anchorAtStart treats 0:00 as bar 1", () => {
+  const sig = rockBeat(120, 30, { phase: 0.1 });
+  const p = { preferred: 8, minLen: 4, maxLen: 12, onsetSensitivity: 0.65, anchorAtStart: true };
+  const { regions } = drumRegions(sig, SR, p, 120);
+  assert.equal(regions[0][0], 0);
+  assert.ok(Math.abs(regions[1][0] - 8) < 0.01, `second chop should start 4 bars in, got ${regions[1][0]}`);
 });
 
 test("drumRegions: produces loop-length chops close to preferred length", () => {

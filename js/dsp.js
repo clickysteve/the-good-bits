@@ -377,6 +377,244 @@ export function refineGridStart(mono, sampleRate, bpm, coarseGridStart, beatsPer
   return Math.max(0, (anchor + shift) / sampleRate);
 }
 
+/** How far either side of the estimated tempo fitBeatGrid searches. Estimators miss by hundredths of a BPM, not by percent. */
+const GRID_FIT_TEMPO_RANGE = 0.01;
+
+/** Largest per-file phase correction fitBeatGrid applies from attack voting, in seconds. */
+const GRID_FIT_MAX_ATTACK_SHIFT = 0.02;
+
+/**
+ * Coherence of the onset curve with a pulse train of period `period`, plus that pulse train's
+ * phase. Each onset frame is a unit phasor at its position within the period, weighted by its
+ * strength; if the attacks really repeat at this period the phasors line up and the sum is long,
+ * and its angle IS the grid phase - no separate phase search needed.
+ */
+function periodicPhasor(frames, period) {
+  let re = 0;
+  let im = 0;
+  let total = 0;
+  const w = (2 * Math.PI) / period;
+  for (const [t, v] of frames) {
+    re += v * Math.cos(w * t);
+    im += v * Math.sin(w * t);
+    total += v;
+  }
+  const phase = ((Math.atan2(im, re) / w) % period + period) % period;
+  return { coherence: total > 0 ? Math.hypot(re, im) / total : 0, phase };
+}
+
+/**
+ * Fit the file's real beat grid: exact tempo, sample-accurate phase, and which beat is beat 1.
+ *
+ * Why this exists: a tempo estimator's answer is close, not exact. Essentia's Percival estimator
+ * reports a straight 123.00 BPM break as 123.047 - a 0.04% error nobody would notice in a label,
+ * but every chop boundary in the file is that number multiplied out from one anchor, so the error
+ * accumulates: 28ms early by the 70-second mark, which is a bar line visibly sitting in front of
+ * the kick it is supposed to cut on. Snapping to a grid only helps if the grid is right.
+ *
+ * Three stages, each answering the question the one before it is bad at:
+ *
+ *   1. Tempo + coarse phase. Every onset in the file votes (see periodicPhasor) across a narrow
+ *      band of tempi around the estimate, coarse then fine. The whole file is the measurement,
+ *      so a hundredth of a BPM is resolvable on anything longer than a few bars.
+ *   2. Sample-accurate phase. The onset curve is an energy envelope with its own timestamp bias,
+ *      so the phase from stage 1 is a few milliseconds out. Each predicted beat line then looks
+ *      for the frame where the level jumps hardest on a 1ms peak envelope - not a walk back from
+ *      the loudest sample, which on a kick finds a zero crossing of the kick's own low-frequency
+ *      cycle - and a low percentile of those offsets becomes the correction (aim early: see
+ *      refineGridStart for why cutting a hair early is the cheap error).
+ *   3. Downbeat. Stages 1-2 know where the beats are, not which one is "1". Low-band (kick) vs
+ *      high-band (snare/hat) accent per beat position picks it, but only when that evidence is
+ *      clear; otherwise the beat nearest the first attack in the file stays beat 1, which is what
+ *      the chopper always assumed.
+ *
+ * Returns {bpm, downbeat, confidence} - downbeat is the time of the first bar line at or after
+ * 0 - or null when the material has no rhythmic evidence to fit (the caller keeps its old path).
+ */
+export function fitBeatGrid(mono, sampleRate, bpm, { beatsPerBar = 4 } = {}) {
+  if (!(bpm > 0) || !mono || !(sampleRate > 0)) return null;
+  const duration = mono.length / sampleRate;
+  const estBeat = 60 / bpm;
+  if (duration < estBeat * beatsPerBar * 2) return null;
+
+  // --- 1. tempo and coarse phase --------------------------------------------------------
+  const hopMs = 5;
+  const { times, diffs } = multiBandOnsetStrengthCurve(mono, sampleRate, 10, hopMs);
+  const frames = [];
+  for (let i = 0; i < diffs.length; i++) if (diffs[i] > 0) frames.push([times[i], diffs[i]]);
+  if (frames.length < 8) return null;
+
+  // Scored on the eighth-note grid: kick, snare and hats all land on it, so far more of the
+  // file votes than on the beat alone. Step sizes are set by how much drift they allow across
+  // the file - ~25ms per coarse step (well inside the coherence of an 8th), ~1ms per fine step.
+  let best = { coherence: -1, beat: estBeat, phase: 0 };
+  const scan = (from, to, step) => {
+    for (let rel = from; rel <= to + 1e-12; rel += step) {
+      const beat = estBeat * (1 + rel);
+      const r = periodicPhasor(frames, beat / 2);
+      if (r.coherence > best.coherence) best = { coherence: r.coherence, beat, phase: r.phase, rel };
+    }
+  };
+  const coarseStep = Math.min(0.002, 0.025 / duration);
+  scan(-GRID_FIT_TEMPO_RANGE, GRID_FIT_TEMPO_RANGE, coarseStep);
+  const fineStep = Math.min(coarseStep / 4, 0.001 / duration);
+  scan(best.rel - coarseStep, best.rel + coarseStep, fineStep);
+  // Weak coherence means no steady pulse to fit (a pad, a fill-only file, free time).
+  if (best.coherence < 0.15) return null;
+
+  // The eighth-note phase is either on the beat or on the "and". Whichever has more attack
+  // energy at the beat period is the beat.
+  const coarseBeat = best.beat;
+  const beatPhasor = periodicPhasor(frames, coarseBeat);
+  const onBeat = [best.phase, best.phase + coarseBeat / 2].reduce((a, b) => {
+    const da = Math.abs(((a - beatPhasor.phase) % coarseBeat + coarseBeat * 1.5) % coarseBeat - coarseBeat / 2);
+    const db = Math.abs(((b - beatPhasor.phase) % coarseBeat + coarseBeat * 1.5) % coarseBeat - coarseBeat / 2);
+    return da <= db ? a : b;
+  }) % coarseBeat;
+
+  // --- 2. exact tempo and sample-accurate phase ------------------------------------------
+  // Stage 1's answer is pulled around by everything that isn't a clean attack - ghost notes,
+  // a late 16th, reverb - so it can still be a few hundredths of a BPM out, which is tens of
+  // milliseconds by the end of a long file. So measure the attacks themselves: at each
+  // predicted beat line, find the frame where the level jumps hardest on a 1ms peak envelope
+  // (not a walk back from the loudest sample, which on a kick finds a zero crossing of the
+  // kick's own low-frequency cycle), then fit a straight line through those attack times.
+  // Slope is the tempo, intercept the phase. Done twice, the second pass searching a much
+  // narrower window around the corrected grid.
+  const envHop = Math.max(1, Math.round(sampleRate * 0.001));
+  const env = new Float32Array(Math.floor(mono.length / envHop));
+  let envPeak = 0;
+  for (let f = 0; f < env.length; f++) {
+    let m = 0;
+    for (let i = f * envHop, end = i + envHop; i < end; i++) {
+      const v = mono[i] < 0 ? -mono[i] : mono[i];
+      if (v > m) m = v;
+    }
+    env[f] = m;
+    if (m > envPeak) envPeak = m;
+  }
+  const frameSec = envHop / sampleRate;
+  const preF = 10;
+  const findAttacks = (beatSec, phaseSec, searchSec, minLevel = 0.1) => {
+    const searchF = Math.max(2, Math.round(searchSec / frameSec));
+    const found = [];
+    for (let k = 0; phaseSec + k * beatSec < duration; k++) {
+      const c = Math.round((phaseSec + k * beatSec) / frameSec);
+      if (c - searchF - preF < 0 || c + searchF + 3 >= env.length) continue;
+      let bestJump = 0;
+      let bestF = -1;
+      let bestLevel = 0;
+      for (let f = c - searchF; f <= c + searchF; f++) {
+        let pre = 1e-6;
+        for (let j = f - preF; j < f; j++) if (env[j] > pre) pre = env[j];
+        const post = Math.max(env[f], env[f + 1], env[f + 2]);
+        if (post / pre > bestJump) {
+          bestJump = post / pre;
+          bestF = f;
+          bestLevel = post;
+        }
+      }
+      // ~12dB rise out of what came before, and loud enough to be a hit rather than bleed.
+      if (bestF >= 0 && bestJump >= 4 && bestLevel >= envPeak * minLevel) found.push([k, bestF * frameSec]);
+    }
+    return found;
+  };
+  const fitLine = (pts) => {
+    const n = pts.length;
+    let sk = 0, st = 0, skk = 0, skt = 0;
+    for (const [k, t] of pts) {
+      sk += k;
+      st += t;
+      skk += k * k;
+      skt += k * t;
+    }
+    const den = n * skk - sk * sk;
+    if (!(den > 0)) return null;
+    const slope = (n * skt - sk * st) / den;
+    return { slope, intercept: (st - slope * sk) / n };
+  };
+
+  let beat = best.beat;
+  let phase = onBeat;
+  for (const searchSec of [0.04, 0.015]) {
+    let pts = findAttacks(beat, phase, Math.min(searchSec, beat / 6));
+    if (pts.length < 8) break;
+    let line = fitLine(pts);
+    if (!line) break;
+    // Trim what doesn't sit on the line (a flam, a fill hit, a ghost note grabbed instead of the
+    // beat) and fit again from the attacks that agree.
+    pts = pts.filter(([k, t]) => Math.abs(t - (line.intercept + line.slope * k)) <= 0.008);
+    if (pts.length < 8) break;
+    line = fitLine(pts) || line;
+    if (Math.abs(line.slope / estBeat - 1) > GRID_FIT_TEMPO_RANGE * 1.5) break;
+    beat = line.slope;
+    phase = line.intercept;
+  }
+
+  // Pin the phase to the hits that matter. The line runs through every attack, but a quiet hat
+  // or ghost note tends to speak a few milliseconds ahead of the kick and snare, and a cut
+  // placed by that average visibly leads the downbeat it's meant to sit on. So only the loud
+  // hits decide the final offset - and a low percentile of theirs, aiming early: cutting a hair
+  // before an attack is inaudible where cutting a hair after one isn't (see refineGridStart).
+  let residuals = findAttacks(beat, phase, Math.min(0.015, beat / 6), 0.35);
+  if (residuals.length < 8) residuals = findAttacks(beat, phase, Math.min(0.015, beat / 6));
+  residuals = residuals
+    .map(([k, t]) => t - (phase + k * beat))
+    .sort((a, b) => a - b);
+  if (residuals.length >= 4) {
+    const shift = residuals[Math.floor(residuals.length * 0.25)];
+    if (Math.abs(shift) <= GRID_FIT_MAX_ATTACK_SHIFT) phase += shift;
+  }
+  phase = ((phase % beat) + beat) % beat;
+  // --- 3. which beat is beat 1 -----------------------------------------------------------
+  const low = onePoleLowpass(onePoleLowpass(mono, 150, sampleRate), 150, sampleRate);
+  const high = onePoleHighpass(mono, 2000, sampleRate);
+  const lowCurve = onsetStrengthCurve(computeRmsEnvelope(low, sampleRate, 10, hopMs).vals);
+  const highCurve = onsetStrengthCurve(computeRmsEnvelope(high, sampleRate, 10, hopMs).vals);
+  const L = new Array(beatsPerBar).fill(0);
+  const H = new Array(beatsPerBar).fill(0);
+  const hopSec = hopMs / 1000;
+  const firstOnsets = pickOnsets(times, diffs, 0.65, 0.12);
+  const firstOnsetT = firstOnsets.length ? firstOnsets[0] : frames[0][0];
+  // Beat index 0 is the beat nearest the first real attack in the file: the old anchor.
+  const k0 = Math.round((firstOnsetT - phase) / beat);
+  for (let k = 0; phase + k * beat < duration; k++) {
+    // Envelope frames are stamped at their window's start, so the energy jump for an attack at
+    // t shows up a window earlier; look across that whole span.
+    const centre = Math.round((phase + k * beat) / hopSec);
+    let l = 0;
+    let h = 0;
+    for (let i = centre - 3; i <= centre + 1; i++) {
+      if (lowCurve[i] > l) l = lowCurve[i];
+      if (highCurve[i] > h) h = highCurve[i];
+    }
+    const cls = (((k - k0) % beatsPerBar) + beatsPerBar) % beatsPerBar;
+    L[cls] += l;
+    H[cls] += h;
+  }
+  const sumL = L.reduce((a, b) => a + b, 0) || 1;
+  const sumH = H.reduce((a, b) => a + b, 0) || 1;
+  const kick = L.map((v, i) => v / sumL - H[i] / sumH);
+  let downCls = 0;
+  if (beatsPerBar === 4) {
+    // Kick-on-1-and-3 against snare-on-2-and-4 decides the parity; a margin keeps a flat,
+    // hats-everywhere pattern from flipping the bar on noise.
+    // On a tie the earlier kick wins - the first one in the file, not one a bar later.
+    if (kick[1] + kick[3] - (kick[0] + kick[2]) > 0.2) downCls = kick[3] > kick[1] + 0.15 ? 3 : 1;
+    // Then 1 against 3, which only a clearly heavier kick can settle.
+    const other = (downCls + 2) % 4;
+    if (kick[other] - kick[downCls] > 0.15) downCls = other;
+  } else {
+    const strongest = kick.indexOf(Math.max(...kick));
+    if (kick[strongest] - kick[0] > 0.15) downCls = strongest;
+  }
+
+  const bar = beat * beatsPerBar;
+  const anchor = phase + (k0 + downCls) * beat;
+  const downbeat = anchor - Math.floor(anchor / bar + 1e-9) * bar;
+  return { bpm: 60 / beat, downbeat: Math.max(0, downbeat), confidence: best.coherence };
+}
+
 /**
  * Snap a candidate cut time to the nearest grid line for a given tempo, so that resulting
  * chop lengths are exact whole numbers of beats - or, when `step` says so, of bars - and loop
@@ -412,10 +650,17 @@ export function snapToBeatGrid(t, bpm, gridStart, tolerance, step = null) {
  *   2. The FIRST boundary is on the grid too. Starting the walk at t=0 regardless, as this
  *      used to, made chop 1 the one chop in the file guaranteed not to loop - it ran from 0
  *      to the first grid line plus N bars, so its length was N bars plus the grid phase.
- *   3. The grid's phase is accurate to the sample, not to the 10ms envelope hop the onsets
- *      come off. See refineGridStart - a grid 10ms late cuts straight through the downbeat.
+ *   3. The grid's phase and tempo are accurate to the sample, not to the 10ms envelope hop the
+ *      onsets come off or to the tempo estimator's rounding. See fitBeatGrid - a grid a few
+ *      hundredths of a BPM out walks off the downbeat over the length of a file.
+ *
+ * `grid` is a precomputed fitBeatGrid() result (callers that also draw the grid pass the same
+ * one, so the drawn lines and the cuts can't disagree); pass null to skip fitting and fall back
+ * to anchoring on the first onset. `p.anchorAtStart` treats t=0 as bar 1 instead of detecting
+ * the downbeat - for files already trimmed to the bar in a DAW. Returns the tempo actually used
+ * as `bpm`.
  */
-export function drumRegions(mono, sampleRate, p, bpm = null) {
+export function drumRegions(mono, sampleRate, p, bpm = null, grid = undefined) {
   const duration = mono.length / sampleRate;
   const { times, vals } = computeRmsEnvelope(mono, sampleRate, 20, 10);
   if (!vals.length) return { regions: [[0, duration]], onsets: [] };
@@ -423,6 +668,14 @@ export function drumRegions(mono, sampleRate, p, bpm = null) {
   const { diffs } = multiBandOnsetStrengthCurve(mono, sampleRate, 20, 10, { times, vals });
   const onsets = pickOnsets(times, diffs, p.onsetSensitivity, 0.12);
   const beatsPerBar = p.beatsPerBar || 4;
+  const fit = bpm ? (grid === undefined ? fitBeatGrid(mono, sampleRate, bpm, { beatsPerBar }) : grid) : null;
+  if (fit) {
+    // Lengths the caller derived from the estimated tempo scale with it, so "4 bars" stays
+    // exactly 4 bars at the tempo the grid actually runs at.
+    const scale = bpm / fit.bpm;
+    p = { ...p, preferred: p.preferred * scale, minLen: p.minLen * scale, maxLen: p.maxLen * scale };
+    bpm = fit.bpm;
+  }
   const barSec = bpm ? beatsPerBar * (60 / bpm) : 0;
 
   // A whole-bar preferred length means the caller is chopping in bars, so the grid to snap to
@@ -432,7 +685,10 @@ export function drumRegions(mono, sampleRate, p, bpm = null) {
   const snapStep = wholeBars ? barSec : null;
   const chopStep = wholeBars ? Math.round(barsPerChop) * barSec : 0;
 
-  const gridStart = bpm && onsets.length ? refineGridStart(mono, sampleRate, bpm, onsets[0], beatsPerBar) : 0;
+  let gridStart = 0;
+  if (bpm && p.anchorAtStart) gridStart = 0;
+  else if (fit) gridStart = fit.downbeat;
+  else if (bpm && onsets.length) gridStart = refineGridStart(mono, sampleRate, bpm, onsets[0], beatsPerBar);
   const tolerance = bpm ? (snapStep || 60 / bpm) * 0.5 : 0;
 
   // The earliest grid line at or after the start of the file, so chop 1 is a whole number of
@@ -488,7 +744,7 @@ export function drumRegions(mono, sampleRate, p, bpm = null) {
     const b = bounds[i + 1];
     if (b - a >= 0.5) regions.push([Math.max(0, a), Math.min(duration, b)]);
   }
-  return { regions, onsets, gridStart };
+  return { regions, onsets, gridStart, bpm };
 }
 
 // ---------------------------------------------------------------------------

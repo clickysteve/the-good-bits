@@ -1,6 +1,7 @@
 import {
   phraseRegions,
   drumRegions,
+  fitBeatGrid,
   toMono,
   findNearestZeroCrossing,
   applyFades,
@@ -366,7 +367,7 @@ function activeParams() {
  * by the editor's "Re-chop by bars" action, so there's exactly one place that turns a bar count
  * into drumRegions() parameters.
  */
-function computeDrumRegions(mono, sampleRate, bars, bpm) {
+function computeDrumRegions(mono, sampleRate, bars, bpm, { anchorAtStart = false } = {}) {
   const barsSec = barsToSeconds(bars, bpm);
   const drumParams = { ...activeParams().drums };
   if (barsSec) {
@@ -375,7 +376,31 @@ function computeDrumRegions(mono, sampleRate, bars, bpm) {
     drumParams.maxLen = barsSec * 1.5;
   } // else: no confident tempo - fall back to the fixed preferred/minLen/maxLen above
   const snapBpm = drumParams.snapToTempo ? bpm : null;
-  return drumRegions(mono, sampleRate, drumParams, snapBpm).regions;
+  drumParams.anchorAtStart = anchorAtStart;
+  return drumRegions(mono, sampleRate, drumParams, snapBpm, snapBpm ? beatGridFor(mono, sampleRate, snapBpm) : null).regions;
+}
+
+// fitBeatGrid() results per decoded file and tempo. The same fit places the chops and draws the
+// editor's grid, so they can't disagree - and at a few hundred ms on a long file it's worth not
+// redoing on every re-chop and every editor remount. Keyed on the mono buffer itself, so it goes
+// away with the file.
+const beatGridCache = new WeakMap();
+
+/** The file's fitted beat grid ({bpm, downbeat, confidence}) for an estimated tempo, or null if there's no steady pulse to fit. */
+function beatGridFor(mono, sampleRate, bpm) {
+  if (!mono || !(bpm > 0)) return null;
+  let byBpm = beatGridCache.get(mono);
+  if (!byBpm) beatGridCache.set(mono, (byBpm = new Map()));
+  const key = `${sampleRate}:${bpm}`;
+  if (!byBpm.has(key)) byBpm.set(key, fitBeatGrid(mono, sampleRate, bpm));
+  return byBpm.get(key);
+}
+
+/** The tempo a result card's chops are actually cut at: the fitted one when there is a fit, the effective (estimated or typed) one otherwise. */
+function gridBpmFor(state) {
+  const bpm = state.editContext ? state.editContext.effectiveBpm : null;
+  const grid = beatGridFor(state.mono, state.sampleRate, bpm);
+  return grid ? grid.bpm : bpm;
 }
 
 // ---------------------------------------------------------------------------
@@ -3789,7 +3814,7 @@ function renderFileResult(state) {
   rechopCountInput.type = "number";
   rechopCountInput.min = "1";
   rechopCountInput.max = "200";
-  rechopCountInput.value = "8";
+  rechopCountInput.value = String(state.rechopCount ?? 8);
   rechopCountInput.className = "rechop-count-input";
   rechopCountInput.title = "Target number of slices";
   rechopCountInput.setAttribute("aria-label", "Target number of slices");
@@ -3806,7 +3831,7 @@ function renderFileResult(state) {
     opt.textContent = `${bars} bar${bars === 1 ? "" : "s"}`;
     rechopBarsSelect.appendChild(opt);
   }
-  rechopBarsSelect.value = String(drumBars);
+  rechopBarsSelect.value = String(state.rechopBars ?? drumBars);
   const rechopBarsBtn = document.createElement("button");
   rechopBarsBtn.className = "btn btn--ghost btn--small";
   rechopBarsBtn.textContent = "Re-chop by bars";
@@ -3815,10 +3840,15 @@ function renderFileResult(state) {
   rechopAlignLabel.className = "check check--inline";
   const rechopAlignCheckbox = document.createElement("input");
   rechopAlignCheckbox.type = "checkbox";
-  rechopAlignCheckbox.checked = true;
+  // Lives on state, not just the element: every re-chop re-renders this card, and a checkbox that
+  // quietly snapped back to ticked after each use made it look like it did nothing.
+  rechopAlignCheckbox.checked = state.rechopAlign ?? true;
   const rechopAlignText = document.createElement("span");
-  rechopAlignText.textContent = "align to audible start";
-  rechopAlignLabel.title = "Skip leading silence so the first slice starts where the audio actually begins.";
+  const rechopHasGrid = !!(state.isDrumsMode && state.editContext && beatGridFor(state.mono, state.sampleRate, state.editContext.effectiveBpm));
+  rechopAlignText.textContent = rechopHasGrid ? "start on downbeat" : "skip leading silence";
+  rechopAlignLabel.title = rechopHasGrid
+    ? "On: chops start on the first detected downbeat. Off: the start of the file is treated as bar 1 (for files already trimmed to the bar). Toggling it re-applies your last re-chop if you haven't edited since."
+    : "On: the first slice starts where the audio actually begins. Off: slices start at 0:00. Toggling it re-applies your last re-chop if you haven't edited since.";
   rechopAlignLabel.append(rechopAlignCheckbox, rechopAlignText);
   const rechopClearBtn = document.createElement("button");
   rechopClearBtn.className = "btn btn--ghost btn--small";
@@ -3978,7 +4008,9 @@ function renderFileResult(state) {
       color: themeColor,
       // Grid is a drums-mode, main-chops-only reference (one-shot hits aren't bar-quantized) - see
       // state.isDrumsMode's own doc comment for why this can't just check effectiveBpm alone.
-      bpm: editing === "chops" && state.isDrumsMode && state.editContext ? state.editContext.effectiveBpm : null,
+      // The fitted tempo rather than the estimate, so the drawn grid runs at the tempo the chops
+      // were cut at instead of drifting off them across the file.
+      bpm: editing === "chops" && state.isDrumsMode && state.editContext ? gridBpmFor(state) : null,
       // The canonical region state lives in analysisCache, and it's updated the moment a slice
       // changes - not on some later "Apply" click. This is what makes Export always cut where the
       // waveform currently shows, whether or not "Update previews" was ever clicked. Every commit
@@ -4121,25 +4153,61 @@ function renderFileResult(state) {
 
   applyBtn.addEventListener("click", () => regeneratePreviews());
 
-  rechopCountBtn.addEventListener("click", () => {
+  /** Where a re-chop starts when "start on downbeat"/"skip leading silence" is ticked. */
+  function rechopStart() {
+    if (!rechopAlignCheckbox.checked) return 0;
+    const grid = state.isDrumsMode && state.editContext ? beatGridFor(state.mono, state.sampleRate, state.editContext.effectiveBpm) : null;
+    return grid ? grid.downbeat : findAudibleStart(state.mono, state.sampleRate);
+  }
+
+  function rechopByCount() {
     const n = Math.max(1, Math.min(200, parseInt(rechopCountInput.value, 10) || 1));
-    const offset = rechopAlignCheckbox.checked ? findAudibleStart(state.mono, state.sampleRate) : 0;
-    applyNewChopRegions(equalSliceRegions(offset, duration, n));
-    log(`  ${state.fileName}: re-chopped into ${n} equal slice(s)${offset > 0 ? " aligned to audible start" : ""}.`);
+    const offset = rechopStart();
+    return { regions: equalSliceRegions(offset, duration, n), message: `re-chopped into ${n} equal slice(s) from ${offset.toFixed(3)}s` };
+  }
+
+  function rechopByBars() {
+    const bars = parseInt(rechopBarsSelect.value, 10);
+    const bpm = state.editContext ? state.editContext.effectiveBpm : null;
+    const anchorAtStart = !rechopAlignCheckbox.checked;
+    const regions = computeDrumRegions(state.mono, state.sampleRate, bars, bpm, { anchorAtStart });
+    const grid = beatGridFor(state.mono, state.sampleRate, bpm);
+    const where = grid ? (anchorAtStart ? " with bar 1 at 0:00" : ` from the downbeat at ${grid.downbeat.toFixed(3)}s`) : "";
+    const tempo = grid ? ` at ${grid.bpm.toFixed(2)} BPM` : "";
+    return { regions, message: `re-chopped by ${bars} bar(s)${tempo}${where}` };
+  }
+
+  function runRechop(kind) {
+    const { regions, message } = kind === "bars" ? rechopByBars() : rechopByCount();
+    applyNewChopRegions(regions);
+    // Remembered so toggling the align checkbox can redo it - but only while the chops are still
+    // exactly what it produced, never over manual edits.
+    state.lastRechop = { kind, regions: regions.map((r) => [...r]) };
+    log(`  ${state.fileName}: ${message}.`);
     regeneratePreviews();
+  }
+
+  rechopCountInput.addEventListener("change", () => {
+    state.rechopCount = parseInt(rechopCountInput.value, 10) || 1;
+  });
+  rechopBarsSelect.addEventListener("change", () => {
+    state.rechopBars = parseInt(rechopBarsSelect.value, 10);
+  });
+  rechopAlignCheckbox.addEventListener("change", () => {
+    state.rechopAlign = rechopAlignCheckbox.checked;
+    const last = state.lastRechop;
+    const current = editor ? editor.getRegions() : state.chopMarkers || [];
+    // Previews round every boundary to a whole sample, so "unchanged" means within a sample or so.
+    const tol = 1.5 / state.sampleRate;
+    const untouched =
+      last &&
+      current.length === last.regions.length &&
+      current.every(([s, e], i) => Math.abs(s - last.regions[i][0]) <= tol && Math.abs(e - last.regions[i][1]) <= tol);
+    if (untouched) runRechop(last.kind);
   });
 
-  rechopBarsBtn.addEventListener("click", () => {
-    const bars = parseInt(rechopBarsSelect.value, 10);
-    const offset = rechopAlignCheckbox.checked ? findAudibleStart(state.mono, state.sampleRate) : 0;
-    const offsetSample = Math.round(offset * state.sampleRate);
-    const subMono = offsetSample > 0 ? state.mono.subarray(offsetSample) : state.mono;
-    const bpm = state.editContext ? state.editContext.effectiveBpm : null;
-    const regions = computeDrumRegions(subMono, state.sampleRate, bars, bpm).map(([s, e]) => [s + offset, e + offset]);
-    applyNewChopRegions(regions);
-    log(`  ${state.fileName}: re-chopped by ${bars} bar(s)${offset > 0 ? " aligned to audible start" : ""}.`);
-    regeneratePreviews();
-  });
+  rechopCountBtn.addEventListener("click", () => runRechop("count"));
+  rechopBarsBtn.addEventListener("click", () => runRechop("bars"));
 
   rechopClearBtn.addEventListener("click", async () => {
     const currentCount = editor ? editor.getRegions().length : 0;
