@@ -1,6 +1,7 @@
 import {
   phraseRegions,
   drumRegions,
+  drumRegionsFrom,
   fitBeatGrid,
   toMono,
   findNearestZeroCrossing,
@@ -37,8 +38,8 @@ import { regionStartsToCueFrames, checkM8MarkerLimit } from "./slice-markers.js"
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
 import { sanitizeSourceBpm, resolveEffectiveTempo, formatBpmText } from "./tempo-override.js";
 import { APP_VERSION } from "./version.js";
-import { createEditableWaveform } from "./editor-waveform.js";
-import { resolveRegions, replaceRegions, resolveSelection } from "./chop-regions.js";
+import { createEditableWaveform, formatEditorTime, normalizeSnapMode } from "./editor-waveform.js";
+import { resolveRegions, replaceRegions, resolveSelection, spliceRegionsFrom } from "./chop-regions.js";
 import { regionsEqual, ensureHistory, commitHistory, canUndo, canRedo, undoHistory, redoHistory } from "./edit-history.js";
 import {
   isIncluded,
@@ -364,10 +365,22 @@ function activeParams() {
 /**
  * Break-sized drum regions for `bars` bars at `bpm` (falling back to drums-mode's fixed
  * preferred/min/max length when bpm is unknown). Shared by the initial per-file detection pass and
- * by the editor's "Re-chop by bars" action, so there's exactly one place that turns a bar count
+ * by the editor's "By bars" re-chop action, so there's exactly one place that turns a bar count
  * into drumRegions() parameters.
  */
 function computeDrumRegions(mono, sampleRate, bars, bpm, { anchorAtStart = false } = {}) {
+  const { drumParams, snapBpm } = drumParamsFor(bars, bpm);
+  drumParams.anchorAtStart = anchorAtStart;
+  return drumRegions(mono, sampleRate, drumParams, snapBpm, snapBpm ? beatGridFor(mono, sampleRate, snapBpm) : null).regions;
+}
+
+/** computeDrumRegions() from `startSec` on, with that point as bar 1 - see drumRegionsFrom(). Returns {regions, anchor, bpm}. */
+function computeDrumRegionsFrom(mono, sampleRate, bars, bpm, startSec) {
+  const { drumParams, snapBpm } = drumParamsFor(bars, bpm);
+  return drumRegionsFrom(mono, sampleRate, drumParams, snapBpm, startSec);
+}
+
+function drumParamsFor(bars, bpm) {
   const barsSec = barsToSeconds(bars, bpm);
   const drumParams = { ...activeParams().drums };
   if (barsSec) {
@@ -375,9 +388,7 @@ function computeDrumRegions(mono, sampleRate, bars, bpm, { anchorAtStart = false
     drumParams.minLen = Math.max(0.4, barsSec * 0.5);
     drumParams.maxLen = barsSec * 1.5;
   } // else: no confident tempo - fall back to the fixed preferred/minLen/maxLen above
-  const snapBpm = drumParams.snapToTempo ? bpm : null;
-  drumParams.anchorAtStart = anchorAtStart;
-  return drumRegions(mono, sampleRate, drumParams, snapBpm, snapBpm ? beatGridFor(mono, sampleRate, snapBpm) : null).regions;
+  return { drumParams, snapBpm: drumParams.snapToTempo ? bpm : null };
 }
 
 // fitBeatGrid() results per decoded file and tempo. The same fit places the chops and draws the
@@ -1662,6 +1673,13 @@ taskSwitcherBtns.forEach((btn) => {
 // naming, export settings) a first-time visitor had no way to know were there. It's still just a
 // toggle: closing it is one click away, and the choice is remembered per-browser from then on.
 const RAIL_STORAGE_KEY = "good-bits-rail-v1";
+
+// The waveform editor's Snap granularity (Off, 1/16 ... 4 bars), shared by every card and
+// remembered across sessions - it's a working preference, like zoom habits, not a per-file setting.
+const EDITOR_SNAP_STORAGE_KEY = "good-bits-editor-snap-v1";
+function readEditorSnapMode() {
+  return normalizeSnapMode(readString(EDITOR_SNAP_STORAGE_KEY));
+}
 
 function applyRail(open, { persist = true } = {}) {
   document.documentElement.setAttribute("data-rail", open ? "open" : "closed");
@@ -3747,7 +3765,7 @@ function renderFileResult(state) {
 
   // Which set of slices the waveform edits. Gated on whether chopping/one-shot extraction was
   // part of THIS file's scope (chopSkipped/hasOneShots), not on the current region COUNT - a
-  // manual "Clear (manual)" re-chop legitimately leaves 0 regions, and the editor needs to stay
+  // manual "Clear all" re-chop legitimately leaves 0 regions, and the editor needs to stay
   // mounted (empty, ready for + Add) rather than disappearing the moment the count hits zero.
   const hasChops = Boolean(editContext) && !chopSkipped;
   const hasShots = Boolean(editContext) && !chopSkipped && state.hasOneShots;
@@ -3820,7 +3838,7 @@ function renderFileResult(state) {
   rechopCountInput.setAttribute("aria-label", "Target number of slices");
   const rechopCountBtn = document.createElement("button");
   rechopCountBtn.className = "btn btn--ghost btn--small";
-  rechopCountBtn.textContent = "Re-chop by count";
+  rechopCountBtn.textContent = "Equal slices";
   rechopCountBtn.title = "Replace every current chop with this many equal-length slices.";
   const rechopBarsSelect = document.createElement("select");
   rechopBarsSelect.className = "rechop-bars-select";
@@ -3834,7 +3852,7 @@ function renderFileResult(state) {
   rechopBarsSelect.value = String(state.rechopBars ?? drumBars);
   const rechopBarsBtn = document.createElement("button");
   rechopBarsBtn.className = "btn btn--ghost btn--small";
-  rechopBarsBtn.textContent = "Re-chop by bars";
+  rechopBarsBtn.textContent = "By bars";
   rechopBarsBtn.title = "Replace every current chop with break-sized loops of this bar length.";
   const rechopAlignLabel = document.createElement("label");
   rechopAlignLabel.className = "check check--inline";
@@ -3850,11 +3868,36 @@ function renderFileResult(state) {
     ? "On: chops start on the first detected downbeat. Off: the start of the file is treated as bar 1 (for files already trimmed to the bar). Toggling it re-applies your last re-chop if you haven't edited since."
     : "On: the first slice starts where the audio actually begins. Off: slices start at 0:00. Toggling it re-applies your last re-chop if you haven't edited since.";
   rechopAlignLabel.append(rechopAlignCheckbox, rechopAlignText);
+  // "From the selected chop": re-chop only from that chop's start onward and leave everything
+  // before it alone - how an intro fill or count-in gets carved off, since the fill is exactly
+  // what throws the whole-file downbeat detection. Only usable while a chop is selected.
+  const rechopFromLabel = document.createElement("label");
+  rechopFromLabel.className = "check check--inline";
+  const rechopFromCheckbox = document.createElement("input");
+  rechopFromCheckbox.type = "checkbox";
+  rechopFromCheckbox.checked = state.rechopFromSelected ?? false;
+  const rechopFromText = document.createElement("span");
+  rechopFromLabel.append(rechopFromCheckbox, rechopFromText);
   const rechopClearBtn = document.createElement("button");
   rechopClearBtn.className = "btn btn--ghost btn--small";
-  rechopClearBtn.textContent = "Clear (manual)";
+  rechopClearBtn.textContent = "Clear all";
   rechopClearBtn.title = "Remove every chop so you can build your own from scratch with + Add.";
-  rechopRow.append(rechopCountInput, rechopCountBtn, rechopBarsSelect, rechopBarsBtn, rechopAlignLabel, rechopClearBtn);
+  const rechopTitle = document.createElement("span");
+  rechopTitle.className = "result-rechop-title";
+  rechopTitle.textContent = "Re-chop";
+  const rechopGroup = (...els) => {
+    const g = document.createElement("div");
+    g.className = "result-rechop-group";
+    g.append(...els);
+    return g;
+  };
+  rechopRow.append(
+    rechopTitle,
+    rechopGroup(rechopCountInput, rechopCountBtn),
+    rechopGroup(rechopBarsSelect, rechopBarsBtn),
+    rechopGroup(rechopAlignLabel, rechopFromLabel),
+    rechopClearBtn
+  );
   block.appendChild(rechopRow);
 
   const applyRow = document.createElement("div");
@@ -4011,6 +4054,11 @@ function renderFileResult(state) {
       // The fitted tempo rather than the estimate, so the drawn grid runs at the tempo the chops
       // were cut at instead of drifting off them across the file.
       bpm: editing === "chops" && state.isDrumsMode && state.editContext ? gridBpmFor(state) : null,
+      // Where bar 1 is, so the heavier bar lines fall on the real bars - after carving out an intro
+      // that's the carve point, not chop 1.
+      gridStart: state.chopGridStart,
+      snapMode: readEditorSnapMode(),
+      onSnapModeChange: (mode) => writeString(EDITOR_SNAP_STORAGE_KEY, mode),
       // The canonical region state lives in analysisCache, and it's updated the moment a slice
       // changes - not on some later "Apply" click. This is what makes Export always cut where the
       // waveform currently shows, whether or not "Update previews" was ever clicked. Every commit
@@ -4044,6 +4092,7 @@ function renderFileResult(state) {
         }
         highlightRow(idx);
         updateExportSelectedState();
+        if (editing === "chops") refreshRechopFrom();
       },
       onUndo: () => {
         const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
@@ -4153,6 +4202,29 @@ function renderFileResult(state) {
 
   applyBtn.addEventListener("click", () => regeneratePreviews());
 
+  /** The chop a "from selected chop" re-chop starts at, or null when that option is off or nothing is selected. */
+  function rechopFromIndex() {
+    const regions = editor ? editor.getRegions() : state.chopMarkers || [];
+    const idx = state.chopSelectedIndex;
+    return rechopFromCheckbox.checked && idx != null && idx >= 0 && idx < regions.length ? idx : null;
+  }
+
+  function refreshRechopFrom() {
+    const regions = editor ? editor.getRegions() : state.chopMarkers || [];
+    const idx = state.chopSelectedIndex;
+    const hasSelection = idx != null && idx >= 0 && idx < regions.length;
+    rechopFromCheckbox.disabled = !hasSelection;
+    rechopFromText.textContent = hasSelection ? `from chop ${String(idx + 1).padStart(2, "0")}` : "from selected chop";
+    rechopFromLabel.title = hasSelection
+      ? `Re-chop from the start of chop ${String(idx + 1).padStart(2, "0")} (${formatEditorTime(regions[idx][0])}) onward, with that point as bar 1. Chops before it are left alone - use it to carve off an intro or fill.`
+      : "Select a chop first. Then re-chopping starts from that chop, with it as bar 1, and leaves everything before it alone - use it to carve off an intro or fill.";
+    // With a start point chosen, there's no downbeat to detect and no leading silence to skip.
+    const fromActive = rechopFromCheckbox.checked && hasSelection;
+    rechopAlignCheckbox.disabled = fromActive;
+    rechopAlignLabel.classList.toggle("is-disabled", fromActive);
+    rechopFromLabel.classList.toggle("is-disabled", !hasSelection);
+  }
+
   /** Where a re-chop starts when "start on downbeat"/"skip leading silence" is ticked. */
   function rechopStart() {
     if (!rechopAlignCheckbox.checked) return 0;
@@ -4160,15 +4232,32 @@ function renderFileResult(state) {
     return grid ? grid.downbeat : findAudibleStart(state.mono, state.sampleRate);
   }
 
-  function rechopByCount() {
+  function rechopByCount(from) {
     const n = Math.max(1, Math.min(200, parseInt(rechopCountInput.value, 10) || 1));
+    if (from != null) {
+      return {
+        regions: equalSliceRegions(from, duration, n),
+        anchor: from,
+        message: `re-chopped from ${formatEditorTime(from)} into ${n} equal slice(s)`,
+      };
+    }
     const offset = rechopStart();
     return { regions: equalSliceRegions(offset, duration, n), message: `re-chopped into ${n} equal slice(s) from ${offset.toFixed(3)}s` };
   }
 
-  function rechopByBars() {
+  function rechopByBars(from) {
     const bars = parseInt(rechopBarsSelect.value, 10);
     const bpm = state.editContext ? state.editContext.effectiveBpm : null;
+    if (from != null) {
+      const res = computeDrumRegionsFrom(state.mono, state.sampleRate, bars, bpm, from);
+      const snapped = Math.abs(res.anchor - from) > 0.0005 ? ` (snapped ${Math.round((res.anchor - from) * 1000)}ms onto the beat)` : "";
+      const tempo = res.bpm ? ` at ${res.bpm.toFixed(2)} BPM` : "";
+      return {
+        regions: res.regions,
+        anchor: res.anchor,
+        message: `re-chopped by ${bars} bar(s)${tempo} from ${formatEditorTime(res.anchor)}${snapped}`,
+      };
+    }
     const anchorAtStart = !rechopAlignCheckbox.checked;
     const regions = computeDrumRegions(state.mono, state.sampleRate, bars, bpm, { anchorAtStart });
     const grid = beatGridFor(state.mono, state.sampleRate, bpm);
@@ -4178,17 +4267,36 @@ function renderFileResult(state) {
   }
 
   function runRechop(kind) {
-    const { regions, message } = kind === "bars" ? rechopByBars() : rechopByCount();
+    const fromIdx = rechopFromIndex();
+    const current = editor ? editor.getRegions() : state.chopMarkers || [];
+    const from = fromIdx != null ? current[fromIdx][0] : null;
+    const { regions: fresh, anchor, message } = kind === "bars" ? rechopByBars(from) : rechopByCount(from);
+    const regions = from != null ? spliceRegionsFrom(current, from, anchor, fresh) : fresh;
+    const keptBefore = regions.length - fresh.length;
     applyNewChopRegions(regions);
+    // Bar 1 for the editor's grid: the carve point, or chop 1 of a whole-file re-chop.
+    state.chopGridStart = from != null ? anchor : regions.length ? regions[0][0] : undefined;
+    if (from != null && fresh.length) {
+      // Keep the first new chop selected, so trying a different bar length from the same point is
+      // one click rather than re-finding it. regeneratePreviews() restores this after re-rendering.
+      state.chopSelectedIndex = keptBefore;
+      const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+      if (entry) entry.chopSelectedIndex = keptBefore;
+    }
     // Remembered so toggling the align checkbox can redo it - but only while the chops are still
     // exactly what it produced, never over manual edits.
-    state.lastRechop = { kind, regions: regions.map((r) => [...r]) };
-    log(`  ${state.fileName}: ${message}.`);
+    state.lastRechop = from != null ? null : { kind, regions: regions.map((r) => [...r]) };
+    const kept = from != null ? `, keeping the ${keptBefore} chop(s) before it` : "";
+    log(`  ${state.fileName}: ${message}${kept}.`);
     regeneratePreviews();
   }
 
   rechopCountInput.addEventListener("change", () => {
     state.rechopCount = parseInt(rechopCountInput.value, 10) || 1;
+  });
+  rechopFromCheckbox.addEventListener("change", () => {
+    state.rechopFromSelected = rechopFromCheckbox.checked;
+    refreshRechopFrom();
   });
   rechopBarsSelect.addEventListener("change", () => {
     state.rechopBars = parseInt(rechopBarsSelect.value, 10);
@@ -4266,6 +4374,7 @@ function renderFileResult(state) {
   });
 
   renderLists();
+  refreshRechopFrom();
   mountEditor();
   return block;
 }

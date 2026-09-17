@@ -747,6 +747,47 @@ export function drumRegions(mono, sampleRate, p, bpm = null, grid = undefined) {
   return { regions, onsets, gridStart, bpm };
 }
 
+/**
+ * drumRegions() for everything from `startSec` on, with `startSec` as bar 1 - the "re-chop from
+ * the selected chop" action. The point of it is carving out an intro: a count-in or opening fill
+ * that isn't in the groove throws off both the tempo fit and the downbeat pick when the whole file
+ * is analysed, so here only the audio from the chosen point is fitted, and the chosen point is
+ * trusted as the downbeat rather than detected.
+ *
+ * A hand-placed mark is rarely sample-exact, so it's snapped onto the fitted beat line when one is
+ * within `snapSec` (default: 50ms, or a tenth of a beat on faster material) - close enough that it
+ * must be the beat the user meant, and under half a sixteenth, so a start deliberately on an
+ * off-beat 16th is left where it is. The fit looks from a little before the mark so a mark placed just
+ * AFTER the attack can still be pulled back onto it.
+ *
+ * Returns {regions, anchor, bpm}: the new regions (all at or after `anchor`), where bar 1 actually
+ * landed after snapping, and the tempo used.
+ */
+export function drumRegionsFrom(mono, sampleRate, p, bpm, startSec, { snapSec = null } = {}) {
+  const duration = mono.length / sampleRate;
+  let anchor = Math.max(0, Math.min(duration, startSec));
+  let grid = null;
+  if (bpm > 0) {
+    if (snapSec == null) snapSec = Math.min(0.05, 60 / bpm / 10);
+    const leadSamples = Math.round(Math.min(anchor, snapSec * 2) * sampleRate);
+    const fromSample = Math.round(anchor * sampleRate) - leadSamples;
+    grid = fitBeatGrid(mono.subarray(fromSample), sampleRate, bpm, { beatsPerBar: p.beatsPerBar || 4 });
+    if (grid) {
+      const beat = 60 / grid.bpm;
+      const mark = anchor - fromSample / sampleRate;
+      const phase = grid.downbeat % beat;
+      const line = phase + Math.round((mark - phase) / beat) * beat;
+      if (line >= 0 && Math.abs(line - mark) <= snapSec) anchor = fromSample / sampleRate + line;
+    }
+  }
+  const anchorSample = Math.round(anchor * sampleRate);
+  anchor = anchorSample / sampleRate;
+  const sub = mono.subarray(anchorSample);
+  if (sub.length < sampleRate * 0.5) return { regions: [], anchor, bpm: grid ? grid.bpm : bpm };
+  const result = drumRegions(sub, sampleRate, { ...p, anchorAtStart: true }, bpm, grid ? { ...grid, downbeat: 0 } : null);
+  return { regions: result.regions.map(([a, b]) => [a + anchor, b + anchor]), anchor, bpm: result.bpm };
+}
+
 // ---------------------------------------------------------------------------
 // Click-free boundaries
 // ---------------------------------------------------------------------------

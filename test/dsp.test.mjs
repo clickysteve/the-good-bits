@@ -18,6 +18,7 @@ import {
   refineGridStart,
   fitBeatGrid,
   drumRegions,
+  drumRegionsFrom,
   findNearestZeroCrossing,
   applyFades,
   toMono,
@@ -370,6 +371,37 @@ test("drumRegions: anchorAtStart treats 0:00 as bar 1", () => {
   const { regions } = drumRegions(sig, SR, p, 120);
   assert.equal(regions[0][0], 0);
   assert.ok(Math.abs(regions[1][0] - 8) < 0.01, `second chop should start 4 bars in, got ${regions[1][0]}`);
+});
+
+test("drumRegionsFrom: carves off an intro fill and chops whole bars from the chosen point", () => {
+  const bpm = 120;
+  const bar = 2;
+  // A 3.3s intro fill: loud off-grid hits at a different rate, which is what wrecks whole-file
+  // downbeat detection. The groove starts right after it.
+  const intro = new Float32Array(Math.round(3.3 * SR));
+  for (let t = 0.05; t < 3.2; t += 0.17) {
+    const s0 = Math.round(t * SR);
+    for (let i = 0; i < 0.08 * SR; i++) intro[s0 + i] += 0.8 * Math.sin((2 * Math.PI * 200 * i) / SR) * Math.exp((-i / SR) * 40);
+  }
+  const groove = rockBeat(bpm, 40, { phase: 0 });
+  const sig = concat(intro, groove);
+  const downbeat = intro.length / SR;
+  const p = { preferred: 4 * bar, minLen: 2 * bar, maxLen: 6 * bar, onsetSensitivity: 0.65 };
+  // A hand-placed mark 15ms late of the real downbeat.
+  const { regions, anchor } = drumRegionsFrom(sig, SR, p, bpm, downbeat + 0.015);
+  assert.ok(Math.abs(anchor - downbeat) < 0.004, `bar 1 should snap to the downbeat at ${downbeat}s, got ${anchor}s`);
+  assert.ok(regions.length >= 4);
+  assert.equal(regions[0][0], anchor);
+  for (let i = 0; i < regions.length - 1; i++) {
+    assert.ok(Math.abs((regions[i][1] - regions[i][0]) / bar - 4) < 0.002, `chop ${i + 1} is not 4 bars`);
+  }
+});
+
+test("drumRegionsFrom: a mark nowhere near a beat is used as-is", () => {
+  const sig = rockBeat(120, 30, { phase: 0 });
+  const p = { preferred: 8, minLen: 4, maxLen: 12, onsetSensitivity: 0.65 };
+  const { anchor } = drumRegionsFrom(sig, SR, p, 120, 4.25); // halfway between beats
+  assert.ok(Math.abs(anchor - 4.25) < 1 / SR);
 });
 
 test("drumRegions: produces loop-length chops close to preferred length", () => {

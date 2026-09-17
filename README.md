@@ -74,9 +74,14 @@ site on GitHub Pages.
 - **Re-chop and manual chopping, from the editor.** Beyond dragging
   boundaries, a file's card has an explicit (and deliberately destructive)
   **re-chop**: replace every current chop with a target number of
-  equal-length slices, or with break-sized loops at a chosen bar length,
-  optionally aligned to the audio's actual audible start so leading
-  silence doesn't offset every slice. **Clear (manual)** empties the chop
+  equal-length slices (**Equal slices**), or with break-sized loops at a
+  chosen bar length (**By bars**). **Start on downbeat** starts them on the
+  detected first downbeat (untick it to treat 0:00 as bar 1, or - with no
+  tempo - to keep leading silence). **From chop NN** re-chops only from the
+  selected chop onward, with its start as bar 1, and leaves everything
+  before it alone: the way to carve off an intro fill or count-in that
+  throws the phrasing out. A hand-placed start within a beat's tenth (50ms
+  max) snaps onto the beat. **Clear all** empties the chop
   list entirely so you can build one from scratch with **+ Add** - the
   same editor either way, not a separate manual-chopping mode. A single
   edited chop can also be exported on its own with **Export selected**,
@@ -117,11 +122,13 @@ site on GitHub Pages.
   that file - with an option to apply your choice to the rest of the batch.
 - **Editing chops and one-shots is independent.** A file with both shows a
   Chops / One-shots switch above the waveform; adjusting one set never
-  discards the other. Dragged boundaries snap when you let go - to the beat
-  grid on tempo-locked drum chops, so a hand-placed cut stays on the bar, and
-  to the nearest zero-crossing on everything else, so it stays click-free.
-  Drop a boundary more than a sixteenth from a grid line and it stays exactly
-  where you put it, for when an off-grid cut is the point.
+  discards the other. On tempo-locked drum chops the toolbar's **Snap**
+  granularity (Off, 1/16, 1/8, 1/4, 1/2 bar, 1, 2 or 4 bars - remembered,
+  1 bar by default) makes drags, double-clicks and **+ Add** land on the
+  nearest line of that grid - live while dragging - and Shift+arrow step by
+  it. Bar lines count from bar 1, not from 0:00. **Off**, and
+  everything that isn't tempo-locked, snaps to the nearest zero-crossing on
+  release instead, so a deliberately off-grid cut stays click-free.
 - **One-shot extraction that returns usable hits.** Hits used to be cut hard
   at the next onset, so on a busy break every "one-shot" came out as a ~40ms
   stub with its tail chopped off, and a dedupe pass that clustered on three

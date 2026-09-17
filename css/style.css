@@ -315,6 +315,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .check input { margin: 2px 0 0; flex: none; }
 .check span { min-width: 0; }
 .check--inline { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); }
+.check--inline.is-disabled { opacity: .45; cursor: not-allowed; }
 
 /* slider + typable number, paired */
 
@@ -746,6 +747,17 @@ input[type="range"]::-moz-range-thumb {
 .editable-waveform-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .editable-waveform-toolbar .btn--small { padding: 3px 9px; }
 .editable-waveform-toolbar .is-playing { color: var(--accent); border-color: var(--accent-dim); }
+.editable-waveform-snap { display: flex; align-items: center; gap: 2px; margin-left: 6px; }
+.editable-waveform-snap[hidden] { display: none; }
+.editable-waveform-snap-label {
+  margin-right: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.editable-waveform-snap select.editable-waveform-snap-select { width: auto; font-size: 12px; padding: 2px 6px; }
 
 .editable-waveform-zoom-label {
   margin-left: auto;
@@ -784,7 +796,7 @@ input[type="range"]::-moz-range-thumb {
 .result-rechop-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 8px 16px;
   flex-wrap: wrap;
   padding: 8px 10px;
   border: 1px dashed var(--border);
@@ -793,27 +805,27 @@ input[type="range"]::-moz-range-thumb {
 
 .result-rechop-row[hidden] { display: none; }
 
-.rechop-count-input {
-  width: 56px;
-  font: inherit;
-  font-size: 12.5px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: var(--radius-sm);
-  padding: 4px 6px;
+.result-rechop-title {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
 }
 
-.rechop-bars-select {
-  font: inherit;
-  font-size: 12.5px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: var(--radius-sm);
-  padding: 4px 6px;
+.result-rechop-group { display: flex; align-items: center; gap: 6px; }
+.result-rechop-group .check--inline { align-items: center; gap: 6px; }
+.result-rechop-group .check--inline input { margin: 0; }
+.result-rechop-row > .btn:last-child { margin-left: auto; }
+
+/* The base input/select rules set width: 100%, which is what made these fill the whole row. */
+.result-rechop-row input.rechop-count-input,
+.result-rechop-row select.rechop-bars-select {
   width: auto;
+  font-size: 12.5px;
+  padding: 3px 6px;
 }
+.result-rechop-row input.rechop-count-input { width: 52px; }
 
 /* the row matching the slice selected on the waveform */
 .chop-row.is-selected {
