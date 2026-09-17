@@ -171,6 +171,100 @@ test("phraseRegions: end-to-end on a 3-phrase synthetic sax-like signal", () => 
   assert.equal(regions.length, 3, `expected 3 phrases, got ${JSON.stringify(regions)}`);
 });
 
+/**
+ * A run of separately-attacked notes with no silence between them - legato playing, which is where
+ * gate-and-split has nothing to work with. `dipAfter` inserts a quiet moment (a breath, a released
+ * chord) after that many notes, the thing that actually ends a phrase.
+ */
+function noteRun(count, noteSec = 0.8, freq = 440, { dipAfter = null, dipSec = 0.35, dipAmp = 0.02, hissAmp = 0 } = {}) {
+  const parts = [];
+  for (let i = 0; i < count; i++) {
+    const n = Math.round(noteSec * SR);
+    const out = new Float32Array(n);
+    for (let k = 0; k < n; k++) {
+      // Each note attacks and decays a little, so it reads as a note rather than one held tone.
+      out[k] = 0.7 * Math.sin((2 * Math.PI * (freq + i * 20) * k) / SR) * Math.exp((-k / SR) * 1.2);
+    }
+    parts.push(out);
+    if (dipAfter != null && i === dipAfter - 1) {
+      const d = new Float32Array(Math.round(dipSec * SR));
+      for (let k = 0; k < d.length; k++) d[k] = dipAmp * Math.sin((2 * Math.PI * 300 * k) / SR);
+      parts.push(d);
+    }
+  }
+  const sig = concat(...parts);
+  if (hissAmp) {
+    let seed = 7;
+    for (let i = 0; i < sig.length; i++) {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      sig[i] += hissAmp * (seed / 1073741824 - 1);
+    }
+  }
+  return sig;
+}
+
+/** Start of the first note after `t`, as these synthetic runs lay them out. */
+function noteStartAfter(t, noteSec, dipSec, dipAfter) {
+  return dipAfter * noteSec + dipSec;
+}
+
+test("phraseRegions: splits continuous playing at the breath, not at an arbitrary target length", () => {
+  const noteSec = 0.8;
+  const dipSec = 0.35;
+  const sig = noteRun(10, noteSec, 440, { dipAfter: 5, dipSec });
+  const p = { silenceMarginDb: 18, minSilenceDuration: 0.5, mergeGap: 0.4, minLen: 0.8, maxLen: 18, preferred: 11, pad: 0.12 };
+  const { regions } = phraseRegions(sig, SR, p);
+  assert.equal(regions.length, 2, `expected the two phrases either side of the breath, got ${JSON.stringify(regions)}`);
+  const expected = noteStartAfter(0, noteSec, dipSec, 5);
+  assert.ok(
+    Math.abs(regions[1][0] - expected) < 0.12,
+    `phrase 2 should start on the note after the breath (${expected}s), got ${regions[1][0]}s`
+  );
+});
+
+test("phraseRegions: every phrase starts on a note attack, never part-way into one", () => {
+  const noteSec = 0.8;
+  const dipSec = 0.35;
+  const dipAfter = 6;
+  const sig = noteRun(12, noteSec, 440, { dipAfter, dipSec });
+  // Where the notes actually are, breath included - what a phrase start has to land on.
+  const noteStarts = [];
+  for (let i = 0; i < 12; i++) noteStarts.push(i * noteSec + (i >= dipAfter ? dipSec : 0));
+  // A short maxLen forces splits inside continuous playing, where there is no breath to find.
+  const p = { silenceMarginDb: 18, minSilenceDuration: 0.5, mergeGap: 0.4, minLen: 0.8, maxLen: 4, preferred: 3, pad: 0.12 };
+  const { regions } = phraseRegions(sig, SR, p);
+  assert.ok(regions.length >= 3, `expected maxLen to force several phrases, got ${regions.length}`);
+  for (const [s] of regions) {
+    const nearest = noteStarts.reduce((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a));
+    assert.ok(
+      s <= nearest + 0.02 && s >= nearest - 0.1,
+      `phrase starting at ${s.toFixed(2)}s should sit just before the note at ${nearest.toFixed(2)}s`
+    );
+  }
+});
+
+test("phraseRegions: a hissy transfer keeps its audio instead of being gated away", () => {
+  // Tape hiss puts the noise floor high enough that "floor + margin" lands in the middle of the
+  // playing - which used to throw away most of the file.
+  const sig = noteRun(8, 0.8, 440, { dipAfter: 4, hissAmp: 0.03 });
+  const p = { silenceMarginDb: 10, minSilenceDuration: 0.5, mergeGap: 0.55, minLen: 1.8, maxLen: 20, preferred: 13, pad: 0.18 };
+  const { regions } = phraseRegions(sig, SR, p);
+  const covered = regions.reduce((sum, [s, e]) => sum + (e - s), 0);
+  const duration = sig.length / SR;
+  assert.ok(covered > duration * 0.85, `only ${(100 * covered / duration).toFixed(0)}% of the file ended up in a chop`);
+});
+
+test("phraseRegions: digital silence in the file doesn't break the gate", () => {
+  // A file with true -inf silence reports a noise floor of -180dB, so a floor-relative gate sits
+  // below anything that ever happens and nothing reads as a gap.
+  const sig = concat(silence(1.0), noteRun(4, 0.8), silence(0.8), noteRun(4, 0.8, 520), silence(1.0));
+  const p = { silenceMarginDb: 18, minSilenceDuration: 0.5, mergeGap: 0.4, minLen: 0.8, maxLen: 18, preferred: 11, pad: 0.12 };
+  const { regions } = phraseRegions(sig, SR, p);
+  assert.equal(regions.length, 2, `expected the two phrases, got ${JSON.stringify(regions)}`);
+  assert.ok(regions[0][0] > 0.5, `phrase 1 should start at the music, not in the leading silence (got ${regions[0][0]}s)`);
+  assert.ok(regions[1][1] < sig.length / SR - 0.5, `phrase 2 should end at the music, not in the trailing silence (got ${regions[1][1]}s)`);
+});
+
 // --- drum / onsets ---------------------------------------------------------
 
 test("onsetStrengthCurve + pickOnsets: detects periodic hits", () => {

@@ -103,8 +103,15 @@ let processing = false;
  */
 const analysisCache = new Map();
 
+// Every source file gets its own id when it enters the queue (see pushSourceFolder), because path
+// plus name is NOT unique: pick two stem exports one by one and both are called "other.m4a" with no
+// relative directory, so they shared a cache entry - the second file showed the first one's key,
+// tempo and chops, and exported them.
+let nextFileUid = 1;
+
 function analysisKey(folder, fileInfo) {
-  return `${folder.id}::${fileInfo.relativeDir || ""}/${fileInfo.name}`;
+  if (!fileInfo.uid) fileInfo.uid = `f${nextFileUid++}`;
+  return `${folder.id}::${fileInfo.uid}::${fileInfo.relativeDir || ""}/${fileInfo.name}`;
 }
 
 /**
@@ -203,6 +210,7 @@ let sessionEpoch = 0;
  */
 function pushSourceFolder(descriptor) {
   descriptor.files = normalizeExportIncludedFiles(normalizeIncludedFiles(descriptor.files));
+  for (const f of descriptor.files) if (!f.uid) f.uid = `f${nextFileUid++}`;
   sourceFolders.push(descriptor);
 }
 
@@ -336,7 +344,7 @@ const PARAM_SCHEMAS = {
     { key: "minSilenceDuration", label: "Minimum gap to count as silence", min: 0.1, max: 1.0, step: 0.02, unit: "s" },
     { key: "mergeGap", label: "Bridge gaps shorter than", min: 0.05, max: 1.0, step: 0.02, unit: "s" },
     { key: "minLen", label: "Minimum phrase length", min: 0.2, max: 3.0, step: 0.1, unit: "s" },
-    { key: "preferred", label: "Preferred phrase length", min: 5, max: 20, step: 0.5, unit: "s" },
+    { key: "preferred", label: "Split over-long phrases near", min: 5, max: 20, step: 0.5, unit: "s" },
     { key: "maxLen", label: "Maximum phrase length", min: 5, max: 25, step: 0.5, unit: "s" },
     { key: "pad", label: "Padding around each phrase", min: 0, max: 0.5, step: 0.02, unit: "s" },
   ],
@@ -345,7 +353,7 @@ const PARAM_SCHEMAS = {
     { key: "minSilenceDuration", label: "Minimum gap to count as silence", min: 0.2, max: 1.5, step: 0.02, unit: "s" },
     { key: "mergeGap", label: "Bridge gaps shorter than", min: 0.1, max: 1.5, step: 0.02, unit: "s" },
     { key: "minLen", label: "Minimum phrase length", min: 0.5, max: 4.0, step: 0.1, unit: "s" },
-    { key: "preferred", label: "Preferred phrase length", min: 8, max: 25, step: 0.5, unit: "s" },
+    { key: "preferred", label: "Split over-long phrases near", min: 8, max: 25, step: 0.5, unit: "s" },
     { key: "maxLen", label: "Maximum phrase length", min: 8, max: 30, step: 0.5, unit: "s" },
     { key: "pad", label: "Padding around each phrase", min: 0, max: 0.5, step: 0.02, unit: "s" },
   ],
@@ -725,7 +733,7 @@ namingPatternEditorHost.appendChild(namingPatternEditor.el);
 // chop, so a per-chop number would never mean anything here (see js/naming-tokens.js).
 const namingFolderPatternEditor = createNamingPatternEditor({
   initialValue: namingSettings.folderPattern,
-  tokens: ["name", "tag", "key", "tempo"],
+  tokens: ["name", "folder", "tag", "key", "tempo"],
   onChange: (pattern) => {
     namingSettings.folderPattern = pattern;
     updateNamingPreview();
@@ -774,14 +782,52 @@ function formatTempoToken(kt) {
  * EFFECTIVE key/tempo (manual override applied, if any - see effectiveTempo()/effectiveKt in
  * processOneFile) so a corrected tempo is what {tempo} actually reflects.
  */
-function buildTaggedStem(stem, kt) {
+function buildTaggedStem(stem, kt, sourceFolderName = "") {
   const resolved = resolveFolderName(namingSettings.folderPattern, {
     name: stem,
+    folder: sourceFolderName,
     tag: buildKeyTempoTag(kt, namingSettings.separator),
     key: formatKeyToken(kt),
     tempo: formatTempoToken(kt),
   });
   return sanitizeForPath(resolved, SAFE_NAME_LIMIT) || stem;
+}
+
+/**
+ * The folder a source file came from, for the {folder} token: the last segment of its path inside
+ * the picked folder, or the picked folder's own name for a file sitting at its root. Loose files
+ * picked one by one have no folder of their own to report - the File System Access API never
+ * exposes one - so they resolve to "".
+ */
+function sourceFolderNameFor(folder, fileInfo) {
+  const rel = fileInfo.relativeDir || "";
+  if (rel) return rel.split("/").filter(Boolean).pop() || "";
+  return folder.isLoose ? "" : folder.name || "";
+}
+
+// Output folder names already handed out during THIS run, so two sources can never write into the
+// same one. Stem exports make this routine rather than theoretical: every folder of them holds a
+// file called other.m4a, so without this they all resolve to the same output name - and since an
+// export clears that folder's previous chops before writing, the second file would delete the
+// first's output as well as overwriting it. Keyed per source folder and per relative directory,
+// which are already distinct output paths.
+const runOutputNames = new Map();
+
+// Output names this run had to change to avoid a clash, for the end-of-run summary.
+const runRenamedOutputs = [];
+
+/** `base`, or `base 2`/`base 3`/... if an earlier file in this run already claimed it. */
+function claimOutputName(folder, fileInfo, base) {
+  const dirKey = `${folder.id}::${fileInfo.relativeDir || ""}`;
+  const key = `${dirKey}::${base.toLowerCase()}`;
+  const taken = runOutputNames.get(key) || 0;
+  runOutputNames.set(key, taken + 1);
+  if (!taken) return base;
+  let n = taken + 1;
+  let candidate = `${base} ${n}`;
+  while (runOutputNames.get(`${dirKey}::${candidate.toLowerCase()}`)) candidate = `${base} ${++n}`;
+  runOutputNames.set(`${dirKey}::${candidate.toLowerCase()}`, 1);
+  return candidate;
 }
 
 /**
@@ -792,7 +838,7 @@ function buildTaggedStem(stem, kt) {
  * combined key+tempo string, while {key}/{tempo} are the same detection split into independent
  * tokens (see js/naming-tokens.js for why both forms stay supported).
  */
-function buildChopFileName(stem, tag, index, kt) {
+function buildChopFileName(stem, tag, index, kt, sourceFolderName = "") {
   const num = String(index).padStart(2, "0");
   let template = (namingSettings.chopPattern || "").trim() || "{number}";
   if (!/\{number\}/i.test(template)) template = `${template} {number}`.trim();
@@ -801,6 +847,7 @@ function buildChopFileName(stem, tag, index, kt) {
     tag,
     key: formatKeyToken(kt),
     tempo: formatTempoToken(kt),
+    folder: sourceFolderName,
     number: num,
   })
     .replace(/\s+/g, " ")
@@ -821,8 +868,9 @@ function updateNamingPreview() {
     bpm: detectionSettings.tempo ? 120 : null,
   };
   const sampleTag = buildKeyTempoTag(sampleKt, namingSettings.separator);
-  const folderName = buildTaggedStem("drum_take", sampleKt);
-  const sampleNames = [1, 2, 3].map((i) => buildChopFileName("drum_take", sampleTag, i, sampleKt));
+  const sampleFolder = "session_01";
+  const folderName = buildTaggedStem("drum_take", sampleKt, sampleFolder);
+  const sampleNames = [1, 2, 3].map((i) => buildChopFileName("drum_take", sampleTag, i, sampleKt, sampleFolder));
   namingPreviewEl.textContent = `${folderName}/  ->  ${sampleNames.join(", ")}`;
 }
 
@@ -2862,7 +2910,12 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   const isManualTempo = tempoOverrides.has(key);
   const effectiveKt = { ...kt, bpm: effectiveBpm };
   const tag = buildKeyTempoTag(effectiveKt, namingSettings.separator);
-  const taggedStem = buildTaggedStem(stem, effectiveKt);
+  const baseStem = buildTaggedStem(stem, effectiveKt, sourceFolderNameFor(folder, fileInfo));
+  const taggedStem = claimOutputName(folder, fileInfo, baseStem);
+  if (taggedStem !== baseStem) {
+    runRenamedOutputs.push({ file: fileInfo.name, from: baseStem, to: taggedStem });
+    log(`    another file in this run already exports to "${baseStem}" - writing to "${taggedStem}" instead`);
+  }
 
   const keyText = formatKeyText(kt);
   const bpmText = effectiveBpm || detectionSettings.tempo ? formatBpmText(effectiveBpm, isManualTempo, kt.available) : "off";
@@ -2960,6 +3013,9 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   // barLocked: these chops were cut to a bar grid, so their exact sample length IS the
   // deliverable and the export must not round it off. See exportChopsForRegions.
   const editContext = { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt: effectiveKt, barLocked: mode === "drums" && !!effectiveBpm };
+  // Where this source's chops will be written, shown on its card so a batch can be checked for
+  // clashes by eye before Export rather than after.
+  const outputPath = `chops/${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}/`;
   let chopRows = [];
   let chopMarkers = [];
   let oneShotRows = [];
@@ -3117,6 +3173,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
     // break from an incidentally-detected tempo on a phrase-mode source - only this can. Used to
     // gate the waveform editor's beat/bar grid (see mountEditor's createEditableWaveform call),
     // which would be actively misleading on chops that were never bar-quantized to begin with.
+    outputPath,
     isDrumsMode: mode === "drums",
     hasOneShots: mode === "drums" && extractOneShots,
     chopSelectedIndex: previous ? previous.chopSelectedIndex : null,
@@ -3211,7 +3268,7 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
   for (let i = 0; i < regionDefs.length; i++) {
     const { startSample, endSample } = regionDefs[i];
     const { blob, seconds } = heavyResults[i];
-    const fileName = buildChopFileName(stem, tag, i + 1, kt);
+    const fileName = buildChopFileName(stem, tag, i + 1, kt, sourceFolderNameFor(folder, fileInfo));
     if (writeIndividualFiles) {
       await writeOutput(folder, "chops", relPath, fileName, blob, zipBatch, fileInfo, dryRun);
       if (wantCleanCopy) {
@@ -3350,7 +3407,7 @@ async function exportSelectedChop(editContext, region, index) {
   });
 
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
-  const fileName = buildChopFileName(stem, tag, index + 1, kt);
+  const fileName = buildChopFileName(stem, tag, index + 1, kt, sourceFolderNameFor(folder, fileInfo));
 
   if (folder.kind === "fsa") {
     const ok = await ensureReadWritePermission(folder.handle);
@@ -3690,7 +3747,7 @@ function renderCollapsedExportOffCard(state) {
  * just reload analysisCache's current regions, because those ARE the edits.
  */
 function renderFileResult(state) {
-  const { fileName, keyText, bpmText, chopRows, oneShotRows, duration, editContext, chopSkipped } = state;
+  const { fileName, keyText, bpmText, chopRows, oneShotRows, duration, editContext, chopSkipped, outputPath } = state;
 
   // Export-off files collapse to the compact row above instead of staying fully expanded - this is
   // purely which of the two card shapes gets rendered; the underlying source, its analysis and every
@@ -3724,11 +3781,21 @@ function renderFileResult(state) {
   metaEl.textContent = `key: ${keyText} · tempo: ${bpmText} · ${chopSkipped ? "whole file processed" : `${chopRows.length} chop(s)`}${
     oneShotRows.length ? ` · ${oneShotRows.length} one-shot(s)` : ""
   }`;
+  // The destination, spelled out: two sources writing into one folder used to mean the second
+  // silently replaced the first, and even now that names are made unique automatically, "is this
+  // batch going to collide?" should be answerable by looking rather than by exporting and checking.
+  const destEl = document.createElement("span");
+  destEl.className = "result-file-dest";
+  if (outputPath) {
+    destEl.textContent = `→ ${outputPath}`;
+    destEl.title = `Chops from this source are written to ${outputPath} inside the output folder.`;
+  }
   const titleGroup = document.createElement("div");
   titleGroup.className = "result-file-title-group";
   titleGroup.appendChild(nameEl);
   if (editContext) titleGroup.appendChild(sourceEl);
   titleGroup.appendChild(metaEl);
+  if (outputPath) titleGroup.appendChild(destEl);
   header.appendChild(titleGroup);
 
   const actionsGroup = document.createElement("div");
@@ -4414,6 +4481,23 @@ function updateProgress(done, total, label) {
 }
 
 /** Runs the batch. `write: false` is Preview - identical work, nothing saved. */
+/**
+ * After a Preview, say plainly whether anything in this batch would have written over anything
+ * else. "Will these collide?" is the question that makes exporting a big batch nerve-wracking, and
+ * it should be answerable from the log without exporting first and inspecting the folder after.
+ */
+function logOutputConflictSummary() {
+  const total = [...runOutputNames.keys()].length;
+  if (!total) return;
+  if (!runRenamedOutputs.length) {
+    log("Output folders: all different - nothing in this batch overwrites anything else.");
+    return;
+  }
+  log(`Output folders: ${runRenamedOutputs.length} renamed so nothing overwrites anything else:`);
+  for (const r of runRenamedOutputs) log(`  ${r.file}: "${r.from}" -> "${r.to}"`);
+  log('  Add {folder} to the folder-name pattern to name them by where they came from instead.');
+}
+
 async function processBatch({ write = true } = {}) {
   // Zero-exportable-files guard (js/file-inclusion.js): Export-only, never Preview - Process must
   // keep working even when every source has "include in export" off (see onExportInclusionChanged()
@@ -4452,6 +4536,10 @@ async function processBatch({ write = true } = {}) {
   // Cleared up front, not just left to be overwritten - a folder skipped entirely this run (no
   // included files, permission denied) must not keep showing a destination from a previous run.
   for (const f of sourceFolders) f.writtenSubdirs = null;
+  // Fresh per run, so numbering is decided by this run's file order alone (which is stable) rather
+  // than accumulating suffixes every time Process is pressed.
+  runOutputNames.clear();
+  runRenamedOutputs.length = 0;
 
   if (task === "stretch") {
     // Usually a no-op (renderFolderList() already keeps this current as files are added/removed) -
@@ -4572,6 +4660,7 @@ async function processBatch({ write = true } = {}) {
       logSuccess(`${status} Exported ${filesDone} file(s).`);
     }
   } else if (dryRun) {
+    logOutputConflictSummary();
     log(
       `${cancelRequested ? "Cancelled." : "Done."} ${totalChops} chop(s) from ${processedFolders} folder(s). ` +
         `Adjust anything you want, then hit Export to save.`

@@ -194,23 +194,275 @@ export function splitLongNaturally(regions, times, vals, preferred, maxLen, minP
 }
 
 /**
- * Full phrase-detection pipeline for melodic sources (sax/trumpet, Rhodes).
- * @param {Float32Array} mono
- * @param {number} sampleRate
- * @param {object} p  mode parameters, see ui defaults in app.js
+ * How far below a file's own playing level the gate sits, when that's higher than the noise-floor
+ * margin. The floor alone is not a reliable reference: a file with true digital silence in it
+ * reports a floor of -180dB, which puts the gate below anything that ever happens, and a hissy
+ * tape transfer reports a floor so high that quiet playing reads as silence. Measuring down from
+ * how loud the file actually plays is stable in both cases.
+ */
+const PHRASE_ACTIVE_DROP_DB = 26;
+
+/** Gate ceiling: quiet playing this far under the file's own playing level still counts as playing. */
+const PHRASE_ACTIVE_FLOOR_DB = 26;
+
+/** Pre-roll kept in front of the note a phrase starts on, so the attack is never clipped. */
+const PHRASE_PREROLL_SEC = 0.02;
+
+/** How far from a chosen boundary to look for the attack it should actually sit on. */
+const PHRASE_ATTACK_SEARCH_SEC = 0.35;
+
+/** How far back a candidate boundary looks for the dip that makes it a phrase end. */
+const PHRASE_DIP_WINDOW_SEC = 0.3;
+
+/** A dip this far (dB) under the surrounding playing level counts as a phrase end without a full silence. */
+const PHRASE_DIP_DB = 12;
+
+/** ...and it has to stay down this long. A gap between two notes of one phrase is brief; a phrase end hangs. */
+const PHRASE_DIP_MIN_SEC = 0.15;
+
+/** Score a candidate boundary must reach to split continuous playing. */
+const PHRASE_BOUNDARY_SCORE = 2.5;
+
+/** Phrases are not one note long: boundaries stay at least this far apart, over and above minLen. */
+const PHRASE_MIN_SPACING_SEC = 2;
+
+/**
+ * Musical phrase detection for melodic sources (sax/trumpet, Rhodes).
+ *
+ * Silence alone does not find phrases in this material. A horn player breathes, but a Rhodes part
+ * can run for minutes with no gap that ever reaches the noise floor, and the old pipeline - gate,
+ * merge, then cut anything too long at its quietest moment - had nothing musical to say about
+ * those files: it cut every `preferred` seconds at whatever frame happened to be lowest, which
+ * lands mid-note about as often as not.
+ *
+ * What actually marks the end of a phrase is a DIP followed by an ATTACK: the line falls away (a
+ * breath, a released chord, a held note decaying) and then something new starts. Both parts matter.
+ * A dip with no attack after it is just a quiet passage; an attack with no dip before it is the
+ * next note of the phrase already in progress. Scoring the two together finds phrase boundaries in
+ * continuous playing, and it puts the cut ON the attack, where the ear expects a sample to start.
+ *
+ * So: gate the file into runs of playing, split each run at every boundary that scores highly
+ * enough, force a split in anything still longer than maxLen, and let the lengths fall where the
+ * playing puts them. `preferred` is only a mild tiebreaker between two otherwise equal candidates,
+ * not a target length.
  */
 export function phraseRegions(mono, sampleRate, p) {
   const duration = mono.length / sampleRate;
   const { times, vals } = computeRmsEnvelope(mono, sampleRate, 25, 10);
+  if (!vals.length) return { regions: [[0, duration]], noiseFloorDb: -180, thresholdDb: -180 };
+  const hop = times.length > 1 ? times[1] - times[0] : 0.01;
+  const dbs = vals.map(linToDb);
+
   const noiseFloorDb = estimateNoiseFloorDb(vals);
-  const thresholdDb = noiseFloorDb + p.silenceMarginDb;
+  const activeDb = percentile(dbs.filter((v) => v > -180), 0.9);
+  // Never gate away material that is within PHRASE_ACTIVE_FLOOR_DB of how loud the file plays: on a
+  // hissy transfer the floor is so high that "floor + margin" lands in the middle of the playing
+  // and throws away a third of the file.
+  const thresholdDb = Math.min(
+    Math.max(noiseFloorDb + p.silenceMarginDb, activeDb - PHRASE_ACTIVE_DROP_DB),
+    activeDb - PHRASE_ACTIVE_FLOOR_DB
+  );
 
-  const nonSilent = nonSilentRegions(times, vals, thresholdDb, p.minSilenceDuration);
-  const merged = mergeRegions(nonSilent, p.mergeGap);
-  const padded = padAndFilterRegions(merged, p.pad, p.minLen, duration);
-  const finalRegions = splitLongNaturally(padded, times, vals, p.preferred, p.maxLen, p.minLen);
+  // 1. Runs of playing, separated by gaps long enough to be real rests. A gap has to clear both
+  // knobs: minSilenceDuration (how long counts as silence) and mergeGap (how long a gap has to be
+  // before it's worth splitting on).
+  const gapMin = Math.max(p.minSilenceDuration, p.mergeGap);
+  const loud = dbs.map((v) => v >= thresholdDb);
+  const runs = [];
+  let runStart = null;
+  let quietFrom = null;
+  for (let i = 0; i < loud.length; i++) {
+    if (loud[i]) {
+      if (runStart == null) runStart = i;
+      else if (quietFrom != null && (i - quietFrom) * hop >= gapMin) {
+        runs.push([runStart, quietFrom]);
+        runStart = i;
+      }
+      quietFrom = null;
+    } else if (quietFrom == null) {
+      quietFrom = i;
+    }
+  }
+  if (runStart != null) runs.push([runStart, quietFrom != null ? quietFrom : loud.length]);
+  if (!runs.length) return { regions: [], noiseFloorDb, thresholdDb };
 
-  return { regions: finalRegions, noiseFloorDb, thresholdDb };
+  // 2. Attacks, for putting cuts on note starts rather than in the middle of them.
+  const { diffs } = multiBandOnsetStrengthCurve(mono, sampleRate, 20, 10, { times, vals });
+  const onsetStrength = new Map();
+  const onsets = pickOnsets(times, diffs, 0.5, 0.12);
+  for (const t of onsets) {
+    const i = Math.round(t / hop);
+    let peak = 0;
+    for (let k = Math.max(0, i - 1); k <= Math.min(diffs.length - 1, i + 1); k++) peak = Math.max(peak, diffs[k]);
+    onsetStrength.set(t, peak);
+  }
+  const strengthRef = Math.max(1e-6, percentile([...onsetStrength.values()], 0.75));
+
+  /**
+   * How good a phrase boundary the attack at `t` makes: how far the line dropped just before it
+   * (in dB, against the playing level around it) and how hard it comes back in. Both are needed -
+   * see this function's own doc comment above.
+   */
+  // Local playing level: a moving average of the envelope in dB, a few seconds wide. A phrase end
+  // is a dip against what the player is doing HERE - one run of a Rhodes take can span a quiet
+  // passage and a loud one, and a single level for the whole run finds boundaries in the loud part
+  // and none in the quiet one.
+  const localRef = (() => {
+    const win = Math.max(1, Math.round(2.5 / hop));
+    const out = new Float64Array(dbs.length);
+    let sum = 0;
+    let n = 0;
+    const clean = dbs.map((v) => (v > -180 ? v : null));
+    for (let i = 0; i < dbs.length; i++) {
+      if (clean[i] != null) {
+        sum += clean[i];
+        n++;
+      }
+      const drop = i - win;
+      if (drop >= 0 && clean[drop] != null) {
+        sum -= clean[drop];
+        n--;
+      }
+      out[i] = n ? sum / n : -180;
+    }
+    return out;
+  })();
+
+  const boundaryScore = (t) => {
+    const i = Math.round(t / hop);
+    const back = Math.max(0, i - Math.round(PHRASE_DIP_WINDOW_SEC / hop));
+    const refDb = localRef[Math.min(localRef.length - 1, i)];
+    let dipDb = Infinity;
+    let quiet = 0;
+    let longestQuiet = 0;
+    for (let k = back; k < i; k++) {
+      const v = dbs[k];
+      if (v == null) continue;
+      dipDb = Math.min(dipDb, v);
+      // How long the line stayed down, not just how far it dipped: the brief gap between two notes
+      // of the same phrase is as deep as a breath but nothing like as long.
+      quiet = v <= localRef[k] - PHRASE_DIP_DB ? quiet + hop : 0;
+      longestQuiet = Math.max(longestQuiet, quiet);
+    }
+    if (!isFinite(dipDb)) return 0;
+    const dip = Math.max(0, refDb - dipDb);
+    const rise = Math.min(2, (onsetStrength.get(t) || 0) / strengthRef);
+    // Deliberately not gated to zero below the acceptance bar: continuous playing that never
+    // produces a convincing phrase end still has to be cut somewhere when a piece runs past maxLen,
+    // and the least-bad boundary available beats the quietest frame near an arbitrary target.
+    return dip / PHRASE_DIP_DB + rise + longestQuiet / PHRASE_DIP_MIN_SEC;
+  };
+
+  // 3. Cut each run at the boundaries that score well enough, then force a split in anything still
+  // over maxLen so nothing comes out unusable.
+  const bounds = [];
+  for (const [a, b] of runs) {
+    const runStartT = times[a];
+    const runEndT = b < times.length ? times[b] : duration;
+    if (runEndT - runStartT < p.minLen * 1.5) {
+      bounds.push([runStartT, runEndT]);
+      continue;
+    }
+    const spacing = Math.max(p.minLen, PHRASE_MIN_SPACING_SEC);
+    const inRun = onsets.filter((t) => t > runStartT + spacing && t < runEndT - spacing);
+    const scored = inRun
+      .map((t) => ({ t, score: boundaryScore(t) }))
+      .filter((c) => c.score >= PHRASE_BOUNDARY_SCORE)
+      .sort((x, y) => y.score - x.score);
+
+    // Best first, so where two candidates are too close together the more convincing one wins.
+    const cuts = [];
+    for (const c of scored) {
+      if (cuts.every((t) => Math.abs(t - c.t) >= spacing)) cuts.push(c.t);
+    }
+    cuts.sort((x, y) => x - y);
+
+    // Anything still too long gets the best boundary available inside it, scoring or not: a
+    // deliberate long-tone passage has no phrase end to find, but it still has to be cut somewhere,
+    // and `preferred` decides roughly where.
+    const pieces = [runStartT, ...cuts, runEndT];
+    for (let i = 0; i < pieces.length - 1; ) {
+      const len = pieces[i + 1] - pieces[i];
+      if (len <= p.maxLen) {
+        i++;
+        continue;
+      }
+      const target = pieces[i] + Math.min(p.preferred, len / 2);
+      const lo = pieces[i] + p.minLen;
+      const hi = pieces[i + 1] - p.minLen;
+      const candidates = onsets.filter((t) => t >= lo && t <= hi);
+      const cut = candidates.length
+        ? candidates.reduce((best, t) => {
+            const s = boundaryScore(t) - Math.abs(t - target) / p.maxLen;
+            return s > (best.s ?? -Infinity) ? { t, s } : best;
+          }, {}).t
+        : lowestEnergyTime(times, vals, lo, hi, target);
+      pieces.splice(i + 1, 0, cut);
+    }
+    for (let i = 0; i < pieces.length - 1; i++) bounds.push([pieces[i], pieces[i + 1]]);
+  }
+
+  // 4. Trim to the playing: each phrase starts a hair before its first attack (never clipping it)
+  // and ends where the sound actually stops, plus the padding the caller asked for. Pieces too
+  // short to stand alone join the neighbour they came from rather than being thrown away - losing
+  // audio is what forces the hand-editing this is supposed to save.
+  // A 1ms peak envelope, for putting a start on the sample the note actually begins at. The onset
+  // curve above is quantised to its 10ms hop and timestamped at its window's start, so a boundary
+  // taken straight from it can sit over a hundred milliseconds before the attack - inside the
+  // breath, not on the note.
+  const attackHop = Math.max(1, Math.round(sampleRate * 0.001));
+  const attackEnv = new Float32Array(Math.floor(mono.length / attackHop));
+  for (let f = 0; f < attackEnv.length; f++) {
+    let m = 0;
+    for (let i = f * attackHop, end = i + attackHop; i < end; i++) {
+      const v = mono[i] < 0 ? -mono[i] : mono[i];
+      if (v > m) m = v;
+    }
+    attackEnv[f] = m;
+  }
+
+  /** The sample-accurate start of the attack nearest `t`, or null if nothing there looks like one. */
+  const attackNear = (t) => {
+    const frameSec = attackHop / sampleRate;
+    const centre = Math.round(t / frameSec);
+    const span = Math.round(PHRASE_ATTACK_SEARCH_SEC / frameSec);
+    const from = Math.max(10, centre - span);
+    const to = Math.min(attackEnv.length - 4, centre + span);
+    if (to <= from) return null;
+    let bestJump = 0;
+    let bestF = -1;
+    for (let f = from; f <= to; f++) {
+      let pre = 1e-6;
+      for (let k = f - 10; k < f; k++) if (attackEnv[k] > pre) pre = attackEnv[k];
+      const post = Math.max(attackEnv[f], attackEnv[f + 1], attackEnv[f + 2], attackEnv[f + 3]);
+      const jump = post / pre;
+      // Nearer counts for something: two equally clear attacks either side, take the closer one.
+      const scored = jump / (1 + Math.abs(f - centre) * frameSec);
+      // A modest bar: on legato playing one note rises out of the last one's decay, so the jump at
+      // a real note start can be well under the 4x a percussive attack gives.
+      if (jump >= 1.8 && scored > bestJump) {
+        bestJump = scored;
+        bestF = f;
+      }
+    }
+    return bestF < 0 ? null : bestF * frameSec;
+  };
+
+  const regions = [];
+  for (const [s0, e0] of bounds) {
+    const attack = attackNear(s0);
+    let s = attack != null ? attack - PHRASE_PREROLL_SEC : s0 - p.pad;
+    let lastLoud = Math.round(e0 / hop);
+    while (lastLoud > Math.round(s0 / hop) && (dbs[lastLoud] == null || dbs[lastLoud] < thresholdDb)) lastLoud--;
+    const e = Math.min(duration, times[lastLoud] != null ? times[lastLoud] + hop + p.pad : e0);
+    const start = Math.max(0, s);
+    if (e - start <= 0) continue;
+    const prev = regions[regions.length - 1];
+    if (e - start < p.minLen && prev && start - prev[1] < p.minLen) prev[1] = e;
+    else regions.push([start, e]);
+  }
+
+  return { regions, noiseFloorDb, thresholdDb };
 }
 
 // ---------------------------------------------------------------------------

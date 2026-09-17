@@ -108,9 +108,17 @@ site on GitHub Pages.
   started - flip it off if you want to hand-tune silence sensitivity, phrase
   length targets, fade/click protection, and so on.
 - **Loudness-adaptive silence detection.** Instead of one fixed volume
-  threshold for every file, each recording's own noise floor is measured and
-  the threshold is set relative to it - so quiet and hot recordings both
-  behave sensibly.
+  threshold for every file, the gate is set from both the recording's own
+  noise floor and how loud it actually plays - so a hissy transfer doesn't
+  read its own quiet playing as silence, and a file containing true digital
+  silence doesn't end up with a gate below anything that ever happens.
+- **Phrase chopping follows the playing.** For horns and Rhodes a phrase ends
+  where the line drops away and the next one starts - a breath, a released
+  chord - so boundaries are scored on the dip before an attack and the attack
+  itself, and the cut is placed on the note, to the sample. Lengths vary with
+  the music instead of landing every N seconds; a continuous take with no
+  breath in it is still cut at the most phrase-like point available rather
+  than at whatever frame happened to be quietest.
 - **Auto key and tempo detection** (via [essentia.js](https://mtg.github.io/essentia.js/), see licensing note below), shown per source file and baked into the output folder/file name.
 - **Tempo-locked drum chopping, in bars.** Choose a chop length in bars (1,
   2, 3, 4, 6, 8, 16…) and it's converted to seconds from the detected tempo,
@@ -187,12 +195,19 @@ site on GitHub Pages.
   to group similar-sounding hits together, not reliable enough to trust
   in a filename.
 - **Typable output naming, with a live preview.** Type your own chop
-  filename pattern using `{name}`, `{tag}` and `{number}` tokens in any
-  order or combination (a number is always included even if you leave
-  `{number}` out of the pattern, so chops can never silently overwrite
-  each other), pick the separator used inside the auto-generated
-  key/tempo tag, and see an example of the resulting file/folder names
-  update as you type.
+  filename pattern using `{name}`, `{folder}`, `{tag}`, `{key}`, `{tempo}`
+  and `{number}` tokens in any order or combination (a number is always
+  included even if you leave `{number}` out of the pattern, so chops can
+  never silently overwrite each other), pick the separator used inside the
+  auto-generated key/tempo tag, and see an example of the resulting
+  file/folder names update as you type. `{folder}` is the source file's own
+  parent folder, which is what tells stem exports apart when every one of
+  them is called `other.m4a`.
+- **Two sources can never write to the same place.** If two files in a run
+  resolve to the same output folder name, the later ones get ` 2`, ` 3` and
+  so on, and the log says so - without that, the second file's export would
+  overwrite the first's (and clear it first). Each queued file also gets its
+  own analysis, even when it has the same name and path as another.
 - **Click-free boundaries - except where they'd break a loop.** Phrase chops
   and one-shots get their cut points snapped to the nearest zero-crossing plus
   a short fade in/out, so they don't pop at the edges. Bar-locked drum chops
@@ -1271,9 +1286,12 @@ silently.
 
 ## Parameters
 
-**Sax/Trumpet and Rhodes** share the same pipeline: find non-silent regions
-above an adaptive threshold, merge nearby ones, then split anything too long
-at its quietest nearby point rather than an arbitrary timestamp.
+**Sax/Trumpet and Rhodes** share the same pipeline: gate the file into runs of
+playing, then cut those runs where a phrase actually ends - a dip in the line
+followed by a fresh attack - placing each boundary on the note, to the sample.
+Anything still longer than the maximum gets the most phrase-like boundary
+available inside it. Phrase length follows the playing; *Preferred phrase
+length* only decides roughly where an over-long stretch is broken.
 
 - *Silence sensitivity* - how many dB above the file's own measured noise
   floor counts as "still silence." Lower = only near-total silence breaks a
