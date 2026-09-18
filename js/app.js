@@ -28,6 +28,8 @@ import { createStretchWorkspace } from "./stretch-workspace.js";
 import { resolveVariationSet, variationFileName } from "./variation-export.js";
 import { createPlayNice } from "./play-nice/controller.js";
 import { createFlip } from "./flip/controller.js";
+import { createStretchFx } from "./stretch-fx/controller.js";
+import { renderFx as renderStretchFxPure } from "./stretch-fx/render.js";
 import { renderConform } from "./play-nice/render.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
 import { resolveNamePattern, resolveFolderName } from "./naming-tokens.js";
@@ -487,6 +489,7 @@ const timestretchPitchNote = $("#timestretch-pitch-note");
 const stretchWorkspaceEl = $("#stretch-workspace");
 const playNiceWorkspaceEl = $("#play-nice-workspace");
 const flipWorkspaceEl = $("#flip-workspace");
+const stretchFxWorkspaceEl = $("#stretch-fx-workspace");
 const detectionParamsPanel = $("#detection-params-panel");
 const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
 const outputstageOptions = $("#outputstage-options");
@@ -1106,6 +1109,37 @@ const flip = createFlip({
   },
 });
 
+// ---------------------------------------------------------------------------
+// STRETCH FX
+//
+// One break in, a bank of aggressively stretched fragments out - see js/stretch-fx/controller.js.
+// Same arrangement as FLIP: its own source, settings, results and export destination, built from
+// the shared decoder, tempo bridge, AudioContext, log and File System Access helpers. The one thing
+// it adds here is renderFx, which runs each result through the shared heavy-dsp worker (a stretch at
+// 800% is real work, unlike FLIP's array copying) with the usual main-thread fallback.
+// ---------------------------------------------------------------------------
+
+const stretchFx = createStretchFx({
+  container: stretchFxWorkspaceEl,
+  chromeContainer: document.querySelector(".app"),
+  decodeFile,
+  analyze: analyzeKeyAndTempo,
+  renderFx: runStretchFxHeavy,
+  getAudioContext,
+  color: themeColor,
+  log,
+  logWarn,
+  logSuccess,
+  io: {
+    supportsFSA: FSA_SUPPORTED && FSA_FILE_PICKER_SUPPORTED,
+    pickFiles: (opts) => pickFilesFSA(opts),
+    pickFolder: () => pickFolderFSA(),
+    ensurePermission: ensureReadWritePermission,
+    writeFile: writeFileFSA,
+    ZipBatch,
+  },
+});
+
 let stretchActiveKey = null; // analysisKey() of the file shown in the workspace right now
 const stretchFileOrder = []; // [{key, folder, fileInfo}], rebuilt at the start of every stretch-task batch run
 
@@ -1318,6 +1352,13 @@ function updateFlipVisibility() {
   flipWorkspaceEl.hidden = !active;
   // The bottom bar is a flex child of the app shell, not of the workspace, so it's told separately.
   flip.setActive(active);
+}
+
+/** STRETCH FX's workspace replaces the stage exactly like FLIP's - see updateFlipVisibility(). */
+function updateStretchFxVisibility() {
+  const active = task === "sfx";
+  stretchFxWorkspaceEl.hidden = !active;
+  stretchFx.setActive(active);
 }
 
 // ---------------------------------------------------------------------------
@@ -1678,11 +1719,11 @@ function loadSettings() {
 // ---------------------------------------------------------------------------
 
 const TASK_STORAGE_KEY = "good-bits-task-v1";
-// "nice" is PLAY NICE and "flip" is FLIP - two tasks that share the shell (topbar, stage, log) but
-// none of the batch pipeline: each keeps its own queue/source, settings and export destination
-// inside js/play-nice/controller.js and js/flip/controller.js respectively, so nothing about
-// CHOP/STRETCH/BOTH changes when either is selected.
-const TASKS = ["chop", "stretch", "both", "nice", "flip"];
+// "nice" is PLAY NICE, "flip" is FLIP and "sfx" is STRETCH FX - tasks that share the shell (topbar,
+// stage, log) but none of the batch pipeline: each keeps its own queue/source, settings and export
+// destination inside js/play-nice/, js/flip/ and js/stretch-fx/ respectively, so nothing about
+// CHOP/STRETCH/BOTH changes when any of them is selected.
+const TASKS = ["chop", "stretch", "both", "nice", "flip", "sfx"];
 let task = "chop";
 
 function applyTask(next, { persist = true } = {}) {
@@ -1698,8 +1739,10 @@ function applyTask(next, { persist = true } = {}) {
   updateStretchWorkspaceVisibility();
   updatePlayNiceVisibility();
   updateFlipVisibility();
+  updateStretchFxVisibility();
   if (task !== "nice") playNice.stopAllPlayback();
   if (task !== "flip") flip.stopAllPlayback();
+  if (task !== "sfx") stretchFx.stopAllPlayback();
   if (task === "stretch") {
     renderStretchCharacterBrowser();
     renderStretchFileStrip();
@@ -2438,7 +2481,7 @@ clearFoldersBtn.addEventListener("click", clearSourceQueue);
  * and "start a new session" should never quietly mean "lose how I like this set up".
  */
 async function newSession() {
-  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent() || flip.hasContent();
+  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent() || flip.hasContent() || stretchFx.hasContent();
   if (hasWork) {
     const { confirmed } = await showConfirmDialog({
       title: "Start a new session?",
@@ -2461,9 +2504,10 @@ async function newSession() {
   stopAllFileEditorPlayback();
   mountedFileEditors.clear();
   stretchWorkspace.stopAllPlayback();
-  // PLAY NICE and FLIP keep their own sources, so clearSourceQueue() below doesn't reach either.
+  // PLAY NICE, FLIP and STRETCH FX keep their own sources, so clearSourceQueue() below doesn't reach them.
   playNice.reset();
   flip.reset();
+  stretchFx.reset();
 
   clearSourceQueue();
   resultsPanel.innerHTML = "";
@@ -2555,6 +2599,7 @@ function getHeavyDspWorker() {
       heavyDspPending.delete(requestId);
       if (type === "processRegionsResult") pending.resolve(ev.data.results);
       else if (type === "conformLoopResult") pending.resolve({ blob: ev.data.blob, seconds: ev.data.seconds, alignment: ev.data.alignment || null });
+      else if (type === "stretchFxResult") pending.resolve({ channels: ev.data.channels });
       else pending.reject(new Error(ev.data.message || "worker error"));
     });
     heavyDspWorker.addEventListener("error", (ev) => {
@@ -2688,6 +2733,47 @@ async function runConformHeavy({ channels, sampleRate, bitDepth, plan, seed, fad
   const alignment = rendered.alignment || null;
   applyFades(rendered, fadeInSamples || 0, fadeOutSamples || 0);
   return { blob: encodeWav(rendered, sampleRate, bitDepth), seconds: rendered[0].length / sampleRate, alignment };
+}
+
+/**
+ * STRETCH FX's render path: one recipe + the fragment it was cut from -> rendered channels, on the
+ * worker where possible. A sibling of runConformHeavy() for the same reasons that one is a sibling of
+ * processRegionsHeavy(). The fragment is the caller's own freshly-sliced copy (sliceFragment), so
+ * it's transferred rather than copied again; the fallback runs the identical pure function.
+ */
+async function runStretchFxHeavy({ channels, sampleRate, recipe }) {
+  const worker = getHeavyDspWorker();
+  if (worker) {
+    const timeoutMs = HEAVY_DSP_TIMEOUT_BASE_MS + HEAVY_DSP_TIMEOUT_PER_REGION_MS;
+    try {
+      return await new Promise((resolve, reject) => {
+        const requestId = ++heavyDspRequestId;
+        const timer = setTimeout(() => {
+          heavyDspPending.delete(requestId);
+          reject(new Error(`heavy-dsp-worker did not respond within ${Math.round(timeoutMs / 1000)}s - it may be stuck`));
+        }, timeoutMs);
+        heavyDspPending.set(requestId, {
+          resolve: (v) => {
+            clearTimeout(timer);
+            resolve(v);
+          },
+          reject: (e) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+        });
+        worker.postMessage({ type: "stretchFx", requestId, channels, sampleRate, recipe }, channels.map((ch) => ch.buffer));
+      });
+    } catch (err) {
+      // The fragment was transferred, so it can't be reused for a retry here - fail this one result
+      // (the card says so and MUTATE re-renders from the source) and let the rest of the session
+      // fall back to the main thread, exactly as the other two heavy paths do.
+      console.error("heavy-dsp-worker failed during a STRETCH FX render, falling back to the main thread:", err);
+      terminateHeavyDspWorker();
+      throw err;
+    }
+  }
+  return renderStretchFxPure({ channels, sampleRate, recipe });
 }
 
 /**

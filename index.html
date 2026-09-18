@@ -51,6 +51,7 @@
       <button type="button" class="seg-btn" data-task-choice="both" title="Cut it up and process it, with every option available.">Both</button>
       <button type="button" class="seg-btn" data-task-choice="nice" title="Conform loops to a shared tempo and key, so unrelated samples play nice together.">Play nice</button>
       <button type="button" class="seg-btn" data-task-choice="flip" title="Give one loop back to you wrong - automatic remixes of it, eight at a time.">Flip</button>
+      <button type="button" class="seg-btn" data-task-choice="sfx" title="Melt a drum break into a bank of aggressively time-stretched break-malfunction FX.">Stretch FX</button>
     </div>
 
     <div class="topbar-right">
@@ -385,6 +386,12 @@
              which owns all of its own state; CHOP, STRETCH, BOTH and PLAY NICE are unaffected by
              it. Shown/hidden from updateFlipVisibility() in app.js. -->
         <div id="flip-workspace" class="flip-workspace" hidden></div>
+
+        <!-- STRETCH FX's own workspace: one drum break in, a bank of aggressively time-stretched
+             fragments of it out, auditioned solo or snapped back into the break. Built by
+             js/stretch-fx/controller.js, which owns all of its own state, the same way FLIP does.
+             Shown/hidden from updateStretchFxVisibility() in app.js. -->
+        <div id="stretch-fx-workspace" class="stretch-fx-workspace" hidden></div>
 
         <div id="results-panel" class="results-panel"></div>
       </main>
