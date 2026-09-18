@@ -367,6 +367,8 @@ input[type="range"]::-moz-range-thumb {
   padding: 4px 6px;
   font-variant-numeric: tabular-nums;
 }
+/* Stretch amount goes up to 100000%, one digit more than the standard box fits. */
+.slider-row .slider-number.slider-number-wide { width: 4.9rem; }
 
 .slider-unit { flex: 0 0 auto; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); min-width: 1.9rem; }
 

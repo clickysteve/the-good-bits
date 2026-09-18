@@ -23,7 +23,7 @@ import {
   equalSliceRegions,
 } from "./dsp.js";
 import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups, MACROS } from "./timestretch.js";
-import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "./dsp/stretch/workspace-state.js";
+import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed, sliderToRatioPct, ratioPctToSlider, tidyRatioPct } from "./dsp/stretch/workspace-state.js";
 import { createStretchWorkspace } from "./stretch-workspace.js";
 import { resolveVariationSet, variationFileName } from "./variation-export.js";
 import { createPlayNice } from "./play-nice/controller.js";
@@ -1443,7 +1443,17 @@ bindSliderNumber(timestretchTargetBpmInput, timestretchTargetBpmNumber, (v) => {
   timestretchSettings.targetBpm = v;
   saveSettings();
 });
-bindSliderNumber(timestretchRatioInput, timestretchRatioNumber, (v) => {
+// Not bindSliderNumber: the slider is a log scale (see sliderToRatioPct), so it and the % box don't share units.
+timestretchRatioInput.addEventListener("input", () => {
+  const v = sliderToRatioPct(timestretchRatioInput.value);
+  timestretchRatioNumber.value = String(v);
+  timestretchSettings.ratio = v / 100;
+  saveSettings();
+});
+timestretchRatioNumber.addEventListener("change", () => {
+  const v = tidyRatioPct(timestretchRatioNumber.value);
+  timestretchRatioNumber.value = String(v);
+  timestretchRatioInput.value = String(ratioPctToSlider(v));
   timestretchSettings.ratio = v / 100;
   saveSettings();
 });
@@ -1807,7 +1817,8 @@ function applySettings(saved) {
     updateStretchTaskVisibility();
     timestretchModeSelect.value = timestretchSettings.mode;
     timestretchTargetBpmInput.value = timestretchTargetBpmNumber.value = String(timestretchSettings.targetBpm);
-    timestretchRatioInput.value = timestretchRatioNumber.value = String(Math.round(timestretchSettings.ratio * 100));
+    timestretchRatioNumber.value = String(Math.round(timestretchSettings.ratio * 100));
+    timestretchRatioInput.value = String(ratioPctToSlider(timestretchSettings.ratio * 100));
     timestretchCharacterSelect.value = timestretchSettings.character;
     // A character id this version no longer recognises (stale save, hand-edited localStorage) leaves
     // the <select> with nothing chosen - fall back to "clean" in both the setting and the control
