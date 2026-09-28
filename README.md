@@ -13,7 +13,7 @@ site on GitHub Pages.
 
 ## Features
 
-- **Six tasks, not a difficulty setting.** The app opens on one question:
+- **Seven tasks, not a difficulty setting.** The app opens on one question:
   what are you here to do?
   - **Chop** cuts audio into chops and one-shots. No processing at all -
     original tempo, no colouration.
@@ -32,6 +32,10 @@ site on GitHub Pages.
     aggressively time-stretched "break malfunction" FX - the stretched snare,
     the smeared quarter, the reversed granular suck - and lets you hear each
     one snapped back into the break. See [Stretch FX](#stretch-fx) below.
+  - **Lab** grows small, unfamiliar DSP algorithms out of low-level
+    primitives - not named effects - and lets you search the space of what
+    they can do: NEW for a fresh graph, MUTATE for a related one, KEEP for
+    the ones worth coming back to. See [Lab](#lab) below.
 
   This replaced a Simple/Advanced toggle, which was the wrong axis: it
   described how much of the interface you could see, said nothing about what
@@ -1137,6 +1141,90 @@ bar.
 `breakname_stretch_hit_400_revpost_dn12.wav`: source, percent, then only the
 treatments that happened. Export All writes a `breakname_STRETCH_FX` folder,
 or a zip, and never overwrites. Names already in the folder get `_2`.
+
+## Lab
+
+> Not a random multi-FX unit. A machine for discovering unfamiliar audio
+> transformations, and a way to get back to the one you just found.
+
+Every other mode chains named effects - stretch, drive, crunch, output-stage
+character. **Lab** doesn't: it builds small DSP algorithms out of low-level
+mathematical primitives - a sample's own derivative, a delay tap whose length
+is set by the signal's own amplitude, a spectral bin permutation fed by its
+own frame-to-frame flux, a nonlinear feedback loop a handful of samples
+long - and chains three to six of them into a graph. Nothing in the primitive
+vocabulary is reverb, delay, chorus, flanger, phaser, distortion,
+compression, EQ, pitch-shifting, ring modulation, bitcrushing or granular
+processing by name; some results will coincidentally land near one of those,
+which is fine, but none of them are built in as a shortcut. Everything runs
+locally, deterministically, in plain JavaScript - no AI in the audio path.
+
+### The workflow
+
+1. Pick **Lab** and drop a loop on the page.
+2. Press **NEW**. It draws a fresh processing graph from the primitive
+   registry, renders it, and - if the result is safe and different enough
+   from the source to be worth hearing - shows it as the current mutant.
+3. Flip **ORIGINAL / MUTANT** to A/B them; both play from the same waveform,
+   looping, so switching is one click, not a restart.
+4. **MUTATE** for a related descendant of whatever's currently loaded - same
+   idea, a couple of things nudged, rather than a fresh roll. Repeat until
+   something's genuinely strange.
+5. **KEEP** it. Kept mutants persist across a reload (localStorage), with a
+   one-click **Load** back to exactly that graph.
+6. **Export WAV** writes the current mutant to disk.
+
+### Seeds
+
+Every mutant shows its **SEED**, and the field is an input: type a seed and
+press **Load** (or Enter) to reproduce that exact graph, byte for byte -
+same primitives, same order, same parameters, same macro wiring. All of
+Lab's randomness runs through the same seeded generator the rest of the app
+uses for reproducible creative decisions (`js/dsp/stretch/rng.js`); nothing
+in the primitive vocabulary or the generator calls `Math.random()`.
+
+NEW and MUTATE both search rather than gambling once: a candidate that's
+broken, near-silent, or reads as "the source, plus gain or polarity" is
+rejected and a deterministically-derived next seed is tried instead, up to
+24 attempts. The seed shown on the result is whichever attempt actually
+produced it, so reloading that seed later needs no search at all - it's
+just the graph.
+
+### Macros
+
+Every mutant exposes four generic controls, **A/B/C/D**. What each one
+actually touches is decided per-mutant by the generator - A might be a
+feedback coefficient in one graph and a spectral-flux gain in the next -
+and several internal parameters can respond to the same macro at once.
+Moving one re-renders live; it never changes which graph you're listening
+to, only its live parameter state.
+
+### Safety
+
+A graph is allowed to be unstable-looking on paper (short nonlinear feedback
+loops, signal-dependent delay taps) but never on the speaker: every render
+passes through a fixed DC-blocker and a soft limiter, and NaN/Infinity are
+sanitised to silence rather than reaching the output buffer at all. This
+happens on *every* render - NEW, MUTATE, a typed seed, a KEEP recall, a
+macro move - not only during the NEW/MUTATE search.
+
+### Inspecting a mutant
+
+A mutant is not an opaque blob. The **Inspect this mutant** panel lists
+every primitive in the graph with its live parameter values, what each
+macro is currently wired to, and the graph's full JSON (copyable) - enough
+to understand what's actually happening, and to pull a genuinely good find
+out into a hand-written, standalone effect later.
+
+### What it's for
+
+The point of a Lab session isn't a polished effect, it's a search:
+`load a loop → NEW → listen → NEW → listen → interesting! → KEEP → MUTATE →
+listen → MUTATE → genuinely strange → KEEP`. Plenty of mutants will sound
+bad, ugly or simply broken-in-an-uninteresting-way - that's expected and not
+filtered out beyond the safety/novelty checks above. Unexpected is the
+point; unsafe and identical-to-the-input are the only things actually
+rejected.
 
 ## Quick start
 

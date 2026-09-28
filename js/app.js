@@ -30,6 +30,7 @@ import { createPlayNice } from "./play-nice/controller.js";
 import { createFlip } from "./flip/controller.js";
 import { createStretchFx } from "./stretch-fx/controller.js";
 import { renderFx as renderStretchFxPure } from "./stretch-fx/render.js";
+import { createLab } from "./lab/controller.js";
 import { renderConform } from "./play-nice/render.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
 import { resolveNamePattern, resolveFolderName } from "./naming-tokens.js";
@@ -490,6 +491,7 @@ const stretchWorkspaceEl = $("#stretch-workspace");
 const playNiceWorkspaceEl = $("#play-nice-workspace");
 const flipWorkspaceEl = $("#flip-workspace");
 const stretchFxWorkspaceEl = $("#stretch-fx-workspace");
+const labWorkspaceEl = $("#lab-workspace");
 const detectionParamsPanel = $("#detection-params-panel");
 const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
 const outputstageOptions = $("#outputstage-options");
@@ -1140,6 +1142,27 @@ const stretchFx = createStretchFx({
   },
 });
 
+// ---------------------------------------------------------------------------
+// LAB
+//
+// An evolutionary search over low-level DSP primitives, not a fixed effects rack - see
+// js/lab/controller.js. Same arrangement as FLIP and STRETCH FX: its own source, its own state,
+// nothing shared with the CHOP/STRETCH/BOTH batch queue. Deliberately lighter on deps than STRETCH FX
+// - no tempo/key analysis, no File System Access export folder - a render is small and offline
+// enough to run on the main thread with a yield between search attempts (see controller.js).
+// ---------------------------------------------------------------------------
+
+const lab = createLab({
+  container: labWorkspaceEl,
+  chromeContainer: document.querySelector(".app"),
+  decodeFile,
+  getAudioContext,
+  color: themeColor,
+  log,
+  logWarn,
+  logSuccess,
+});
+
 let stretchActiveKey = null; // analysisKey() of the file shown in the workspace right now
 const stretchFileOrder = []; // [{key, folder, fileInfo}], rebuilt at the start of every stretch-task batch run
 
@@ -1359,6 +1382,13 @@ function updateStretchFxVisibility() {
   const active = task === "sfx";
   stretchFxWorkspaceEl.hidden = !active;
   stretchFx.setActive(active);
+}
+
+/** LAB's workspace replaces the stage exactly like FLIP's - see updateFlipVisibility(). */
+function updateLabVisibility() {
+  const active = task === "lab";
+  labWorkspaceEl.hidden = !active;
+  lab.setActive(active);
 }
 
 // ---------------------------------------------------------------------------
@@ -1723,7 +1753,7 @@ const TASK_STORAGE_KEY = "good-bits-task-v1";
 // stage, log) but none of the batch pipeline: each keeps its own queue/source, settings and export
 // destination inside js/play-nice/, js/flip/ and js/stretch-fx/ respectively, so nothing about
 // CHOP/STRETCH/BOTH changes when any of them is selected.
-const TASKS = ["chop", "stretch", "both", "nice", "flip", "sfx"];
+const TASKS = ["chop", "stretch", "both", "nice", "flip", "sfx", "lab"];
 let task = "chop";
 
 function applyTask(next, { persist = true } = {}) {
@@ -1740,9 +1770,11 @@ function applyTask(next, { persist = true } = {}) {
   updatePlayNiceVisibility();
   updateFlipVisibility();
   updateStretchFxVisibility();
+  updateLabVisibility();
   if (task !== "nice") playNice.stopAllPlayback();
   if (task !== "flip") flip.stopAllPlayback();
   if (task !== "sfx") stretchFx.stopAllPlayback();
+  if (task !== "lab") lab.stopAllPlayback();
   if (task === "stretch") {
     renderStretchCharacterBrowser();
     renderStretchFileStrip();
@@ -2481,7 +2513,7 @@ clearFoldersBtn.addEventListener("click", clearSourceQueue);
  * and "start a new session" should never quietly mean "lose how I like this set up".
  */
 async function newSession() {
-  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent() || flip.hasContent() || stretchFx.hasContent();
+  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent() || flip.hasContent() || stretchFx.hasContent() || lab.hasContent();
   if (hasWork) {
     const { confirmed } = await showConfirmDialog({
       title: "Start a new session?",
@@ -2508,6 +2540,7 @@ async function newSession() {
   playNice.reset();
   flip.reset();
   stretchFx.reset();
+  lab.reset();
 
   clearSourceQueue();
   resultsPanel.innerHTML = "";

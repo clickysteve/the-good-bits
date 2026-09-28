@@ -1269,7 +1269,14 @@ input[type="range"]::-moz-range-thumb {
 [data-task="sfx"] #folder-list,
 [data-task="sfx"] #results-panel,
 [data-task="sfx"] #output-banner,
-[data-task="sfx"] .actionbar { display: none; }
+[data-task="sfx"] .actionbar,
+[data-task="lab"] .controls,
+[data-task="lab"] #settings-toggle,
+[data-task="lab"] .stage > .dropzone,
+[data-task="lab"] #folder-list,
+[data-task="lab"] #results-panel,
+[data-task="lab"] #output-banner,
+[data-task="lab"] .actionbar { display: none; }
 
 /* Time-stretch: STRETCH's whole purpose is stretching, so its own enable checkbox (meaningful only
    when stretching is optional, i.e. in BOTH) and the reciprocal "it's just on" note swap in/out
@@ -2119,7 +2126,8 @@ select.sfx-depth-select { flex: 0 0 auto; width: auto; min-width: 104px; }
   white-space: nowrap;
 }
 .flip-bar-status.is-working,
-.sfx-bar-status.is-working { color: var(--accent-2); }
+.sfx-bar-status.is-working,
+.lab-bar-status.is-working { color: var(--accent-2); }
 
 /* ===========================================================================
    STRETCH FX
@@ -2364,6 +2372,206 @@ input.sfx-bpm-input { flex: 0 0 auto; width: 96px; }
   .sfx-bar-actions { margin-left: auto; padding-left: 0; border-left: none; }
   .sfx-selection-note { flex: 1 1 100%; }
   .flip-tempo-note { margin-left: 0; flex: 1 1 100%; }
+}
+
+/* ===========================================================================
+   LAB
+   An evolutionary search over low-level DSP primitives - NEW/MUTATE/KEEP over
+   a seeded, inspectable processing graph. Built by js/lab/controller.js.
+   Reuses the app's existing .btn / .seg / .field / .slider-row / bottom-bar
+   language throughout (see the PLAY NICE / FLIP / STRETCH FX rules above for
+   the shared shape); what's below is only what LAB itself adds.
+   =========================================================================== */
+
+.lab-workspace[hidden] { display: none; }
+.lab { display: flex; flex-direction: column; gap: 14px; }
+
+.lab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 13px 15px 15px;
+}
+.lab-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.lab-panel-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.lab-summary {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-2);
+  text-align: right;
+}
+
+.lab-dropzone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 15px 16px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+.lab-dropzone.is-dragover { border-color: var(--accent); background: var(--accent-dim); }
+.lab-dropzone-copy { display: flex; flex-direction: column; gap: 2px; }
+.lab-dropzone-copy strong { font-size: 14px; }
+.lab-dropzone-copy span { font-size: 12px; color: var(--text-dim); }
+
+.lab-loaded { display: flex; flex-direction: column; gap: 9px; }
+.lab-loaded[hidden] { display: none; }
+.lab-loaded-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.lab-loaded-actions { display: flex; gap: 6px; }
+.lab-loaded-name {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lab-status { margin: 0; font-size: 12px; color: var(--text-faint); }
+.lab-status.is-error { color: var(--danger); }
+.lab-empty { margin: 0; font-size: 12px; color: var(--text-faint); }
+
+/* Audition: ORIGINAL / MUTANT over one waveform - see preview-waveform.js's setAudio(), built so
+   swapping the buffer underneath a single playhead is the whole A/B. */
+.lab-player[hidden] { display: none; }
+.lab-mutant-status {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+/* Macros: four generic controls whose meaning is decided per-mutant by the generator, not by this
+   screen - see js/lab/generator.js. */
+.lab-macro-row { display: flex; flex-wrap: wrap; gap: 14px 18px; }
+.lab-macro-field { flex: 1 1 140px; min-width: 120px; }
+
+/* Inspector: a mutant is not an opaque blob. */
+.lab-inspect {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 15px;
+}
+.lab-inspect[hidden] { display: none; }
+.lab-inspect-summary {
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.lab-inspect-body { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; }
+.lab-inspect-heading {
+  margin: 6px 0 0;
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.lab-inspect-stages,
+.lab-inspect-macros { margin: 0; font-size: 12px; }
+.lab-inspect-stages dt,
+.lab-inspect-macros dt {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text);
+  margin-top: 6px;
+}
+.lab-inspect-stages dd,
+.lab-inspect-macros dd {
+  margin: 2px 0 0;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  word-break: break-word;
+}
+.lab-inspect-json-row { margin-top: 4px; }
+.lab-inspect-json {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+/* Kept mutants - persisted to localStorage, see controller.js's save()/restore(). */
+.lab-kept-list { display: flex; flex-direction: column; gap: 8px; }
+.lab-kept-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+}
+.lab-kept-seed { font-family: var(--font-mono); font-weight: 600; color: var(--accent-2); }
+.lab-kept-meta { flex: 1 1 auto; font-size: 11.5px; color: var(--text-faint); }
+.lab-kept-actions { display: flex; gap: 6px; }
+
+/* Bottom bar: NEW/MUTATE/KEEP never scroll away - same shell position and treatment as PLAY NICE's
+   mix bar and FLIP/STRETCH FX's generate bar. */
+.lab-bar {
+  flex: none;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+}
+.lab-bar[hidden] { display: none; }
+.lab-bar-inner { display: flex; align-items: center; gap: 12px; padding: 8px 16px; flex-wrap: wrap; }
+.lab-bar-controls { display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+.lab-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+}
+.lab-bar-status { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); white-space: nowrap; }
+
+.lab-seed-field { display: flex; align-items: center; gap: 6px; }
+.lab-seed-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  color: var(--text-faint);
+}
+input.lab-seed-input { flex: 0 0 auto; width: 110px; }
+
+.lab-new {
+  font: inherit;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  padding: 7px 18px;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .lab-bar-actions { margin-left: auto; padding-left: 0; border-left: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
