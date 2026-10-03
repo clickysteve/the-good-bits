@@ -4088,8 +4088,40 @@ function renderFileResult(state) {
     g.append(...els);
     return g;
   };
+  // Manual tempo for this source (drums only) - analysis proposes, the user overrides. See
+  // tempoOverrides near the top of this file; the raw detection is never touched.
+  const tempoInput = document.createElement("input");
+  tempoInput.type = "number";
+  tempoInput.min = "1";
+  tempoInput.step = "any";
+  tempoInput.className = "rechop-count-input rechop-tempo-input";
+  tempoInput.placeholder = "BPM";
+  tempoInput.title = "Tempo this break is chopped at. Type a value to override the detected tempo; the chops are re-cut by bars at the new tempo.";
+  tempoInput.setAttribute("aria-label", "Source tempo in BPM");
+  const tempoMakeBtn = (text, title) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn--ghost btn--small";
+    btn.textContent = text;
+    btn.title = title;
+    return btn;
+  };
+  const tempoHalfBtn = tempoMakeBtn("½", "Halve the tempo (fixes a detection that came out double-time).");
+  const tempoDoubleBtn = tempoMakeBtn("×2", "Double the tempo (fixes a detection that came out half-time).");
+  const tempoResetBtn = tempoMakeBtn("Detected", "Drop the manual tempo and go back to the detected one.");
+  const tempoLabel = document.createElement("span");
+  tempoLabel.className = "result-rechop-title";
+  tempoLabel.textContent = "BPM";
+  const refreshTempoControls = () => {
+    const bpm = state.editContext ? state.editContext.effectiveBpm : null;
+    tempoInput.value = bpm ? String(Math.round(bpm * 100) / 100) : "";
+    tempoResetBtn.disabled = !(state.analysisKey && tempoOverrides.has(state.analysisKey));
+  };
+  refreshTempoControls();
+
   rechopRow.append(
     rechopTitle,
+    ...(state.isDrumsMode && state.editContext && state.analysisKey ? [rechopGroup(tempoLabel, tempoInput, tempoHalfBtn, tempoDoubleBtn, tempoResetBtn)] : []),
     rechopGroup(rechopCountInput, rechopCountBtn),
     rechopGroup(rechopBarsSelect, rechopBarsBtn),
     rechopGroup(rechopAlignLabel, rechopFromLabel),
@@ -4510,6 +4542,34 @@ function renderFileResult(state) {
       current.every(([s, e], i) => Math.abs(s - last.regions[i][0]) <= tol && Math.abs(e - last.regions[i][1]) <= tol);
     if (untouched) runRechop(last.kind);
   });
+
+  /** Applies a manual tempo (null = back to detected) to this source and re-cuts the chops by bars at it. */
+  function applyTempoOverride(bpm) {
+    const key = state.analysisKey;
+    const entry = analysisCache.get(key);
+    setTempoOverride(key, bpm);
+    const effective = effectiveTempo(key, entry && entry.kt);
+    state.editContext.effectiveBpm = effective;
+    state.editContext.kt = { ...state.editContext.kt, bpm: effective };
+    state.editContext.barLocked = !!effective;
+    state.bpmText = formatBpmText(effective, tempoOverrides.has(key), !!(entry && entry.kt && entry.kt.available));
+    state.rechopBars = parseInt(rechopBarsSelect.value, 10);
+    log(`  ${state.fileName}: tempo ${tempoOverrides.has(key) ? "set to" : "reset to detected"} ${effective ? effective.toFixed(2) + " BPM" : "(none)"}.`);
+    runRechop("bars");
+  }
+  tempoInput.addEventListener("change", () => {
+    const sanitized = sanitizeSourceBpm(tempoInput.value);
+    if (sanitized == null) return refreshTempoControls();
+    applyTempoOverride(sanitized);
+  });
+  const scaleTempo = (factor) => {
+    const current = state.editContext.effectiveBpm;
+    const sanitized = current ? sanitizeSourceBpm(current * factor) : null;
+    if (sanitized != null) applyTempoOverride(sanitized);
+  };
+  tempoHalfBtn.addEventListener("click", () => scaleTempo(0.5));
+  tempoDoubleBtn.addEventListener("click", () => scaleTempo(2));
+  tempoResetBtn.addEventListener("click", () => applyTempoOverride(null));
 
   rechopCountBtn.addEventListener("click", () => runRechop("count"));
   rechopBarsBtn.addEventListener("click", () => runRechop("bars"));

@@ -829,6 +829,7 @@ input[type="range"]::-moz-range-thumb {
   padding: 3px 6px;
 }
 .result-rechop-row input.rechop-count-input { width: 52px; }
+.result-rechop-row input.rechop-tempo-input { width: 68px; }
 
 /* the row matching the slice selected on the waveform */
 .chop-row.is-selected {
