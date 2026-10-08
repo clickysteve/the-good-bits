@@ -2675,6 +2675,7 @@ input.sfx-bpm-input { flex: 0 0 auto; width: 96px; }
   background: var(--bg-raised);
 }
 .lab-dropzone.is-dragover { background-image: var(--dither); background-size: 4px 4px; }
+.lab-dropzone[hidden] { display: none; }
 .lab-dropzone-copy { display: flex; flex-direction: column; gap: 2px; }
 .lab-dropzone-copy strong { font-family: var(--font-title); font-size: 13px; font-weight: 700; line-height: 1.2; text-transform: uppercase; letter-spacing: .12em; }
 .lab-dropzone-copy span { font-size: 11px; color: var(--text-dim); }
