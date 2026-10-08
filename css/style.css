@@ -25,13 +25,13 @@
    =========================================================================== */
 
 :root {
-  /* The family palette - Feelers' paper and ink, verbatim where contrast allows. */
+  /* Collection roles (docs/DESIGN.md maps every token here to the shared role
+     names): ink and selection as in Feelers and emmm, plus Good Bits' soft fill
+     and the LCD readout pair. The collection's paper is --bg-panel below, its
+     desktop is --bg. */
   --ink: #15140f;
-  --paper: #ece8dc;
-  --panel: #f8f5ec;
-  --white: #ffffff;
   --soft: #d9d4c4;
-  --sel: #ffd43b;
+  --selection: #ffd43b;
   --lcd-bg: #15140f;
   --lcd-text: #9ef0a0;
   --shadow: 3px 3px 0 var(--ink);
@@ -71,12 +71,21 @@
   --good: #237033;
   --warn: #8a5a00;
   --danger: #c92a2a;
+  --on-signal: #ffffff;
 
-  /* Feelers' monospace for everything, FrakMC's VT323 for window titles. */
+  /* Transformation intensity, mildest to most destroyed - Feelers' line colours
+     reused as a ramp (STRETCH FX's card edges). Never text. */
+  --heat-1: #d9d4c4;
+  --heat-2: #5f5b50;
+  --heat-3: #d9480f;
+  --heat-4: #c92a2a;
+
+  /* Feelers' system monospace for everything - no web fonts, so the app looks
+     the same offline. Titles are the same face, set heavier and tracked wide. */
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
   --font-body: var(--font-mono);
   --font-display: var(--font-mono);
-  --font-pixel: "VT323", var(--font-mono);
+  --font-title: var(--font-mono);
 
   /* Canvas-drawn waveforms read these directly in JS (see themeColor() in
      app.js), so they must stay custom properties rather than literals. Ink
@@ -111,9 +120,9 @@ body {
   line-height: 1.4;
 }
 
-::selection { background: var(--ink); color: var(--panel); }
+::selection { background: var(--ink); color: var(--bg-panel); }
 
-html, .controls, .stage, .log-panel { scrollbar-color: var(--ink) var(--panel); }
+html, .controls, .stage, .log-panel { scrollbar-color: var(--ink) var(--bg-panel); }
 
 button, input, select, textarea { border-radius: 0; }
 
@@ -163,7 +172,7 @@ code {
   letter-spacing: 0.28em;
   text-transform: uppercase;
   background: var(--ink);
-  color: var(--panel);
+  color: var(--bg-panel);
   padding: 2px 5px 2px 9px;
   text-decoration: none;
   white-space: nowrap;
@@ -172,7 +181,7 @@ code {
 .brand-accent { margin-left: 0.28em; }
 
 .brand:focus-visible {
-  outline: 3px solid var(--sel);
+  outline: 3px solid var(--selection);
   outline-offset: 0;
 }
 
@@ -214,7 +223,7 @@ code {
 .mode-btn.mode-card--active,
 .mode-btn.mode-card--active:hover {
   background: var(--ink);
-  color: var(--panel);
+  color: var(--bg-panel);
 }
 
 .topbar-right { display: flex; align-items: center; gap: 8px; }
@@ -246,11 +255,11 @@ code {
 .seg-btn + .seg-btn { border-left: 1.5px solid var(--border); }
 .seg-btn:hover { background: var(--bg-raised); }
 .seg-btn.is-active,
-.seg-btn.is-active:hover { background: var(--ink); color: var(--panel); }
+.seg-btn.is-active:hover { background: var(--ink); color: var(--bg-panel); }
 
 .btn--loop.is-active {
   background: var(--ink);
-  color: var(--panel);
+  color: var(--bg-panel);
 }
 
 /* ---------- control modules (Advanced only) ---------- */
@@ -290,7 +299,7 @@ code {
   font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--panel);
+  color: var(--bg-panel);
   background: var(--ink);
   margin: 0 -14px 2px;
   padding: 3px 14px;
@@ -308,8 +317,8 @@ code {
 }
 
 .mod-h-row .mod-h { margin: 0; }
-.mod-h-row .check--inline { color: var(--panel); }
-.mod-h-row input[type="checkbox"] { border-color: var(--panel); }
+.mod-h-row .check--inline { color: var(--bg-panel); }
+.mod-h-row input[type="checkbox"] { border-color: var(--bg-panel); }
 
 .mod-body { display: flex; flex-direction: column; gap: 9px; }
 .mod-body[hidden] { display: none; }
@@ -384,7 +393,7 @@ input:focus-visible,
 button:focus-visible,
 textarea:focus-visible,
 summary:focus-visible {
-  outline: 3px solid var(--sel);
+  outline: 3px solid var(--selection);
   outline-offset: 0;
 }
 
@@ -538,7 +547,7 @@ input[type="range"]::-moz-range-thumb {
 .btn.is-playing,
 .btn.is-playing:hover {
   background: var(--good);
-  color: var(--white);
+  color: var(--on-signal);
 }
 
 /* Feelers' and emmm's blink: two hard states, no fade. */
@@ -588,7 +597,7 @@ input[type="range"]::-moz-range-thumb {
   outline: none;
 }
 .naming-pattern-editor:focus-visible,
-.naming-pattern-editor:focus { outline: 3px solid var(--sel); outline-offset: 0; }
+.naming-pattern-editor:focus { outline: 3px solid var(--selection); outline-offset: 0; }
 .naming-pattern-editor:empty::before {
   content: attr(data-placeholder);
   color: var(--text-faint);
@@ -599,7 +608,7 @@ input[type="range"]::-moz-range-thumb {
   align-items: center;
   gap: 3px;
   background: var(--ink);
-  color: var(--panel);
+  color: var(--bg-panel);
   padding: 0 2px 0 6px;
   margin: 0 1px;
   font-size: 11px;
@@ -613,14 +622,14 @@ input[type="range"]::-moz-range-thumb {
   font: inherit;
   border: none;
   background: transparent;
-  color: var(--panel);
+  color: var(--bg-panel);
   cursor: pointer;
   width: 1.2em;
   height: 1.2em;
   line-height: 1;
   padding: 0;
 }
-.naming-chip-remove:hover { color: var(--ink); background: var(--sel); }
+.naming-chip-remove:hover { color: var(--ink); background: var(--selection); }
 
 /* naming preview */
 
@@ -682,12 +691,12 @@ input[type="range"]::-moz-range-thumb {
   height: 18px;
   font-weight: 700;
   background: var(--ink);
-  color: var(--panel);
+  color: var(--bg-panel);
 }
 
 .banner:empty { display: none; }
-.banner--good::before { content: "\2713"; background: var(--good); color: var(--white); }
-.banner--info::before { content: "!"; background: var(--sel); color: var(--ink); border: 1.5px solid var(--border); }
+.banner--good::before { content: "\2713"; background: var(--good); color: var(--on-signal); }
+.banner--info::before { content: "!"; background: var(--selection); color: var(--ink); border: 1.5px solid var(--border); }
 
 /* drop zone */
 
@@ -704,7 +713,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .dropzone-copy { display: flex; flex-direction: column; gap: 2px; }
-.dropzone-copy strong { font-family: var(--font-pixel); font-size: 24px; font-weight: 400; line-height: 1; letter-spacing: .04em; text-transform: uppercase; }
+.dropzone-copy strong { font-family: var(--font-title); font-size: 15px; font-weight: 700; line-height: 1.2; letter-spacing: .12em; text-transform: uppercase; }
 .dropzone-copy span { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .08em; }
 .dropzone-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 
@@ -767,7 +776,7 @@ input[type="range"]::-moz-range-thumb {
   text-decoration: underline;
   cursor: pointer;
 }
-.btn-link:hover { background: var(--ink); color: var(--panel); }
+.btn-link:hover { background: var(--ink); color: var(--bg-panel); }
 .folder-file-row { padding: 1px 0; font-size: 12px; }
 .folder-file-row-name { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
 
@@ -890,7 +899,7 @@ input[type="range"]::-moz-range-thumb {
 /* the interactive waveform - always present on a result card, not a mode you enter */
 
 .editable-waveform { display: flex; flex-direction: column; gap: 6px; outline: none; }
-.editable-waveform:focus-visible .waveform-canvas--editable { outline: 3px solid var(--sel); }
+.editable-waveform:focus-visible .waveform-canvas--editable { outline: 3px solid var(--selection); }
 .editable-waveform-toolbar { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .editable-waveform-toolbar .btn--small { padding: 2px 7px; }
 .editable-waveform-snap { display: flex; align-items: center; gap: 2px; margin-left: 6px; }
@@ -976,7 +985,7 @@ input[type="range"]::-moz-range-thumb {
 /* the row matching the slice selected on the waveform */
 .chop-row.is-selected,
 .chop-row.is-selected:hover {
-  background: var(--sel);
+  background: var(--selection);
   box-shadow: inset 3px 0 0 var(--ink);
 }
 
@@ -1013,7 +1022,7 @@ input[type="range"]::-moz-range-thumb {
   white-space: nowrap;
 }
 .stretch-file-chip:hover { background: var(--bg-raised); }
-.stretch-file-chip.is-active { background: var(--ink); border-color: var(--ink); color: var(--panel); font-weight: 700; }
+.stretch-file-chip.is-active { background: var(--ink); border-color: var(--ink); color: var(--bg-panel); font-weight: 700; }
 .stretch-file-chip.is-unprocessed { opacity: .55; font-style: italic; }
 
 /* Time / Target - mode, source/target tempo, resolved ratio. Moved in from the old sidebar (still
@@ -1067,7 +1076,7 @@ input[type="range"]::-moz-range-thumb {
   letter-spacing: .08em;
   text-transform: uppercase;
   color: var(--text);
-  background: var(--sel);
+  background: var(--selection);
   border: 1.5px solid var(--border);
   padding: 0 5px;
   line-height: 1.5;
@@ -1098,7 +1107,7 @@ input[type="range"]::-moz-range-thumb {
 
 /* Which side currently owns audition focus (Left/Right, or whichever was last played) - additional
    to, and visually distinct from, Processed's permanent shadow above: Feelers' yellow selection. */
-.stretch-pane.is-focused { outline: 3px solid var(--sel); outline-offset: 0; }
+.stretch-pane.is-focused { outline: 3px solid var(--selection); outline-offset: 0; }
 
 .stretch-pane-head { display: flex; justify-content: space-between; gap: 10px; }
 .stretch-pane-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
@@ -1139,7 +1148,7 @@ input[type="range"]::-moz-range-thumb {
 
 /* the plain audition waveform - see js/preview-waveform.js */
 .preview-waveform { display: flex; flex-direction: column; gap: 6px; outline: none; }
-.preview-waveform:focus-visible .preview-waveform-canvas { outline: 3px solid var(--sel); }
+.preview-waveform:focus-visible .preview-waveform-canvas { outline: 3px solid var(--selection); }
 .preview-waveform-canvas { height: 64px; cursor: pointer; touch-action: none; }
 .preview-waveform-bar { display: flex; align-items: center; gap: 4px; }
 .preview-waveform-time {
@@ -1233,7 +1242,7 @@ input[type="range"]::-moz-range-thumb {
   background: var(--ink);
   border-color: var(--ink);
 }
-.stretch-character-card.is-active .stretch-character-card-check { border-color: var(--panel); }
+.stretch-character-card.is-active .stretch-character-card-check { border-color: var(--bg-panel); }
 .stretch-character-card-check.is-checked::after {
   content: "";
   position: absolute;
@@ -1258,7 +1267,7 @@ input[type="range"]::-moz-range-thumb {
   text-transform: uppercase;
   color: var(--text);
 }
-.stretch-character-card.is-active .stretch-character-card-label { color: var(--panel); }
+.stretch-character-card.is-active .stretch-character-card-label { color: var(--bg-panel); }
 .stretch-character-card-desc {
   font-size: 10.5px;
   line-height: 1.35;
@@ -1311,13 +1320,13 @@ input[type="range"]::-moz-range-thumb {
   margin: 0 -16px 4px;
   padding: 1px 16px;
   background: var(--ink);
-  color: var(--panel);
+  color: var(--bg-panel);
   font-size: 10px;
   letter-spacing: .14em;
   text-transform: uppercase;
 }
 
-/* An empty log is a dead black band across the bottom of the window, so it
+/* An empty log is a dead band across the bottom of the window, so it
    only takes up space once it has something to say. */
 .log-panel:empty { display: none; }
 
@@ -1383,7 +1392,7 @@ input[type="range"]::-moz-range-thumb {
   width: 100%;
 }
 
-.modal h3 { margin: 0 0 8px; font-family: var(--font-pixel); font-size: 24px; line-height: 1; font-weight: 400; letter-spacing: .04em; text-transform: uppercase; }
+.modal h3 { margin: 0 0 8px; font-family: var(--font-title); font-size: 14px; line-height: 1.2; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .modal p { margin: 0 0 12px; color: var(--text); font-size: 12px; }
 .modal-remember { margin: 0 0 16px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
@@ -1448,7 +1457,7 @@ input[type="range"]::-moz-range-thumb {
   background: var(--bg-panel);
 }
 
-#settings-toggle[aria-expanded="true"] { background: var(--ink); color: var(--panel); }
+#settings-toggle[aria-expanded="true"] { background: var(--ink); color: var(--bg-panel); }
 
 /* With nothing queued, the drop zone is the only thing to do, so it takes the
    room rather than sitting as a thin bar above an empty window. It stops
@@ -1479,7 +1488,7 @@ input[type="range"]::-moz-range-thumb {
 .stage:has(.folder-row) .dropzone-copy,
 .stage:has(.result-file) .dropzone-copy { align-items: flex-start; }
 .stage:has(.folder-row) .dropzone-copy strong,
-.stage:has(.result-file) .dropzone-copy strong { font-size: 20px; }
+.stage:has(.result-file) .dropzone-copy strong { font-size: 13px; }
 
 /* Chop rows lay out in columns whenever there's room. This used to be tied to
    "Advanced", but a 40-file batch is just as unscannable in any task, and the
@@ -1567,7 +1576,7 @@ input[type="range"]::-moz-range-thumb {
 .lab-panel > .lab-panel-title::after,
 .pn-method-row > .pn-panel-title::after { flex: 1 1 auto; margin-left: 8px; }
 
-/* Window titles in FrakMC's VT323. */
+/* Window titles: heavy, tracked capitals. */
 .stretch-pane-head h3,
 .stretch-character-browser-head h3,
 .pn-panel-title,
@@ -1575,10 +1584,10 @@ input[type="range"]::-moz-range-thumb {
 .sfx-panel-title,
 .lab-panel-title {
   margin: 0;
-  font-family: var(--font-pixel);
-  font-size: 19px;
-  font-weight: 400;
-  letter-spacing: .05em;
+  font-family: var(--font-title);
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: .14em;
   text-transform: uppercase;
   color: var(--text);
   white-space: nowrap;
@@ -1594,7 +1603,7 @@ input[type="range"]::-moz-range-thumb {
   color: inherit;
 }
 .pn-panel-head--toggle:hover .pn-panel-title,
-.pn-panel-head--toggle:hover .pn-panel-caret { background: var(--ink); color: var(--panel); }
+.pn-panel-head--toggle:hover .pn-panel-caret { background: var(--ink); color: var(--bg-panel); }
 .pn-panel-caret { color: var(--text); font-size: 10px; flex-shrink: 0; }
 /* The caret and the title share one paper box; the summary is pushed right by its own auto margin. */
 .pn-panel-head--toggle { gap: 0; }
@@ -1701,7 +1710,7 @@ input[type="range"]::-moz-range-thumb {
 .sfx-chip.is-active,
 .pn-chip.is-active:hover,
 .flip-chip.is-active:hover,
-.sfx-chip.is-active:hover { background: var(--ink); border-color: var(--ink); color: var(--panel); font-weight: 700; }
+.sfx-chip.is-active:hover { background: var(--ink); border-color: var(--ink); color: var(--bg-panel); font-weight: 700; }
 
 .pn-method-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
 .pn-method-select { min-width: 170px; }
@@ -1753,7 +1762,7 @@ input[type="range"]::-moz-range-thumb {
   cursor: pointer;
   padding: 0;
 }
-.pn-card-toggle:hover { background: var(--ink); color: var(--panel); }
+.pn-card-toggle:hover { background: var(--ink); color: var(--bg-panel); }
 .pn-card-toggle:disabled { opacity: .3; cursor: default; }
 
 .pn-card-id {
@@ -1780,7 +1789,7 @@ input[type="range"]::-moz-range-thumb {
   text-transform: uppercase;
   padding: 0 5px;
   background: var(--ink);
-  color: var(--panel);
+  color: var(--bg-panel);
   flex-shrink: 0;
 }
 .pn-ref-badge[hidden] { display: none; }
@@ -1792,7 +1801,7 @@ input[type="range"]::-moz-range-thumb {
   padding: 0;
   width: 16px;
   height: 16px;
-  background: var(--sel);
+  background: var(--selection);
   color: var(--ink);
   border: 1.5px solid var(--border);
   font-size: 11px;
@@ -1802,7 +1811,7 @@ input[type="range"]::-moz-range-thumb {
   cursor: help;
 }
 .pn-attention[hidden] { display: none; }
-.pn-attention:hover { background: var(--ink); color: var(--sel); }
+.pn-attention:hover { background: var(--ink); color: var(--selection); }
 
 /* Why a loop is flagged, in words, at the top of its body. */
 .pn-attention-block {
@@ -1873,9 +1882,9 @@ input[type="range"]::-moz-range-thumb {
 .pn-mon-btn:hover { background: var(--bg-raised); }
 .pn-mon-btn:disabled { opacity: .4; cursor: default; }
 .pn-solo.is-active,
-.pn-solo.is-active:hover { background: var(--good); color: var(--white); }
+.pn-solo.is-active:hover { background: var(--good); color: var(--on-signal); }
 .pn-mute.is-active,
-.pn-mute.is-active:hover { background: var(--danger); color: var(--white); }
+.pn-mute.is-active:hover { background: var(--danger); color: var(--on-signal); }
 
 /* ---- expanded body ---- */
 
@@ -1897,7 +1906,7 @@ input[type="range"]::-moz-range-thumb {
 .pn-key-select, .pn-key-mode-select { min-width: 82px; }
 .pn-atonal { font-size: 12px; }
 
-.is-overridden { border-color: var(--border); color: var(--text); background-color: var(--sel); }
+.is-overridden { border-color: var(--border); color: var(--text); background-color: var(--selection); }
 
 .pn-readouts { display: flex; flex-wrap: wrap; gap: 6px 20px; }
 .pn-readout.is-active strong { color: var(--text); }
@@ -1931,7 +1940,7 @@ input[type="range"]::-moz-range-thumb {
 .pn-filter-row[hidden] { display: none; }
 .pn-attention-filter[hidden] { display: none; }
 .pn-attention-filter.is-active,
-.pn-attention-filter.is-active:hover { background: var(--sel); color: var(--ink); }
+.pn-attention-filter.is-active:hover { background: var(--selection); color: var(--ink); }
 .pn-filter-note { font-size: 11px; color: var(--text-faint); }
 
 /* Correctness switches, deliberately off the main path. */
@@ -1948,7 +1957,7 @@ input[type="range"]::-moz-range-thumb {
 .pn-advanced > summary::-webkit-details-marker { display: none; }
 .pn-advanced > summary::before { content: "▸ "; }
 .pn-advanced[open] > summary::before { content: "▾ "; }
-.pn-advanced > summary:hover { background: var(--ink); color: var(--panel); }
+.pn-advanced > summary:hover { background: var(--ink); color: var(--bg-panel); }
 .pn-advanced > * + * { margin-top: 8px; }
 
 /* The mix transport: the app's bottom chrome while PLAY NICE is up, standing in for the
@@ -1987,7 +1996,7 @@ input[type="range"]::-moz-range-thumb {
 .pn-mixbar-play:active:not(:disabled) { transform: translate(2px, 2px); box-shadow: none; }
 .pn-mixbar-play:disabled { opacity: .4; cursor: default; box-shadow: none; }
 .pn-mixbar-loop.is-active,
-.pn-mixbar-loop.is-active:hover { background: var(--ink); border-color: var(--border); color: var(--panel); }
+.pn-mixbar-loop.is-active:hover { background: var(--ink); border-color: var(--border); color: var(--bg-panel); }
 
 .pn-mix-seg { flex-shrink: 0; }
 .pn-mix-seg .seg-btn { padding: 2px 9px; font-size: 11px; }
@@ -2011,7 +2020,7 @@ input[type="range"]::-moz-range-thumb {
   text-align: right;
 }
 .pn-mixbar-levels.is-active,
-.pn-mixbar-levels.is-active:hover { background: var(--ink); border-color: var(--border); color: var(--panel); }
+.pn-mixbar-levels.is-active:hover { background: var(--ink); border-color: var(--border); color: var(--bg-panel); }
 .pn-mixbar-count.is-working { color: var(--text); animation: gb-blink 1s steps(2) infinite; }
 
 .pn-mixbar-time,
@@ -2045,7 +2054,7 @@ input[type="range"]::-moz-range-thumb {
   text-transform: uppercase;
   padding: 0 5px;
   background: var(--ink);
-  color: var(--panel);
+  color: var(--bg-panel);
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -2125,7 +2134,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .flip-dropzone-copy { display: flex; flex-direction: column; gap: 2px; }
-.flip-dropzone-copy strong { font-family: var(--font-pixel); font-size: 20px; font-weight: 400; line-height: 1; text-transform: uppercase; letter-spacing: .04em; }
+.flip-dropzone-copy strong { font-family: var(--font-title); font-size: 13px; font-weight: 700; line-height: 1.2; text-transform: uppercase; letter-spacing: .12em; }
 .flip-dropzone-copy span { font-size: 11px; color: var(--text-dim); }
 .flip-dropzone-actions { display: flex; gap: 7px; }
 
@@ -2192,7 +2201,7 @@ select.flip-key-select { flex: 0 0 auto; width: auto; min-width: 74px; }
 .flip-advanced-summary::-webkit-details-marker { display: none; }
 .flip-advanced-summary::before { content: "▸ "; font-size: 10px; }
 .flip-advanced[open] > .flip-advanced-summary::before { content: "▾ "; }
-.flip-advanced-summary:hover { background: var(--ink); color: var(--panel); }
+.flip-advanced-summary:hover { background: var(--ink); color: var(--bg-panel); }
 .flip-advanced[open] > .flip-advanced-summary { margin-bottom: 10px; }
 .flip-advanced .field + .field { margin-top: 10px; }
 
@@ -2232,17 +2241,17 @@ select.flip-key-select { flex: 0 0 auto; width: auto; min-width: 74px; }
   padding: 3px 0;
   text-align: center;
 }
-.flip-row.is-playing .flip-row-play { background: var(--good); color: var(--white); }
+.flip-row.is-playing .flip-row-play { background: var(--good); color: var(--on-signal); }
 
 .flip-row-id {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-pixel);
-  font-size: 18px;
-  font-weight: 400;
-  letter-spacing: .05em;
+  font-family: var(--font-title);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .1em;
   text-transform: uppercase;
   color: var(--text);
 }
@@ -2288,7 +2297,7 @@ input.flip-seed-input {
   font-size: 10px;
   font-weight: 700;
   padding: 0 5px;
-  background: var(--sel);
+  background: var(--selection);
   border: 1.5px solid var(--border);
   color: var(--text);
   white-space: nowrap;
@@ -2349,7 +2358,7 @@ input.flip-seed-input {
 .sfx-generate:disabled { opacity: .4; cursor: default; box-shadow: none; }
 
 .flip-loop-btn.is-active,
-.flip-loop-btn.is-active:hover { background: var(--ink); border-color: var(--border); color: var(--panel); }
+.flip-loop-btn.is-active:hover { background: var(--ink); border-color: var(--border); color: var(--bg-panel); }
 select.flip-size-select,
 select.flip-depth-select,
 select.sfx-size-select,
@@ -2387,7 +2396,7 @@ select.sfx-depth-select { flex: 0 0 auto; width: auto; min-width: 104px; }
 }
 
 .sfx-dropzone-copy { display: flex; flex-direction: column; gap: 2px; }
-.sfx-dropzone-copy strong { font-family: var(--font-pixel); font-size: 20px; font-weight: 400; line-height: 1; text-transform: uppercase; letter-spacing: .04em; }
+.sfx-dropzone-copy strong { font-family: var(--font-title); font-size: 13px; font-weight: 700; line-height: 1.2; text-transform: uppercase; letter-spacing: .12em; }
 .sfx-dropzone-copy span { font-size: 11px; color: var(--text-dim); }
 
 .sfx-loaded { display: flex; flex-direction: column; gap: 9px; }
@@ -2412,7 +2421,7 @@ select.sfx-depth-select { flex: 0 0 auto; width: auto; min-width: 104px; }
 input.sfx-bpm-input { flex: 0 0 auto; width: 96px; }
 .sfx-tempo-note { font-size: 11px; color: var(--text-faint); margin-left: 4px; }
 .sfx-octave-chip[hidden] { display: none; }
-.sfx-octave-chip { background: var(--sel); }
+.sfx-octave-chip { background: var(--selection); }
 
 /* The break: drag to select, click to listen. */
 .sfx-source-view[hidden] { display: none; }
@@ -2463,7 +2472,7 @@ input.sfx-bpm-input { flex: 0 0 auto; width: 96px; }
   padding: 8px 10px 10px;
   background: var(--bg-panel);
   border: 2px solid var(--border);
-  border-top: 6px solid var(--soft);
+  border-top: 6px solid var(--heat-1);
   box-shadow: var(--shadow-sm);
   cursor: pointer;
   min-width: 0;
@@ -2472,18 +2481,18 @@ input.sfx-bpm-input { flex: 0 0 auto; width: 96px; }
 .sfx-card.is-playing { background: var(--bg-raised); outline: 3px solid var(--good); outline-offset: -1px; }
 /* How melted it is, as the top edge (Feelers' line colours): paper grey for a stretched snare,
    through its orange, to a full panic red for a breakdown. */
-.sfx-card[data-heat="1"] { border-top-color: var(--soft); }
-.sfx-card[data-heat="2"] { border-top-color: var(--text-faint); }
-.sfx-card[data-heat="3"] { border-top-color: #d9480f; }
-.sfx-card[data-heat="4"] { border-top-color: var(--danger); }
+.sfx-card[data-heat="1"] { border-top-color: var(--heat-1); }
+.sfx-card[data-heat="2"] { border-top-color: var(--heat-2); }
+.sfx-card[data-heat="3"] { border-top-color: var(--heat-3); }
+.sfx-card[data-heat="4"] { border-top-color: var(--heat-4); }
 
 .sfx-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .sfx-card-id {
-  font-family: var(--font-pixel);
-  font-size: 20px;
-  font-weight: 400;
-  line-height: 1;
-  letter-spacing: .04em;
+  font-family: var(--font-title);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: .08em;
   color: var(--text);
 }
 .sfx-card-type {
@@ -2494,7 +2503,7 @@ input.sfx-bpm-input { flex: 0 0 auto; width: 96px; }
   letter-spacing: .06em;
   padding: 0 5px;
   background: var(--ink);
-  color: var(--panel);
+  color: var(--bg-panel);
   white-space: nowrap;
 }
 .sfx-card-name {
@@ -2562,7 +2571,7 @@ input.sfx-bpm-input { flex: 0 0 auto; width: 96px; }
 
 .sfx-card-actions { display: flex; gap: 5px; }
 .sfx-card-actions .btn { flex: 1 1 0; }
-.sfx-card.is-playing .sfx-card-play { background: var(--good); color: var(--white); }
+.sfx-card.is-playing .sfx-card-play { background: var(--good); color: var(--on-signal); }
 
 .sfx-audition-seg { flex: 0 0 auto; }
 
@@ -2667,7 +2676,7 @@ input.sfx-bpm-input { flex: 0 0 auto; width: 96px; }
 }
 .lab-dropzone.is-dragover { background-image: var(--dither); background-size: 4px 4px; }
 .lab-dropzone-copy { display: flex; flex-direction: column; gap: 2px; }
-.lab-dropzone-copy strong { font-family: var(--font-pixel); font-size: 20px; font-weight: 400; line-height: 1; text-transform: uppercase; letter-spacing: .04em; }
+.lab-dropzone-copy strong { font-family: var(--font-title); font-size: 13px; font-weight: 700; line-height: 1.2; text-transform: uppercase; letter-spacing: .12em; }
 .lab-dropzone-copy span { font-size: 11px; color: var(--text-dim); }
 
 .lab-loaded { display: flex; flex-direction: column; gap: 9px; }
@@ -2716,7 +2725,7 @@ input.sfx-bpm-input { flex: 0 0 auto; width: 96px; }
   margin: 0 -15px;
   padding: 3px 15px;
   background: var(--ink);
-  color: var(--panel);
+  color: var(--bg-panel);
   font-family: var(--font-display);
   font-size: 11px;
   font-weight: 400;

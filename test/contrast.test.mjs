@@ -70,11 +70,11 @@ const PAIRINGS = [
   ["--log-text", "--log-bg", "run log"],
   ["--text-faint", "--log-bg", "faint text in the log"],
   ["--lcd-text", "--lcd-bg", "LCD readouts, naming preview, conform line"],
-  ["--panel", "--ink", "inverted labels: active controls, title strips"],
-  ["--text", "--sel", "selected or queued text on the yellow fill"],
+  ["--bg-panel", "--ink", "inverted labels: active controls, title strips"],
+  ["--text", "--selection", "selected or queued text on the yellow fill"],
   ["--text", "--soft", "badge text on the soft fill"],
-  ["--white", "--good", "playing / solo lamps"],
-  ["--white", "--danger", "mute lamp"],
+  ["--on-signal", "--good", "playing / solo lamps"],
+  ["--on-signal", "--danger", "mute lamp"],
 ];
 
 test("every text role clears WCAG AA (4.5:1) against its own surface", () => {
