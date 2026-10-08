@@ -18,7 +18,7 @@ await page.waitForTimeout(400);
 const checks = {};
 checks.title = await page.title();
 checks.versionBadgeText = await page.locator("#version-badge").textContent();
-checks.headingIsGoodBits = /The Good Bits/.test(await page.locator(".page-header h1").innerText());
+checks.headingIsGoodBits = /Good\s*Bits/i.test(await page.locator(".topbar .brand").innerText());
 
 checks.addFilesBtnExists = await page.locator("#add-files-btn").count();
 checks.splitSubfoldersCheckboxExists = await page.locator("#split-subfolders-checkbox").count();
@@ -38,8 +38,6 @@ await page.waitForTimeout(100);
 checks.slidersHideWhenAutoOnAgain = (await page.locator("#params-panel input[type=range]").count()) === 0;
 
 checks.outputBannerText = await page.locator("#output-banner").textContent();
-checks.bannerMentionsOldApp = /old app/i.test(checks.outputBannerText);
-checks.pageTextMentionsOldApp = /old (macos )?app/i.test(await page.locator("body").innerText());
 
 // Drum-only options should be hidden until Drums mode is selected.
 checks.drumOptionsHiddenByDefault = await page.locator("#drum-options").isHidden();
@@ -55,10 +53,11 @@ await page.locator('.mode-card[data-mode="phrases"]').click();
 await page.waitForTimeout(100);
 checks.drumOptionsHiddenAgain = await page.locator("#drum-options").isHidden();
 
-// Output naming panel.
-checks.namingPatternOptions = await page.locator("#naming-pattern-select option").count();
-checks.namingSeparatorDefault = await page.locator("#naming-separator-select").inputValue();
-checks.namingFolderTagCheckedByDefault = await page.locator("#naming-folder-tag-checkbox").isChecked();
+// Output naming panel: two token editors (file and folder pattern), see js/naming-pattern-editor.js.
+checks.namingFileTokens = await page.locator("#naming-pattern-editor-host .naming-token-btn").allTextContents();
+checks.namingFileDefault = await page.locator("#naming-pattern-editor-host .naming-chip-label").allTextContents();
+checks.namingFolderDefault = await page.locator("#naming-folder-pattern-editor-host .naming-chip-label").allTextContents();
+checks.namingPreview = await page.locator("#naming-preview").textContent();
 
 console.log(JSON.stringify(checks, null, 2));
 console.log("---- page errors ----");

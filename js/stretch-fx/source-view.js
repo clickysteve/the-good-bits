@@ -94,7 +94,7 @@ export function createSourceView({ getAudioContext, color, onSelect }) {
         if (t > audio.duration) break;
         if (t < 0) continue;
         const isBar = ((k % 4) + 4) % 4 === 0;
-        ctx.fillStyle = color(isBar ? "--wave-line" : "--border", isBar ? "rgba(236,238,241,.45)" : "#2b2f36");
+        ctx.fillStyle = color(isBar ? "--wave-line" : "--wave-grid", isBar ? "rgba(236,238,241,.45)" : "rgba(255,255,255,.12)");
         ctx.fillRect(Math.round(timeToX(t, w)), 0, 1, HEIGHT);
       }
     }
