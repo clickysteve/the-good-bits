@@ -43,8 +43,24 @@ await page.waitForTimeout(300);
 await page.locator('.mode-card[data-mode="drums"]').click();
 await page.locator("#one-shots-checkbox").check();
 await page.locator("#drum-bars-select").selectOption("2");
-await page.locator("#naming-pattern-select").selectOption("name-tag-number");
-await page.locator("#naming-separator-select").selectOption("_");
+// The file pattern is a token editor (js/naming-pattern-editor.js); {number} is always added.
+for (const token of ["{name}", "{tag}"]) {
+  await page.locator("#naming-pattern-editor-host .naming-token-btn", { hasText: token }).click();
+}
+
+// When key/tempo detection can't load (essentia comes from a CDN), every file asks whether to fall
+// back to a fixed chop length. Accept the fallback for the whole batch so the run can finish.
+let finished = false;
+const dismissFallbackDialogs = (async () => {
+  while (!finished) {
+    const confirm = page.locator(".modal .btn--primary");
+    if (await confirm.count()) {
+      await page.locator(".modal-remember input").check().catch(() => {});
+      await confirm.click().catch(() => {});
+    }
+    await page.waitForTimeout(250);
+  }
+})();
 
 // Legacy folder input needs a directory; simulate "Add Source Folder" by feeding the
 // directory containing the fixture straight into the hidden webkitdirectory input.
@@ -63,6 +79,9 @@ await download.saveAs(zipPath);
 
 await page.waitForFunction(() => document.querySelector("#log-panel")?.textContent.includes("Done."), { timeout: 5000 }).catch(() => {});
 const logText = await page.locator("#log-panel").innerText();
+
+finished = true;
+await dismissFallbackDialogs;
 
 console.log("---- log panel ----");
 console.log(logText);
