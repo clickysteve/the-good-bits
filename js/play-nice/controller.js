@@ -10,7 +10,7 @@
 // operates on the shared source queue, so it has to. PLAY NICE doesn't - it takes loose
 // loops, has its own target, its own per-item settings and its own export destination.
 // Keeping that here rather than adding another dozen module-level variables to app.js
-// means the existing CHOP/STRETCH/BOTH behaviour is untouched by this feature, which was
+// means the existing CHOP/STRETCH behaviour is untouched by this feature, which was
 // a hard requirement.
 //
 // RESPONSIVENESS: analysis and rendering both yield between files, and rendering happens

@@ -22,8 +22,8 @@ import {
   findAudibleStart,
   equalSliceRegions,
 } from "./dsp.js";
-import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups, MACROS } from "./timestretch.js";
-import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed, sliderToRatioPct, ratioPctToSlider, tidyRatioPct } from "./dsp/stretch/workspace-state.js";
+import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups } from "./timestretch.js";
+import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "./dsp/stretch/workspace-state.js";
 import { createStretchWorkspace } from "./stretch-workspace.js";
 import { resolveVariationSet, variationFileName } from "./variation-export.js";
 import { createPlayNice } from "./play-nice/controller.js";
@@ -293,8 +293,8 @@ const detectionSettings = { key: true, tempo: true };
 // unchanged and still the default) or "markers" (one continuous WAV per source file, with the
 // current canonical chop-region starts embedded as RIFF cue points - see js/slice-markers.js and
 // exportMarkerWavForFile()). Chop detection/editing itself is identical either way; this only
-// decides what Export actually writes to disk. Only meaningful while chopIntoPieces is true (CHOP/
-// BOTH) - STRETCH has no chop regions to mark.
+// decides what Export actually writes to disk. Only meaningful while chopIntoPieces is true (CHOP)
+// - STRETCH has no chop regions to mark.
 const CHOP_EXPORT_FORMATS = ["individual", "markers"];
 let chopExportFormat = "individual";
 
@@ -305,7 +305,6 @@ let chopExportFormat = "individual";
 // seed drives every deterministic-random engine (granular jitter, phase/spectral randomisation,
 // repeat jitter) - same input + settings + seed always reproduces the same output.
 const timestretchSettings = {
-  enabled: false,
   mode: "target-tempo",
   targetBpm: 120,
   ratio: 1.0,
@@ -453,6 +452,7 @@ const zcMsNumber = $("#zc-ms-value");
 const essentiaStatus = $("#essentia-status");
 const versionBadge = $("#version-badge");
 const taskSwitcherBtns = document.querySelectorAll("#task-switcher .seg-btn");
+const taskSubnavBtns = document.querySelectorAll("#task-subnav .seg-btn");
 const settingsToggleBtn = $("#settings-toggle");
 const newSessionBtn = $("#new-session-btn");
 const drumOptions = $("#drum-options");
@@ -463,29 +463,6 @@ const detectTempoCheckbox = $("#detect-tempo-checkbox");
 const namingPatternEditorHost = $("#naming-pattern-editor-host");
 const namingFolderPatternEditorHost = $("#naming-folder-pattern-editor-host");
 const namingPreviewEl = $("#naming-preview");
-const timestretchEnableCheckbox = $("#timestretch-enable-checkbox");
-const timestretchOptions = $("#timestretch-options");
-const timestretchModeSelect = $("#timestretch-mode-select");
-const timestretchTargetRow = $("#timestretch-target-row");
-const timestretchTargetBpmInput = $("#timestretch-target-bpm-input");
-const timestretchTargetBpmNumber = $("#timestretch-target-bpm-value");
-const timestretchRatioRow = $("#timestretch-ratio-row");
-const timestretchRatioInput = $("#timestretch-ratio-input");
-const timestretchRatioNumber = $("#timestretch-ratio-value");
-const timestretchCharacterSelect = $("#timestretch-character-select");
-const timestretchCharacterHint = $("#timestretch-character-hint");
-const timestretchMacro1Row = $("#timestretch-macro1-row");
-const timestretchMacro1Label = $("#timestretch-macro1-label");
-const timestretchMacro1Slider = $("#timestretch-macro1-slider");
-const timestretchMacro1Number = $("#timestretch-macro1-value");
-const timestretchMacro1Hint = $("#timestretch-macro1-hint");
-const timestretchMacro2Row = $("#timestretch-macro2-row");
-const timestretchMacro2Label = $("#timestretch-macro2-label");
-const timestretchMacro2Slider = $("#timestretch-macro2-slider");
-const timestretchMacro2Number = $("#timestretch-macro2-value");
-const timestretchMacro2Hint = $("#timestretch-macro2-hint");
-const timestretchSeedRow = $("#timestretch-seed-row");
-const timestretchSeedInput = $("#timestretch-seed-input");
 const timestretchPitchNote = $("#timestretch-pitch-note");
 const stretchWorkspaceEl = $("#stretch-workspace");
 const playNiceWorkspaceEl = $("#play-nice-workspace");
@@ -908,86 +885,22 @@ function bindSliderNumber(slider, number, onValue) {
 // Time-stretch
 // ---------------------------------------------------------------------------
 
-function updateTimestretchModeVisibility() {
-  timestretchTargetRow.hidden = timestretchSettings.mode !== "target-tempo";
-  timestretchRatioRow.hidden = timestretchSettings.mode !== "fixed-ratio";
-}
-
-// Character <select> is populated here (data-driven, from js/dsp/stretch/characters.js) rather than
-// hand-written in index.html, the same pattern the output-stage select already uses (see the
-// OUTPUT_STAGES loop below) - a couple dozen characters across five groups would be an unmaintainable
-// wall of markup otherwise, and this way the palette and the UI can never drift out of sync.
-for (const group of characterGroups()) {
-  if (!group.characters.length) continue;
-  const optgroup = document.createElement("optgroup");
-  optgroup.label = group.label;
-  for (const c of group.characters) {
-    const opt = document.createElement("option");
-    opt.value = c.key;
-    opt.textContent = c.label;
-    opt.title = c.description;
-    optgroup.appendChild(opt);
-  }
-  timestretchCharacterSelect.appendChild(optgroup);
-}
-
-const MACRO_SLOTS = [
-  { row: timestretchMacro1Row, label: timestretchMacro1Label, slider: timestretchMacro1Slider, number: timestretchMacro1Number, hint: timestretchMacro1Hint },
-  { row: timestretchMacro2Row, label: timestretchMacro2Label, slider: timestretchMacro2Slider, number: timestretchMacro2Number, hint: timestretchMacro2Hint },
-];
-
 /**
- * Shows/hides the character description, up to two macro-control sliders, and the seed field for
- * whichever character is currently selected - only the controls that character's registry entry
- * actually names (see js/dsp/stretch/characters.js) are shown, so switching characters can't leave a
- * stale, meaningless slider on screen or silently carry a setting into an engine that ignores it.
+ * The rail's pitch note is the one bit of time-stretch UI left in the settings rail - mode, target,
+ * character and its creative controls all live in the Stretch workspace (js/stretch-workspace.js).
+ * It follows the active character, since a varispeed-style character changes pitch with speed.
  */
-function updateCharacterUI() {
+function updateStretchPitchNote() {
   const character = resolveCharacter(timestretchSettings.character);
-  timestretchCharacterHint.textContent = character.description || "";
-
-  const macroKeys = character.macros || [];
-  MACRO_SLOTS.forEach((slot, i) => {
-    const key = macroKeys[i];
-    slot.row.hidden = !key;
-    if (!key) return;
-    const meta = MACROS[key];
-    slot.label.textContent = meta.label;
-    slot.hint.textContent = meta.hint || "";
-    const value = timestretchSettings.macroValues[key] ?? meta.default;
-    slot.slider.value = slot.number.value = String(value);
-    slot.slider.dataset.macroKey = key;
-    slot.number.dataset.macroKey = key;
-  });
-
-  timestretchSeedRow.hidden = !character.usesSeed;
-  timestretchSeedInput.value = String(timestretchSettings.seed ?? 1);
-
   timestretchPitchNote.textContent =
     character.preservesPitch === false
       ? "Pitch follows speed - stretching also changes pitch, like tape or varispeed."
       : "Pitch preserved. No confident tempo means it exports unstretched.";
 }
 
-for (const slot of MACRO_SLOTS) {
-  bindSliderNumber(slot.slider, slot.number, (v) => {
-    const key = slot.slider.dataset.macroKey;
-    if (!key) return;
-    timestretchSettings.macroValues[key] = v;
-    saveSettings();
-  });
-}
-
-timestretchSeedInput.addEventListener("change", () => {
-  const v = Math.max(0, Math.round(Number(timestretchSeedInput.value) || 0));
-  timestretchSettings.seed = v;
-  timestretchSeedInput.value = String(v);
-  saveSettings();
-});
-
 // ---------------------------------------------------------------------------
 // Stretch workspace: STRETCH's central Time/Target panel, Original vs. Processed audition area,
-// its character browser, and per-file selection. CHOP and BOTH are untouched - they keep rendering
+// its character browser, and per-file selection. CHOP is untouched - it keeps rendering
 // into #results-panel via renderFileResult(), exactly as before this redesign. See
 // js/stretch-workspace.js for the renderer and js/dsp/stretch/workspace-state.js for the pure
 // staleness/randomise/position-mapping helpers behind it.
@@ -1006,7 +919,6 @@ const stretchWorkspace = createStretchWorkspace({
   color: themeColor,
   onModeChange: (mode) => {
     timestretchSettings.mode = mode;
-    updateTimestretchModeVisibility(); // keeps the BOTH-only rail fields' hidden state in sync too
     scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
     saveSettings();
   },
@@ -1083,7 +995,7 @@ const playNice = createPlayNice({
 // Same deal as PLAY NICE: it owns its own source, its own settings and its own export destination
 // (see js/flip/controller.js), and borrows the shared machinery rather than duplicating it - the
 // decoder, the AudioContext, the essentia key/tempo bridge, the log panel, the theme-colour lookup
-// the canvas waveforms need, and the File System Access helpers. Nothing about CHOP/STRETCH/BOTH or
+// the canvas waveforms need, and the File System Access helpers. Nothing about CHOP/STRETCH or
 // PLAY NICE changes because this exists.
 //
 // It does NOT get runConformHeavy: FLIP's render is array copying into pre-allocated buffers (see
@@ -1147,7 +1059,7 @@ const stretchFx = createStretchFx({
 //
 // An evolutionary search over low-level DSP primitives, not a fixed effects rack - see
 // js/lab/controller.js. Same arrangement as FLIP and STRETCH FX: its own source, its own state,
-// nothing shared with the CHOP/STRETCH/BOTH batch queue. Deliberately lighter on deps than STRETCH FX
+// nothing shared with the CHOP/STRETCH batch queue. Deliberately lighter on deps than STRETCH FX
 // - no tempo/key analysis, no File System Access export folder - a render is small and offline
 // enough to run on the main thread with a yield between search attempts (see controller.js).
 // ---------------------------------------------------------------------------
@@ -1238,7 +1150,7 @@ function rebuildStretchFileOrder() {
   stretchFileOrder.length = 0;
   for (const folder of sourceFolders) {
     // Excluded source files (see js/file-inclusion.js) never appear on the STRETCH file strip and
-    // can never become the active file - same "not part of this job" treatment as CHOP/BOTH give them.
+    // can never become the active file - same "not part of this job" treatment as CHOP gives them.
     for (const fileInfo of includedFiles(folder.files)) stretchFileOrder.push({ key: analysisKey(folder, fileInfo), folder, fileInfo });
   }
   stretchActiveKey = resolveActiveKey(stretchFileOrder, stretchActiveKey, (f) => f.key);
@@ -1314,7 +1226,7 @@ function renderStretchCharacterBrowser() {
     onSelectCharacter: (key) => {
       if (timestretchSettings.character === key) return;
       timestretchSettings.character = key;
-      updateCharacterUI(); // keeps the BOTH-only rail select (still live for the BOTH task) in sync
+      updateStretchPitchNote();
       renderStretchCharacterBrowser();
       scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
       saveSettings();
@@ -1334,7 +1246,6 @@ function renderStretchCharacterBrowser() {
       timestretchSettings.macroValues = randomiseMacroValues(character, timestretchSettings.macroValues);
       if (character.usesSeed) timestretchSettings.seed = randomSeed();
       renderStretchCharacterBrowser();
-      updateCharacterUI();
       scheduleStretchPreview(STRETCH_PREVIEW_QUICK_MS);
       saveSettings();
       log(`  randomised "${character.label}"'s creative controls.`);
@@ -1483,66 +1394,14 @@ async function runStretchPreview() {
 }
 
 /**
- * STRETCH's entire purpose is stretching, so the "Stretch on export" checkbox has nothing to gate
- * there - stretch is inherently on, and its options should just be visible, not hidden behind a
- * checkbox the user has to know to tick first. BOTH keeps the checkbox meaningful (stretch really
- * is optional when you're also chopping); CHOP never shows this section at all. See
- * stretchEffectivelyEnabled(), which resolveStretchRatio() uses instead of reading
- * timestretchSettings.enabled directly, so this is a display-only override - it never mutates the
- * underlying setting BOTH relies on.
- */
-function updateStretchTaskVisibility() {
-  timestretchOptions.hidden = !(task === "stretch" || timestretchSettings.enabled);
-}
-
-/** Whether a stretch should actually run: always in STRETCH, the checkbox's own state in BOTH. */
-function stretchEffectivelyEnabled() {
-  return task === "stretch" || timestretchSettings.enabled;
-}
-
-timestretchEnableCheckbox.addEventListener("change", () => {
-  timestretchSettings.enabled = timestretchEnableCheckbox.checked;
-  updateStretchTaskVisibility();
-  saveSettings();
-});
-timestretchModeSelect.addEventListener("change", () => {
-  timestretchSettings.mode = timestretchModeSelect.value;
-  updateTimestretchModeVisibility();
-  saveSettings();
-});
-bindSliderNumber(timestretchTargetBpmInput, timestretchTargetBpmNumber, (v) => {
-  timestretchSettings.targetBpm = v;
-  saveSettings();
-});
-// Not bindSliderNumber: the slider is a log scale (see sliderToRatioPct), so it and the % box don't share units.
-timestretchRatioInput.addEventListener("input", () => {
-  const v = sliderToRatioPct(timestretchRatioInput.value);
-  timestretchRatioNumber.value = String(v);
-  timestretchSettings.ratio = v / 100;
-  saveSettings();
-});
-timestretchRatioNumber.addEventListener("change", () => {
-  const v = tidyRatioPct(timestretchRatioNumber.value);
-  timestretchRatioNumber.value = String(v);
-  timestretchRatioInput.value = String(ratioPctToSlider(v));
-  timestretchSettings.ratio = v / 100;
-  saveSettings();
-});
-timestretchCharacterSelect.addEventListener("change", () => {
-  timestretchSettings.character = timestretchCharacterSelect.value;
-  updateCharacterUI();
-  saveSettings();
-});
-
-/**
- * CHOP has no stretch stage - it's STRETCH/BOTH's whole reason for existing, and CHOP's pitch is
+ * CHOP has no stretch stage - it's STRETCH's whole reason for existing, and CHOP's pitch is
  * cutting without altering the audio's timing. So resolveStretchRatio() always forces a no-op ratio
  * under CHOP, same as before this task ever had an effects chain to gate at all. Lo-fi (see
  * lofiActive()/lofiSettingsSnapshot() below) is a separate, now CHOP-eligible decision - see the
  * "Output Stage in CHOP" comment there for why the two are no longer gated by the same flag.
  */
 function stretchEnabled() {
-  return task !== "chop";
+  return task === "stretch";
 }
 
 /** ratio to pass to stretchChannels for this file, or 1 (no-op) if stretching doesn't apply.
@@ -1550,7 +1409,6 @@ function stretchEnabled() {
  * detected - a manual correction must change this ratio exactly as if it had been detected that way. */
 function resolveStretchRatio(sourceBpm) {
   if (!stretchEnabled()) return 1;
-  if (!stretchEffectivelyEnabled()) return 1;
   if (timestretchSettings.mode === "fixed-ratio") return timestretchSettings.ratio;
   return sourceBpm ? ratioForTargetTempo(sourceBpm, timestretchSettings.targetBpm) : 1;
 }
@@ -1647,9 +1505,9 @@ keepCleanCopyCheckbox.addEventListener("change", () => {
 
 /**
  * True if any lo-fi stage eligible for the current task is switched on. CHOP now shares the Output
- * Stage character with STRETCH/BOTH (see the "Lo-fi character" -> two-section split in index.html),
+ * Stage character with STRETCH (see the "Lo-fi character" -> two-section split in index.html),
  * but not Drive/Crunch - isLofiActive()/lofiSettingsSnapshot() (js/output-scope.js) are what actually
- * enforce that cutoff, so a Drive/Crunch setting left on from a BOTH session can't silently colour a
+ * enforce that cutoff, so a Drive/Crunch setting left on from a STRETCH session can't silently colour a
  * CHOP export via a control CHOP doesn't show.
  */
 function lofiActive() {
@@ -1729,7 +1587,7 @@ function loadSettings() {
 }
 
 // ---------------------------------------------------------------------------
-// Task: CHOP / STRETCH / BOTH
+// Task: CHOP / STRETCH / ...
 //
 // This replaced a Simple/Advanced toggle, which was the wrong axis. Simple/Advanced described how
 // much of the UI you could see; it said nothing about what you came to do, it buried time-stretch
@@ -1741,7 +1599,10 @@ function loadSettings() {
 //
 //   CHOP    cut it up, no processing        chopIntoPieces = true,  effects off
 //   STRETCH process it whole, no cutting    chopIntoPieces = false, effects on
-//   BOTH    everything                      chopIntoPieces = true,  effects on
+//
+// (There used to be a BOTH task - chop and stretch in one pass. It was dropped in 2.0: nobody needs
+// both at the top level, and it was the only reason the rail carried a second copy of the Stretch
+// workspace's controls.)
 //
 // So there is no "bypass" special case any more: under CHOP there is simply no stretch stage.
 // Each settings section declares which tasks it belongs to via data-tasks, and irrelevant ones
@@ -1752,20 +1613,29 @@ const TASK_STORAGE_KEY = "good-bits-task-v1";
 // "nice" is PLAY NICE, "flip" is FLIP and "sfx" is STRETCH FX - tasks that share the shell (topbar,
 // stage, log) but none of the batch pipeline: each keeps its own queue/source, settings and export
 // destination inside js/play-nice/, js/flip/ and js/stretch-fx/ respectively, so nothing about
-// CHOP/STRETCH/BOTH changes when any of them is selected.
-const TASKS = ["chop", "stretch", "both", "nice", "flip", "sfx", "lab"];
+// CHOP/STRETCH changes when any of them is selected.
+const TASKS = ["chop", "stretch", "nice", "flip", "sfx", "lab"];
+// STRETCH FX isn't a top-level task in the switcher - it's the second of STRETCH's two tools, picked
+// from #task-subnav. So the topbar's Stretch button stands for either, and lights up for either.
+const STRETCH_TOOLS = ["stretch", "sfx"];
 let task = "chop";
+// Which Stretch tool the topbar's Stretch button returns to - whichever was used last.
+let lastStretchTool = "stretch";
 
 function applyTask(next, { persist = true } = {}) {
   task = TASKS.includes(next) ? next : "chop";
+  if (STRETCH_TOOLS.includes(task)) lastStretchTool = task;
   document.documentElement.setAttribute("data-task", task);
   chopIntoPieces = task !== "stretch";
+  const topLevel = STRETCH_TOOLS.includes(task) ? "stretch" : task;
   taskSwitcherBtns.forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.taskChoice === topLevel);
+  });
+  taskSubnavBtns.forEach((btn) => {
     btn.classList.toggle("is-active", btn.dataset.taskChoice === task);
   });
   updateDrumOptionsVisibility();
   updateNamingPreview();
-  updateStretchTaskVisibility();
   updateStretchWorkspaceVisibility();
   updatePlayNiceVisibility();
   updateFlipVisibility();
@@ -1798,6 +1668,14 @@ function loadTask() {
 }
 
 taskSwitcherBtns.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const choice = btn.dataset.taskChoice;
+    // Already somewhere under Stretch: stay put rather than bouncing out of STRETCH FX.
+    if (choice === "stretch" && STRETCH_TOOLS.includes(task)) return;
+    applyTask(choice === "stretch" ? lastStretchTool : choice);
+  });
+});
+taskSubnavBtns.forEach((btn) => {
   btn.addEventListener("click", () => applyTask(btn.dataset.taskChoice));
 });
 
@@ -1888,23 +1766,14 @@ function applySettings(saved) {
   }
   if (saved.timestretch) {
     Object.assign(timestretchSettings, saved.timestretch);
-    timestretchEnableCheckbox.checked = timestretchSettings.enabled;
-    updateStretchTaskVisibility();
-    timestretchModeSelect.value = timestretchSettings.mode;
-    timestretchTargetBpmInput.value = timestretchTargetBpmNumber.value = String(timestretchSettings.targetBpm);
-    timestretchRatioNumber.value = String(Math.round(timestretchSettings.ratio * 100));
-    timestretchRatioInput.value = String(ratioPctToSlider(timestretchSettings.ratio * 100));
-    timestretchCharacterSelect.value = timestretchSettings.character;
-    // A character id this version no longer recognises (stale save, hand-edited localStorage) leaves
-    // the <select> with nothing chosen - fall back to "clean" in both the setting and the control
-    // rather than silently rendering an empty dropdown. resolveCharacter() already falls back the
-    // same way for the DSP side, so this just keeps the UI in sync with what would actually render.
-    if (timestretchCharacterSelect.value !== timestretchSettings.character) {
+    // A character id this version no longer recognises (stale save, hand-edited localStorage) falls
+    // back to "clean" here rather than leaving the workspace with nothing selected. resolveCharacter()
+    // already falls back the same way for the DSP side, so this just keeps the UI in sync with what
+    // would actually render.
+    if (!characterGroups().some((g) => g.characters.some((c) => c.key === timestretchSettings.character))) {
       timestretchSettings.character = "clean";
-      timestretchCharacterSelect.value = "clean";
     }
-    updateTimestretchModeVisibility();
-    updateCharacterUI();
+    updateStretchPitchNote();
   }
   if (Array.isArray(saved.stretchExportVariationKeys)) {
     // Same "unknown id quietly drops rather than breaking anything" rule as the single active
@@ -2464,7 +2333,7 @@ folderDropZone.addEventListener("drop", async (ev) => {
   // Simple mode's whole pitch is "drop it and it's done" - a drop (as opposed to the Add
   // buttons) commits to running right away, using whatever's currently in the batch queue.
   // Dropping into CHOP is the "just do it" path, so it runs straight away (a full Export, not just
-  // a preview). Every other case - STRETCH/BOTH drops, and any drop that isn't the very first
+  // a preview). Every other case - STRETCH drops, and any drop that isn't the very first
   // content this batch has seen - falls back to the same safe initial-Process-only behaviour as
   // the Add buttons (see maybeAutoProcessInitialBatch).
   if (task === "chop" && !processing && sourceFolders.length > 0) {
@@ -3087,11 +2956,11 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   // registry's own display order, so the written files, the log line, and the on-screen "N queued"
   // count can never disagree about which N. Scoped to task === "stretch" because that's the only
   // place the checkboxes are reachable - a queue left over from a still-open STRETCH session must
-  // not silently start changing what CHOP/BOTH's per-chop stretch does.
+  // not silently start changing what a CHOP run does.
   const queuedVariations = task === "stretch" ? resolveVariationSet(stretchExportVariationKeys, characterGroups().flatMap((g) => g.characters)) : [];
   // STRETCH always needs a render for the workspace's Processed pane, even when it would end up
   // identical to Original (ratio 1, lo-fi off) - the whole point of the A/B view is showing that
-  // clearly rather than showing nothing. CHOP/BOTH keep the original behaviour: only render (and
+  // clearly rather than showing nothing. CHOP keeps the original behaviour: only render (and
   // only ever write) a derived copy when it would actually differ from the source.
   let stretchProcessedForWorkspace = null;
   if (queuedVariations.length > 0) {
@@ -3255,9 +3124,9 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
     // explicit Re-chop/Clear/Revert actions in renderFileResult, ever call commitHistory().
     chopHistory: previous ? previous.chopHistory : null,
     oneShotHistory: previous ? previous.oneShotHistory : null,
-    // Only ever freshly computed for the STRETCH task (see above) - a CHOP/BOTH run for this same
+    // Only ever freshly computed for the STRETCH task (see above) - a CHOP run for this same
     // file doesn't touch either of these, same fallback pattern as oneShotRegions above. Without the
-    // fallback, switching to CHOP/BOTH and hitting Process would silently wipe out whatever the
+    // fallback, switching to CHOP and hitting Process would silently wipe out whatever the
     // Stretch workspace had already shown for this file, even though nothing about the stretch
     // render actually changed.
     // `channels` (the full multi-channel decode, not just the mono downmix) is what lets a later
@@ -3346,7 +3215,7 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
   const fadeOutSamples = fadeInSamples;
   const zcWindow = barLocked ? 0 : Math.round((exportSettings.zcSearchMs / 1000) * buffer.sampleRate);
   const stretchRatio = resolveStretchRatio(effectiveBpm);
-  // The primary/secondary export model (js/output-scope.js): Output Stage (or, in STRETCH/BOTH,
+  // The primary/secondary export model (js/output-scope.js): Output Stage (or, in STRETCH,
   // time-stretch too) OFF means the clean chop already IS the primary output, so a secondary clean
   // copy is never written regardless of the "also export clean" checkbox - see wantsCleanSecondary().
   const processingActive = stretchRatio !== 1 || lofiActive();
@@ -4915,7 +4784,7 @@ function init() {
   applyRail(savedRail ? savedRail === "open" : true, { persist: false });
   applySettings(loadSettings());
   updateNamingPreview(); // outside applySettings so it also runs for first-time visitors with nothing saved yet
-  updateCharacterUI(); // same - first-time visitors need the character hint/macros shown for the default character too
+  updateStretchPitchNote(); // same - first-time visitors need the pitch note for the default character too
 
   outputBanner.textContent = FSA_SUPPORTED
     ? "Chops are saved straight into each folder's wav/ and chops/ subfolders."

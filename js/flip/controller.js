@@ -22,7 +22,7 @@
 // WHY ITS OWN STATE, like PLAY NICE and unlike STRETCH: FLIP works on one loop, not on the shared
 // source queue, and it has its own settings, its own results and its own export destination. Adding
 // a dozen more module-level variables to js/app.js to describe a workflow that shares nothing with
-// the batch pipeline would put CHOP/STRETCH/BOTH at risk for no benefit.
+// the batch pipeline would put CHOP/STRETCH at risk for no benefit.
 //
 // EIGHT RENDERED VARIATIONS, NOT EIGHT LAZY ONES. Rendering a recipe is array copying - a four-bar
 // loop takes single-digit milliseconds - so the whole batch is rendered up front and held as plain

@@ -13,13 +13,13 @@ site on GitHub Pages.
 
 ## Features
 
-- **Seven tasks, not a difficulty setting.** The app opens on one question:
+- **Five tasks, not a difficulty setting.** The app opens on one question:
   what are you here to do?
   - **Chop** cuts audio into chops and one-shots. No processing at all -
     original tempo, no colouration.
   - **Stretch** is the time-stretch tool on its own. Nothing is cut; whole
-    files go through the stretch and lo-fi chain.
-  - **Both** does the lot, with every option available at once.
+    files go through the stretch and lo-fi chain. It has a second tool,
+    **Stretch FX**, picked from a switch just under the top bar.
   - **Play nice** conforms a pile of unrelated loops to one shared tempo and
     key, so samples that had nothing to do with each other can be used
     together. See [Play nice](#play-nice) below.
@@ -28,7 +28,7 @@ site on GitHub Pages.
     whole bars down to micro-fragments, with key-aware pitch mutation. Click
     through until one of them is better than what you started with. See
     [Flip](#flip) below.
-  - **Stretch FX** takes a drum break and melts bits of it into a bank of
+  - **Stretch FX** (under Stretch) takes a drum break and melts bits of it into a bank of
     aggressively time-stretched "break malfunction" FX - the stretched snare,
     the smeared quarter, the reversed granular suck - and lets you hear each
     one snapped back into the break. See [Stretch FX](#stretch-fx) below.
@@ -1075,7 +1075,8 @@ grain, smear, metallic ringing, rhythmic throb. Drop a break, press
 
 ### The workflow
 
-1. Pick **Stretch FX** and drop a drum break on the page.
+1. Pick **Stretch**, then **Stretch FX** in the switch under the top bar,
+   and drop a drum break on the page.
 2. Check the tempo. It's the grid the 1/16, 1/8 and 1/4 sources are cut on
    and what Snap Back returns on. Jungle breaks are routinely detected at
    half time. When the snares sit on 2 and 4 at a different tempo from the
@@ -1252,7 +1253,7 @@ Then open the URL it prints (typically `http://localhost:8000`).
 
 ## Using it
 
-Pick a task first: **Chop**, **Stretch** or **Both**. Chop and Both add a
+Pick a task first: **Chop** or **Stretch**. Chop adds a
 **Source material** section to the Settings rail (Horns / Rhodes / Drums);
 Stretch never cuts anything, so that section unmounts entirely rather than
 sitting there disabled.
@@ -1263,7 +1264,7 @@ audio files from your file manager and drop them anywhere on the page. The
 first audio you add to an empty batch, by any of those methods, processes
 itself automatically - no separate "now click Process" step. In Chop,
 dropping something into an already-populated batch runs a full Export
-straight away instead; every other case (Stretch, Both, or a batch that
+straight away instead; every other case (Stretch, or a batch that
 already has results on screen) just processes so you can look before you
 commit.
 
@@ -1284,8 +1285,7 @@ Everything else is behind the **Settings** button, which opens a rail down
 the left, open by default. What's in it depends on the task: Chop gets
 source material, naming, detection and export; Stretch gets naming, export,
 time-stretch and lo-fi (with stretch itself always on, since stretching is
-the entire point of that task); Both gets source material plus all of it,
-with time-stretch back to being optional. Auto detection is on by default,
+the entire point of that task). Auto detection is on by default,
 so you can go straight to Export - untick **Auto** in the Detection section
 if you want to adjust the parameters first.
 
@@ -1300,10 +1300,10 @@ folder the first time (there's no way for a browser to write back next to a
 loose file without asking) - that choice is remembered for the rest of the
 session.
 
-Pick **Stretch** instead of **Chop**/**Both** if you don't want the file cut
+Pick **Stretch** instead of **Chop** if you don't want the file cut
 up at all - key/tempo detection, the `wav/` copy, and any time-stretch/lo-fi
 processing you've turned on still run, just nothing gets chopped. In Chop
-or Both with Drums selected, the Source material section in the rail grows
+with Drums selected, the Source material section in the rail grows
 a **chop length** in bars (converted to seconds from the detected tempo)
 and an opt-in checkbox to also pull out one-shot hits into a `one shots/`
 folder alongside the usual break-length chops.

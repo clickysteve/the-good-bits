@@ -16,8 +16,8 @@
    token block at the top, and test/contrast.test.mjs fails the build if any
    text role drops under 4.5:1 against the surface it sits on.
 
-   The app has one layout and several TASKS - chop, stretch, both, play nice,
-   flip, stretch fx, lab - set as data-task on <html>. A task decides which
+   The app has one layout and several TASKS - chop, stretch (with stretch fx
+   under it), play nice, flip, lab - set as data-task on <html>. A task decides which
    settings sections are mounted (see the TASK section near the bottom); it is
    not a separate layout or a separate stylesheet. The settings rail is
    disclosure, tracked separately as data-rail, so "which task" and "how much
@@ -150,11 +150,14 @@ code {
 
 /* ---------- top bar - Feelers' top bar: paper strip, 2px ink rule ---------- */
 
+/* Three columns, the outer two equal: the task switcher stays dead centre and the right-hand
+   buttons stay put on every task, whatever comes and goes around them. A flex row with
+   space-between used to re-centre the switcher whenever Settings was hidden. */
 .topbar {
   flex: none;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
   height: 46px;
   padding: 0 14px;
@@ -226,7 +229,20 @@ code {
   color: var(--bg-panel);
 }
 
-.topbar-right { display: flex; align-items: center; gap: 8px; }
+.topbar-right { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+
+/* STRETCH's own two tools (Time-stretch / Stretch FX), a row under the topbar - only for those
+   two tasks, so it's in the same place whichever is up. See #task-subnav in index.html. */
+.subbar {
+  flex: none;
+  display: none;
+  justify-content: center;
+  padding: 8px 16px;
+  background: var(--bg-panel);
+  border-bottom: 2px solid var(--border);
+}
+[data-task="stretch"] .subbar,
+[data-task="sfx"] .subbar { display: flex; }
 
 /* Segmented control - Feelers' seggrp: one ink frame, ink dividers, the
    chosen segment inverted. */
@@ -1399,15 +1415,14 @@ input[type="range"]::-moz-range-thumb {
 
 /* ===========================================================================
    TASK
-   Everything that differs between chop / stretch / both lives here.
+   Everything that differs between tasks lives here.
    A section declares the tasks it belongs to with data-tasks; anything that
    doesn't apply is unmounted rather than shown and ignored.
    =========================================================================== */
 
 .mod { display: none; }
 [data-task="chop"] .mod[data-tasks~="chop"],
-[data-task="stretch"] .mod[data-tasks~="stretch"],
-[data-task="both"] .mod[data-tasks~="both"] { display: flex; }
+[data-task="stretch"] .mod[data-tasks~="stretch"] { display: flex; }
 
 /* PLAY NICE brings its own everything - target, queue, drop zones, export buttons - so the shared
    settings rail, source drop zone, results panel and Process/Export bar are all unmounted while
@@ -1415,39 +1430,36 @@ input[type="range"]::-moz-range-thumb {
    rail would be empty anyway; hiding the toggle too stops it advertising a panel with nothing in
    it. See updatePlayNiceVisibility() in js/app.js. */
 [data-task="nice"] .controls,
-[data-task="nice"] #settings-toggle,
 [data-task="nice"] .stage > .dropzone,
 [data-task="nice"] #folder-list,
 [data-task="nice"] #results-panel,
 [data-task="nice"] #output-banner,
 [data-task="nice"] .actionbar,
 [data-task="flip"] .controls,
-[data-task="flip"] #settings-toggle,
 [data-task="flip"] .stage > .dropzone,
 [data-task="flip"] #folder-list,
 [data-task="flip"] #results-panel,
 [data-task="flip"] #output-banner,
 [data-task="flip"] .actionbar,
 [data-task="sfx"] .controls,
-[data-task="sfx"] #settings-toggle,
 [data-task="sfx"] .stage > .dropzone,
 [data-task="sfx"] #folder-list,
 [data-task="sfx"] #results-panel,
 [data-task="sfx"] #output-banner,
 [data-task="sfx"] .actionbar,
 [data-task="lab"] .controls,
-[data-task="lab"] #settings-toggle,
 [data-task="lab"] .stage > .dropzone,
 [data-task="lab"] #folder-list,
 [data-task="lab"] #results-panel,
 [data-task="lab"] #output-banner,
 [data-task="lab"] .actionbar { display: none; }
 
-/* Time-stretch: STRETCH's whole purpose is stretching, so its own enable checkbox (meaningful only
-   when stretching is optional, i.e. in BOTH) and the reciprocal "it's just on" note swap in/out
-   rather than both being shown at once. See updateStretchTaskVisibility() in app.js. */
-[data-task="stretch"] .both-only { display: none; }
-[data-task="both"] .stretch-only { display: none; }
+/* Settings has nothing to open on these tasks, but it keeps its slot (hidden, not removed) so
+   New session never slides sideways switching between tasks. */
+[data-task="nice"] #settings-toggle,
+[data-task="flip"] #settings-toggle,
+[data-task="sfx"] #settings-toggle,
+[data-task="lab"] #settings-toggle { visibility: hidden; }
 
 /* The rail is disclosure, independent of task. */
 [data-rail="closed"] .controls { display: none; }
@@ -2586,8 +2598,8 @@ input.sfx-bpm-input { flex: 0 0 auto; width: 96px; }
   .body { flex-direction: column; }
   .stage { overflow: visible; }
   .controls { width: auto; overflow: visible; border-right: none; border-bottom: 2px solid var(--border); }
-  .topbar { height: auto; flex-wrap: wrap; padding: 10px 12px; gap: 10px; }
-  /* Seven tasks don't fit one row on a phone: let the cells wrap, sharing their ink borders. */
+  .topbar { display: flex; height: auto; flex-wrap: wrap; justify-content: space-between; padding: 10px 12px; gap: 10px; }
+  /* Five tasks don't fit one row on a phone: let the cells wrap, sharing their ink borders. */
   .seg--task { width: 100%; flex-wrap: wrap; border: none; background: transparent; padding: 0 1.5px 1.5px 0; }
   .seg--task .seg-btn,
   .seg--task .seg-btn + .seg-btn { flex: 1 0 auto; border: 1.5px solid var(--border); margin: 0 -1.5px -1.5px 0; background: var(--bg-panel); }

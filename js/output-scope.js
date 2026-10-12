@@ -6,9 +6,9 @@
 // orchestration) so both halves of the CHOP-gets-Output-Stage feature can be unit-tested without a
 // browser or a decoded file.
 //
-// CHOP shares the Output Stage character (tape/vinyl/etc.) with STRETCH/BOTH, but deliberately not
+// CHOP shares the Output Stage character (tape/vinyl/etc.) with STRETCH, but deliberately not
 // Drive or Crunch - CHOP's settings rail only exposes the Output Stage control (see index.html), so
-// a Drive/Crunch setting left on from a BOTH session must not silently colour a CHOP export via a
+// a Drive/Crunch setting left on from a STRETCH session must not silently colour a CHOP export via a
 // control CHOP never shows. isLofiActive()/lofiSnapshotForTask() enforce that same "only Output
 // Stage" cutoff wherever the settings actually reach the audio.
 

@@ -27,7 +27,7 @@
 </script>
 
 <!-- ============================================================
-     One layout, three tasks. CHOP / STRETCH / BOTH is set as
+     One layout, several tasks. CHOP / STRETCH / ... is set as
      data-task on <html>; each settings section declares the tasks
      it belongs to via data-tasks, and anything irrelevant to the
      current task is unmounted rather than shown and ignored. The
@@ -46,11 +46,9 @@
     <!-- What you came to do. This is the primary choice; everything else follows from it. -->
     <div id="task-switcher" class="seg seg--task" role="group" aria-label="What to do">
       <button type="button" class="seg-btn" data-task-choice="chop" title="Cut audio into chops and one-shots. No processing.">Chop</button>
-      <button type="button" class="seg-btn" data-task-choice="stretch" title="Time-stretch and colour whole files. No cutting.">Stretch</button>
-      <button type="button" class="seg-btn" data-task-choice="both" title="Cut it up and process it, with every option available.">Both</button>
+      <button type="button" class="seg-btn" data-task-choice="stretch" title="Time-stretch and colour whole files, or melt a drum break into stretch FX. No cutting.">Stretch</button>
       <button type="button" class="seg-btn" data-task-choice="nice" title="Conform loops to a shared tempo and key, so unrelated samples play nice together.">Play nice</button>
       <button type="button" class="seg-btn" data-task-choice="flip" title="Give one loop back to you wrong - automatic remixes of it, eight at a time.">Flip</button>
-      <button type="button" class="seg-btn" data-task-choice="sfx" title="Melt a drum break into a bank of aggressively time-stretched break-malfunction FX.">Stretch FX</button>
       <button type="button" class="seg-btn" data-task-choice="lab" title="Grow unfamiliar processing graphs from low-level DSP primitives - NEW, MUTATE, KEEP.">Lab</button>
     </div>
 
@@ -59,6 +57,16 @@
       <button type="button" id="settings-toggle" class="seg-btn seg-btn--solo" aria-expanded="false">Settings</button>
     </div>
   </header>
+
+  <!-- STRETCH's two tools. A row of its own under the topbar, rather than buttons inside either
+       workspace, so it sits in exactly the same place whichever of the two is up - the settings
+       rail comes and goes between them. Shown only for those two tasks; see css/style.css. -->
+  <div id="task-subnav" class="subbar" role="group" aria-label="Stretch tool">
+    <div class="seg seg--sub">
+      <button type="button" class="seg-btn" data-task-choice="stretch" title="Time-stretch and colour whole files. No cutting.">Time-stretch</button>
+      <button type="button" class="seg-btn" data-task-choice="sfx" title="Melt a drum break into a bank of aggressively time-stretched break-malfunction FX.">Stretch FX</button>
+    </div>
+  </div>
 
   <div class="body">
 
@@ -69,7 +77,7 @@
 
     <!-- What/how am I processing? Lives here rather than in the topbar or above the results, both
          of which used to reflow their whole layout the moment this appeared or changed. -->
-    <section class="mod" data-tasks="chop both">
+    <section class="mod" data-tasks="chop">
       <h2 class="mod-h">Source material</h2>
       <div class="mode-picker" role="group" aria-label="Source material">
         <button type="button" class="mode-btn mode-card mode-card--active" data-mode="phrases" title="Pulls natural phrases from pauses in solo horn performances">Horns</button>
@@ -89,7 +97,7 @@
       </div>
     </section>
 
-    <section class="mod" data-tasks="chop stretch both">
+    <section class="mod" data-tasks="chop stretch">
       <h2 class="mod-h">Import</h2>
       <label class="check">
         <input id="split-subfolders-checkbox" type="checkbox" checked />
@@ -98,7 +106,7 @@
       <p class="mod-note">On by default. A folder of session subfolders becomes one source each; a folder of loose audio is unaffected either way. Set it <strong>before</strong> adding the folder.</p>
     </section>
 
-    <section class="mod" data-tasks="chop stretch both">
+    <section class="mod" data-tasks="chop stretch">
       <h2 class="mod-h">Naming</h2>
       <div class="field">
         <label id="naming-pattern-label">File name pattern</label>
@@ -113,7 +121,7 @@
       <p id="naming-preview" class="naming-preview" aria-live="polite"></p>
     </section>
 
-    <section class="mod" data-tasks="chop both" id="detection-params-panel">
+    <section class="mod" data-tasks="chop" id="detection-params-panel">
       <div class="mod-h-row">
         <h2 class="mod-h">Detection</h2>
         <label class="check check--inline">
@@ -124,7 +132,7 @@
       <div id="params-panel" class="params-panel"></div>
     </section>
 
-    <section class="mod" data-tasks="chop both">
+    <section class="mod" data-tasks="chop">
       <h2 class="mod-h">Chop output</h2>
       <div class="field">
         <label for="chop-export-format-select">Export format</label>
@@ -140,7 +148,7 @@
       </p>
     </section>
 
-    <section class="mod" data-tasks="chop stretch both">
+    <section class="mod" data-tasks="chop stretch">
       <h2 class="mod-h">Export</h2>
       <div class="field">
         <label for="bit-depth-select">Bit depth</label>
@@ -177,80 +185,19 @@
       <p id="essentia-status" class="essentia-status">Loading key &amp; tempo detection…</p>
     </section>
 
-    <section class="mod" data-tasks="stretch both">
+    <section class="mod" data-tasks="stretch">
       <h2 class="mod-h">Time-stretch</h2>
-      <p class="mod-note stretch-only">Stretching is the whole point of this task, so it's always on here.</p>
-      <label class="check both-only">
-        <input id="timestretch-enable-checkbox" type="checkbox" />
-        <span>Stretch on export</span>
-      </label>
-      <div id="timestretch-options" class="mod-body" hidden>
-        <!-- Mode/target/ratio and Character (+ its creative controls) all live in the Stretch
-             workspace itself for the STRETCH task - the whole point of that redesign was to stop
-             squeezing the app's most interesting controls into this narrow rail. BOTH keeps them
-             here unchanged, since this pass is deliberately scoped to STRETCH only (see
-             js/stretch-workspace.js, which builds an equivalent set of controls over the same
-             timestretchSettings object under different element ids). -->
-        <div class="both-only">
-          <div class="field">
-            <label for="timestretch-mode-select">Mode</label>
-            <select id="timestretch-mode-select">
-              <option value="target-tempo">Match a target tempo</option>
-              <option value="fixed-ratio">Fixed ratio</option>
-            </select>
-          </div>
-          <div class="field" id="timestretch-target-row">
-            <label for="timestretch-target-bpm-input">Target tempo</label>
-            <div class="slider-row">
-              <input id="timestretch-target-bpm-input" type="range" min="40" max="300" step="1" value="120" />
-              <input id="timestretch-target-bpm-value" type="number" class="slider-number" min="40" max="300" step="1" value="120" />
-              <span class="slider-unit">BPM</span>
-            </div>
-          </div>
-          <div class="field" id="timestretch-ratio-row" hidden>
-            <label for="timestretch-ratio-input">Stretch amount</label>
-            <div class="slider-row">
-              <input id="timestretch-ratio-input" type="range" min="0" max="1000" step="1" value="302" />
-              <input id="timestretch-ratio-value" type="number" class="slider-number slider-number-wide" min="5" max="100000" step="1" value="100" />
-              <span class="slider-unit">%</span>
-            </div>
-          </div>
-          <div class="field">
-            <label for="timestretch-character-select">Character</label>
-            <select id="timestretch-character-select"></select>
-            <p class="mod-note" id="timestretch-character-hint"></p>
-          </div>
-          <div class="field" id="timestretch-macro1-row" hidden>
-            <label for="timestretch-macro1-slider" id="timestretch-macro1-label">Amount</label>
-            <div class="slider-row">
-              <input id="timestretch-macro1-slider" type="range" min="0" max="100" step="1" value="50" />
-              <input id="timestretch-macro1-value" type="number" class="slider-number" min="0" max="100" step="1" value="50" />
-              <span class="slider-unit">%</span>
-            </div>
-            <p class="mod-note" id="timestretch-macro1-hint"></p>
-          </div>
-          <div class="field" id="timestretch-macro2-row" hidden>
-            <label for="timestretch-macro2-slider" id="timestretch-macro2-label">Amount</label>
-            <div class="slider-row">
-              <input id="timestretch-macro2-slider" type="range" min="0" max="100" step="1" value="50" />
-              <input id="timestretch-macro2-value" type="number" class="slider-number" min="0" max="100" step="1" value="50" />
-              <span class="slider-unit">%</span>
-            </div>
-            <p class="mod-note" id="timestretch-macro2-hint"></p>
-          </div>
-          <div class="field" id="timestretch-seed-row" hidden>
-            <label for="timestretch-seed-input">Variation seed</label>
-            <input id="timestretch-seed-input" type="number" min="0" max="999999" step="1" value="1" />
-          </div>
-        </div>
-      </div>
+      <!-- Mode/target/ratio and Character (+ its creative controls) all live in the Stretch
+           workspace itself - see js/stretch-workspace.js. Stretching is the whole point of this
+           task, so there's no enable switch either. -->
+      <p class="mod-note">Stretching is the whole point of this task, so it's always on here.</p>
       <p class="mod-note" id="timestretch-pitch-note">Pitch preserved. No confident tempo means it exports unstretched.</p>
     </section>
 
     <!-- Output stage is the one lo-fi stage CHOP also gets (see js/output-scope.js) - Drive/Crunch
-         stay STRETCH/BOTH-only, in their own section below, so a setting CHOP can't see can't
+         stay STRETCH-only, in their own section below, so a setting CHOP can't see can't
          silently affect a CHOP export either. -->
-    <section class="mod" data-tasks="chop stretch both">
+    <section class="mod" data-tasks="chop stretch">
       <h2 class="mod-h">Output stage</h2>
 
       <label class="check">
@@ -279,10 +226,10 @@
           </div>
         </div>
       </div>
-      <p class="mod-note">Shared with STRETCH/BOTH. Off by default - in CHOP, turning it on bakes this character into the exported chops.</p>
+      <p class="mod-note">Shared with STRETCH. Off by default - in CHOP, turning it on bakes this character into the exported chops.</p>
     </section>
 
-    <section class="mod" data-tasks="stretch both">
+    <section class="mod" data-tasks="stretch">
       <h2 class="mod-h">Drive &amp; crunch</h2>
 
       <label class="check">
@@ -329,7 +276,7 @@
       <p class="mod-note">Applied in order: output stage, then drive, then crunch. CHOP only ever gets the output stage.</p>
     </section>
 
-    <section class="mod" data-tasks="chop both">
+    <section class="mod" data-tasks="chop">
       <h2 class="mod-h">Scope</h2>
       <label class="check">
         <input id="oneshot-processing-checkbox" type="checkbox" />
@@ -367,23 +314,23 @@
         <div id="folder-list" class="folder-list"></div>
 
         <!-- STRETCH's own workspace: pick a file, browse/tweak a character, compare Original vs
-             Processed. Built and populated by js/app.js + js/stretch-workspace.js; CHOP and BOTH
-             keep using #results-panel below unchanged. Shown/hidden purely via the `hidden`
+             Processed. Built and populated by js/app.js + js/stretch-workspace.js; CHOP
+             keeps using #results-panel below unchanged. Shown/hidden purely via the `hidden`
              attribute (see updateStretchWorkspaceVisibility() in app.js) rather than a [data-task]
              CSS rule, since it also depends on whether any audio has been queued yet. -->
         <div id="stretch-workspace" class="stretch-workspace" hidden></div>
 
         <!-- PLAY NICE's own workspace: a target (typed, or detected from a reference loop),
              a pile of dropped loops, and the conformed result for each. Built by
-             js/play-nice/controller.js, which owns all of its own state - CHOP, STRETCH and
-             BOTH are entirely unaffected by it. Shown/hidden via the `hidden` attribute the
+             js/play-nice/controller.js, which owns all of its own state - CHOP and STRETCH
+             are entirely unaffected by it. Shown/hidden via the `hidden` attribute the
              same way #stretch-workspace is, from updatePlayNiceVisibility() in app.js. -->
         <div id="play-nice-workspace" class="play-nice-workspace" hidden></div>
 
         <!-- FLIP's own workspace: one loop in, a batch of automatic remixes out. Like PLAY NICE it
              brings its own source zone, settings and export controls and so replaces the stage's
              normal contents rather than sitting alongside them. Built by js/flip/controller.js,
-             which owns all of its own state; CHOP, STRETCH, BOTH and PLAY NICE are unaffected by
+             which owns all of its own state; CHOP, STRETCH and PLAY NICE are unaffected by
              it. Shown/hidden from updateFlipVisibility() in app.js. -->
         <div id="flip-workspace" class="flip-workspace" hidden></div>
 
