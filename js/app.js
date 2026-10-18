@@ -34,7 +34,7 @@ import { createLab } from "./lab/controller.js";
 import { renderConform } from "./play-nice/render.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
 import { resolveNamePattern, resolveFolderName } from "./naming-tokens.js";
-import { OUTPUT_STAGES, DRIVE_TYPES, applyLofiChain as applyLofiChainPure, deriveRegionSeed } from "./outputstage.js";
+import { OUTPUT_STAGES, DRIVE_TYPES, GOOD_BITS_ENGINES, applyLofiChain as applyLofiChainPure, deriveRegionSeed } from "./outputstage.js";
 import { isLofiActive, lofiSnapshotForTask, wantsCleanSecondary } from "./output-scope.js";
 import { encodeWav, parseWav, parseAiff } from "./audio-codec.js";
 import { regionStartsToCueFrames, checkM8MarkerLimit } from "./slice-markers.js";
@@ -1435,6 +1435,23 @@ for (const d of DRIVE_TYPES) {
   driveTypeSelect.appendChild(opt);
 }
 driveTypeSelect.value = driveSettings.type;
+
+// Slider ranges come from the engines' own parameter descriptions (Slop Factory Core), so the
+// controls can never disagree with what the DSP accepts.
+for (const [engineId, paramId, ...inputs] of [
+  ["goodbits.output-stage", "mixPct", outputstageMixSlider, outputstageMixNumber],
+  ["goodbits.output-stage", "intensityPct", outputstageIntensitySlider, outputstageIntensityNumber],
+  ["goodbits.drive", "amountPct", driveAmountSlider, driveAmountNumber],
+  ["goodbits.crunch", "bits", crunchBitsSlider, crunchBitsNumber],
+  ["goodbits.crunch", "rateDivide", crunchRateSlider, crunchRateNumber],
+]) {
+  const def = GOOD_BITS_ENGINES.get(engineId).params.find((p) => p.id === paramId);
+  for (const input of inputs) {
+    input.min = String(def.min);
+    input.max = String(def.max);
+    input.step = String(def.step ?? 1);
+  }
+}
 
 // Lo-fi chain settings also feed the Stretch workspace's Processed preview (it's the whole chain,
 // not just the stretch stage - see currentStretchSignature()), so every handler here schedules an

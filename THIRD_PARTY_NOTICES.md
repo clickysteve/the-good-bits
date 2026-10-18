@@ -5,6 +5,12 @@ original work, licensed under MIT - see `LICENSE`. It is a from-scratch
 rewrite: no code was carried over from any earlier prototype, so nothing in
 this repo has any provenance question tied to prior work.
 
+One file is vendored from the author's own **Slop Factory Core**
+(<https://github.com/clickysteve/slopfactory-core>, MIT, same author):
+`js/vendor/slopfactory-core/engines.js`, a pinned build of Core's output engines (the
+output stage, drive and crunch DSP that originated in this repository). Its commit and
+SHA-256 are recorded in `js/vendor/slopfactory-core/vendor.json`.
+
 Two third-party libraries are loaded at **runtime, from a CDN**, as declared
 in `index.html`. Neither is vendored into this repository - nothing of theirs
 is committed here, only a URL pointing at their own hosting.
