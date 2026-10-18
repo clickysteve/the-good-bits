@@ -1545,6 +1545,31 @@ values are "correct" in some absolute sense - they're reasonable starting
 points. Turn them up or down and reprocess; nothing is destructive to your
 original files.
 
+## Output stage, drive and crunch: Slop Factory Core
+
+The lo-fi stages (Output stage, Drive, Crunch) are the first **output engines** of
+[Slop Factory Core](https://github.com/clickysteve/slopfactory-core), the shared audio
+foundation of the Slop Factory instruments (The Breakery, DOWNBEAT, emmm, ANVIL). The same
+code now colours exports here and plays live in those instruments, so a Cassette at 60 %
+means the same thing everywhere.
+
+Nothing about The Good Bits changed: the controls, their ranges and defaults, the fixed order
+(output stage, then drive, then crunch), CHOP getting only the output stage, per-region seeds
+and your saved settings all work as before, and the audio is sample-identical:
+`test/outputstage-core.test.mjs` checks every mode, shape and the full chain against hashes
+recorded from the last standalone version of `js/outputstage.js`. That file is now a thin layer
+keeping The Good Bits' own API over Core.
+
+The Good Bits has no build step and no npm dependencies, so Core is **vendored as one pinned
+file**: `js/vendor/slopfactory-core/engines.js` is Core's `dist/engines.standalone.js` at the
+commit recorded in `js/vendor/slopfactory-core/vendor.json` (with its SHA-256, checked by
+`test/vendor-core.test.mjs`). To update it, pick a Core commit on its `main` branch and run:
+
+```
+node scripts/vendor-core.mjs <full commit SHA>
+node --test test/*.test.mjs
+```
+
 ## Licensing note on essentia.js
 
 Key and tempo detection uses [essentia.js](https://github.com/MTG/essentia.js),
@@ -1583,6 +1608,8 @@ node test/dsp.test.mjs
 node test/io-fs.test.mjs
 node test/timestretch.test.mjs
 node test/outputstage.test.mjs
+node test/outputstage-core.test.mjs
+node test/vendor-core.test.mjs
 node test/contrast.test.mjs
 node test/pitch-shift.test.mjs
 node test/play-nice-conform.test.mjs
@@ -1605,6 +1632,7 @@ npx http-server -c-1 . -p 8877 &
 node test/run-smoke.mjs
 node test/run-ui-check.mjs
 node test/run-e2e-check.mjs   # needs a fixture WAV - see the file's header comment
+node test/run-output-engines-check.mjs   # serves the repo itself: the Core engines in a real browser
 ```
 
 ## Upgrading to v0.9 Beta

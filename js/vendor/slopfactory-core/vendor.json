@@ -1,0 +1,11 @@
+{
+  "package": "@slopfactory/core",
+  "version": "0.4.0",
+  "source": "https://github.com/clickysteve/slopfactory-core",
+  "commit": "3cda1c2694d124747efc81343e46a752bea82be8",
+  "from": "dist/engines.standalone.js",
+  "files": {
+    "engines.js": "46923c190789e4767dbfac42f2b9dbffcf1457ff82b7bcbe93ecd03750848f8d"
+  },
+  "licence": "MIT"
+}
