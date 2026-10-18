@@ -876,7 +876,8 @@ var TONE_ENGINE = {
 		step: 100,
 		default: 8e3,
 		unit: "Hz",
-		neutral: 2e4
+		neutral: 2e4,
+		scale: "log"
 	}],
 	createKernel: (sr, p) => toneKernel(sr, { hz: Number(p.hz) })
 };
@@ -924,6 +925,7 @@ function checkParam(p) {
 	const errs = [];
 	if ((p.type === "continuous" || p.type === "integer") && !(p.min < p.max)) errs.push(`parameter "${p.id}": min must be below max`);
 	if (p.type === "enum" && !p.options.length) errs.push(`parameter "${p.id}": no options`);
+	if (p.type === "continuous" && p.scale === "log" && !(p.min > 0)) errs.push(`parameter "${p.id}": a log scale needs min > 0`);
 	if (repairParam(p, p.default) !== p.default) errs.push(`parameter "${p.id}": default out of range`);
 	return errs;
 }
